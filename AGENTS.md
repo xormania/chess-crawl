@@ -55,7 +55,7 @@ Before finishing, run:
 git status --short
 ```
 
-Local commits are allowed when the work is complete and tested.
+Local commits are allowed when the work is complete and tested, or when the change is documentation-only and no tests are required.
 
 Use concise, project-focused commit messages:
 
@@ -110,25 +110,41 @@ Keep implementation aligned with these invariants:
 
 ## Testing
 
-Run the fastest relevant tests before committing.
+Use `uv` for Python commands unless the active shell is already known to be inside the project virtualenv.
 
-Default validation:
+Preferred validation commands:
 
 ```bash
-python -m pytest
+uv run python -m pytest -q
+uv run ruff check .
+uv run mypy .
+```
+
+Run validation appropriate to the files changed.
+
+For code, schema, packaging, CLI behavior, or test changes, run the fastest relevant tests.
+
+Default code validation:
+
+```bash
+uv run python -m pytest -q
 ```
 
 When CLI code changes, also check CLI help using the implemented entrypoint, for example:
 
 ```bash
-python -m chess_crawl --help
+uv run python -m chess_crawl --help
 ```
 
 or:
 
 ```bash
-python -m chess_crawl.cli --help
+uv run python -m chess_crawl.cli --help
 ```
+
+For documentation-only changes, tests are not required unless the documentation change modifies executable examples, command references, packaging instructions, or behavior claims that should be verified.
+
+If tests are skipped because the change is documentation-only, say so explicitly in the handoff or final report.
 
 Do not add default tests that require internet access.
 
@@ -190,12 +206,23 @@ Coordination notes must not include agent attribution.
 
 ## Finish Checklist
 
-Before finishing a task:
+Before finishing a task, always run:
 
 ```bash
 git status --short
-python -m pytest
 ```
+
+Then run validation appropriate to the change.
+
+For code changes, run:
+
+```bash
+uv run python -m pytest -q
+```
+
+For CLI code changes, also run the relevant CLI help command.
+
+For documentation-only changes, tests may be skipped. Record that no tests were run because only documentation changed.
 
 If tests cannot run, record why.
 
