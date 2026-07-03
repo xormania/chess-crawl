@@ -2,73 +2,22 @@ from __future__ import annotations
 
 import csv
 import json
+from contextlib import closing
 from pathlib import Path
 
+from conftest import seed_game
 from chess_crawl import cli
 from chess_crawl.export.writers import export_games_jsonl, export_graph_csv, export_users_jsonl
 from chess_crawl.jobs.discovery import OpponentEdge, record_discovery_edges
 from chess_crawl.reports.queries import games_by_month, opponent_report, summary_report, user_game_summary
 from chess_crawl.storage.db import connect
-from chess_crawl.storage.migrations import initialize, initialize_database
-from chess_crawl.storage.repository import (
-    get_or_create_time_control,
-    get_or_create_variant,
-    upsert_game,
-    upsert_game_participant,
-    upsert_provider_user,
-)
+from chess_crawl.storage.migrations import initialize_database
 
 
-def _seed_game(
-    conn,
-    *,
-    provider: str,
-    game_key: str,
-    white: str,
-    black: str,
-    outcome: str | None,
-    ended_at: int = 1704067200,
-) -> tuple[int, int, int]:
-    white_id = upsert_provider_user(conn, provider=provider, username=white)
-    black_id = upsert_provider_user(conn, provider=provider, username=black)
-    variant_id = get_or_create_variant(
-        conn,
-        provider=provider,
-        provider_native_name="standard",
-        canonical_name="standard",
-    )
-    time_control_id = get_or_create_time_control(
-        conn,
-        kind="clock",
-        initial_seconds=300,
-        increment_seconds=0,
-        days=None,
-        time_class="blitz",
-        raw_label="300",
-    )
-    game_id = upsert_game(
-        conn,
-        provider=provider,
-        provider_game_id=game_key,
-        canonical_url=f"https://example.test/{provider}/{game_key}",
-        content_hash=f"sha256:{provider}:{game_key}",
-        variant_id=variant_id,
-        time_control_id=time_control_id,
-        rated=True,
-        outcome=outcome,
-        ended_at=ended_at,
-    )
-    upsert_game_participant(conn, game_id=game_id, color="white", provider_user_id=white_id, username_normalized=white.lower())
-    upsert_game_participant(conn, game_id=game_id, color="black", provider_user_id=black_id, username_normalized=black.lower())
-    conn.commit()
-    return game_id, white_id, black_id
-
-
-def test_reports_are_null_outcome_aware_and_provider_scoped() -> None:
-    conn = connect(":memory:")
-    initialize(conn)
-    _seed_game(conn, provider="chess.com", game_key="cc-1", white="SameName", black="Opponent", outcome=None)
-    _seed_game(conn, provider="lichess", game_key="li-1", white="SameName", black="Opponent", outcome="white_win")
+def test_reports_are_null_outcome_aware_and_provider_scoped(initialized_conn) -> None:
+    conn = initialized_conn
+    seed_game(conn, provider="chess.com", game_key="cc-1", white="SameName", black="Opponent", outcome=None)
+    seed_game(conn, provider="lichess", game_key="li-1", white="SameName", black="Opponent", outcome="white_win")
 
     chess_user = user_game_summary(conn, "chess.com", "SameName")
     lichess_user = user_game_summary(conn, "lichess", "SameName")
@@ -92,10 +41,9 @@ def test_reports_are_null_outcome_aware_and_provider_scoped() -> None:
     assert [(row["month"], row["games"], row["unfinished"]) for row in months] == [("2024-01", 1, 1)]
 
 
-def test_exports_preserve_provider_and_omit_raw_payloads(tmp_path: Path) -> None:
-    conn = connect(":memory:")
-    initialize(conn)
-    game_id, same_id, opponent_id = _seed_game(
+def test_exports_preserve_provider_and_omit_raw_payloads(tmp_path: Path, initialized_conn) -> None:
+    conn = initialized_conn
+    game_id, same_id, opponent_id = seed_game(
         conn,
         provider="chess.com",
         game_key="cc-1",
@@ -103,7 +51,7 @@ def test_exports_preserve_provider_and_omit_raw_payloads(tmp_path: Path) -> None
         black="Opponent",
         outcome="white_win",
     )
-    _seed_game(conn, provider="lichess", game_key="li-1", white="SameName", black="Opponent", outcome="black_win")
+    seed_game(conn, provider="lichess", game_key="li-1", white="SameName", black="Opponent", outcome="black_win")
     record_discovery_edges(
         conn,
         crawl_run_id=None,
@@ -143,8 +91,8 @@ def test_exports_preserve_provider_and_omit_raw_payloads(tmp_path: Path) -> None
 def test_cli_smoke_for_jobs_reports_and_exports(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "archive.sqlite"
     initialize_database(db_path)
-    with connect(db_path) as conn:
-        game_id, same_id, opponent_id = _seed_game(
+    with closing(connect(db_path)) as conn:
+        game_id, same_id, opponent_id = seed_game(
             conn,
             provider="chess.com",
             game_key="cc-1",
@@ -180,5 +128,6 @@ def test_cli_smoke_for_jobs_reports_and_exports(tmp_path: Path, capsys) -> None:
     assert "samename" in users_path.read_text()
     assert "from_username" in graph_path.read_text()
 
-    summary = summary_report(connect(db_path))
+    with closing(connect(db_path)) as conn:
+        summary = summary_report(conn)
     assert summary["raw_payloads"] == 0

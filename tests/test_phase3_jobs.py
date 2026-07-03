@@ -3,7 +3,11 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Mapping
 
+import pytest
+
+from conftest import seed_game
 from chess_crawl.ingest import IngestResult
+import chess_crawl.jobs.runner as runner_module
 from chess_crawl.jobs.discovery import (
     CrawlBounds,
     create_opponent_crawl,
@@ -12,70 +16,11 @@ from chess_crawl.jobs.discovery import (
 )
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.jobs import store
-from chess_crawl.storage.db import connect
-from chess_crawl.storage.migrations import initialize
-from chess_crawl.storage.repository import (
-    get_or_create_time_control,
-    get_or_create_variant,
-    upsert_game,
-    upsert_game_participant,
-    upsert_provider_user,
-)
+from chess_crawl.storage.repository import upsert_provider_user
 
 
-def _conn() -> sqlite3.Connection:
-    conn = connect(":memory:")
-    initialize(conn)
-    return conn
-
-
-def _seed_game(
-    conn: sqlite3.Connection,
-    *,
-    provider: str,
-    game_key: str,
-    white: str,
-    black: str,
-    outcome: str | None = "white_win",
-    ended_at: int = 1704067200,
-) -> int:
-    white_id = upsert_provider_user(conn, provider=provider, username=white)
-    black_id = upsert_provider_user(conn, provider=provider, username=black)
-    variant_id = get_or_create_variant(
-        conn,
-        provider=provider,
-        provider_native_name="standard",
-        canonical_name="standard",
-    )
-    time_control_id = get_or_create_time_control(
-        conn,
-        kind="clock",
-        initial_seconds=300,
-        increment_seconds=0,
-        days=None,
-        time_class="blitz",
-        raw_label="300",
-    )
-    game_id = upsert_game(
-        conn,
-        provider=provider,
-        provider_game_id=game_key,
-        canonical_url=f"https://example.test/{provider}/{game_key}",
-        content_hash=f"sha256:{provider}:{game_key}",
-        variant_id=variant_id,
-        time_control_id=time_control_id,
-        rated=True,
-        outcome=outcome,
-        ended_at=ended_at,
-    )
-    upsert_game_participant(conn, game_id=game_id, color="white", provider_user_id=white_id, username_normalized=white.lower())
-    upsert_game_participant(conn, game_id=game_id, color="black", provider_user_id=black_id, username_normalized=black.lower())
-    conn.commit()
-    return game_id
-
-
-def test_job_enqueue_dedup_and_terminal_reenqueue() -> None:
-    conn = _conn()
+def test_job_enqueue_dedup_and_terminal_reenqueue(initialized_conn: sqlite3.Connection) -> None:
+    conn = initialized_conn
     first = store.enqueue_job(conn, provider="chess.com", kind="fetch_user_profile", target="SameName")
     duplicate = store.enqueue_job(conn, provider="chess.com", kind="fetch_user_profile", target="samename")
 
@@ -90,8 +35,8 @@ def test_job_enqueue_dedup_and_terminal_reenqueue() -> None:
     assert after_done.job_id != first.job_id
 
 
-def test_job_state_transitions_and_stale_resume() -> None:
-    conn = _conn()
+def test_job_state_transitions_and_stale_resume(initialized_conn: sqlite3.Connection) -> None:
+    conn = initialized_conn
     job_id = store.enqueue_job(conn, provider="lichess", kind="fetch_user_profile", target="SameName").job_id
     claimed = store.claim_next_job(conn)
 
@@ -115,8 +60,8 @@ def test_job_state_transitions_and_stale_resume() -> None:
     assert store.get_job(conn, claimed.id).state == "pending"
 
 
-def test_discovery_edge_insertion_is_idempotent() -> None:
-    conn = _conn()
+def test_discovery_edge_insertion_is_idempotent(initialized_conn: sqlite3.Connection) -> None:
+    conn = initialized_conn
     run_id, _ = create_opponent_crawl(
         conn,
         provider="chess.com",
@@ -125,7 +70,7 @@ def test_discovery_edge_insertion_is_idempotent() -> None:
         until=1704153600,
         bounds=CrawlBounds(max_depth=1, max_users=10, max_games=10, max_jobs=10),
     )
-    _seed_game(conn, provider="chess.com", game_key="a-b", white="A", black="B")
+    seed_game(conn, provider="chess.com", game_key="a-b", white="A", black="B")
     from_user = upsert_provider_user(conn, provider="chess.com", username="A")
     edges = opponents_of_user(conn, provider="chess.com", user_id=from_user)
 
@@ -137,8 +82,8 @@ def test_discovery_edge_insertion_is_idempotent() -> None:
     assert row["depth"] == 1
 
 
-def test_bounded_fake_graph_crawl_depth_and_duplicate_dedupe() -> None:
-    conn = _conn()
+def test_bounded_fake_graph_crawl_depth_and_duplicate_dedupe(initialized_conn: sqlite3.Connection) -> None:
+    conn = initialized_conn
     graph = {"a": ["b", "c"], "b": [], "c": ["d"], "d": []}
     calls: list[str] = []
 
@@ -155,13 +100,13 @@ def test_bounded_fake_graph_crawl_depth_and_duplicate_dedupe() -> None:
             if remaining is not None and index >= remaining:
                 break
             ids.append(
-                _seed_game(
+                seed_game(
                     inner,
                     provider=provider,
                     game_key=f"{username.lower()}-{opponent}",
                     white=username,
                     black=opponent,
-                )
+                )[0]
             )
         return IngestResult(provider, "user_games_stream", 200, None, tuple(ids), f"fixture {len(ids)}")
 
@@ -198,8 +143,12 @@ def test_bounded_fake_graph_crawl_depth_and_duplicate_dedupe() -> None:
 
 
 def test_crawl_enforces_max_users_max_jobs_and_max_games() -> None:
-    def run_with_caps(bounds: CrawlBounds) -> sqlite3.Connection:
-        conn = _conn()
+    def run_with_caps(bounds: CrawlBounds) -> dict[str, int]:
+        from chess_crawl.storage.db import connect
+        from chess_crawl.storage.migrations import initialize
+
+        conn = connect(":memory:")
+        initialize(conn)
         graph = {"a": ["b", "c"], "b": ["d"], "c": ["e"]}
 
         def fake_fetcher(
@@ -214,13 +163,13 @@ def test_crawl_enforces_max_users_max_jobs_and_max_games() -> None:
                 if remaining is not None and index >= remaining:
                     break
                 ids.append(
-                    _seed_game(
+                    seed_game(
                         inner,
                         provider=provider,
                         game_key=f"{username.lower()}-{opponent}",
                         white=username,
                         black=opponent,
-                    )
+                    )[0]
                 )
             return IngestResult(provider, "user_games_stream", 200, None, tuple(ids), "fixture")
 
@@ -232,15 +181,95 @@ def test_crawl_enforces_max_users_max_jobs_and_max_games() -> None:
             until=1704153600,
             bounds=bounds,
         )
-        JobRunner(conn, game_fetcher=fake_fetcher).run(crawl_run_id=run_id)
-        return conn
+        try:
+            JobRunner(conn, game_fetcher=fake_fetcher).run(crawl_run_id=run_id)
+            return {
+                "crawl_users": store.crawl_user_count(conn, 1),
+                "total_jobs": store.total_jobs_for_run(conn, 1),
+                "games": int(conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]),
+                "edges": int(conn.execute("SELECT COUNT(*) FROM discovery_edges").fetchone()[0]),
+            }
+        finally:
+            conn.close()
 
     user_capped = run_with_caps(CrawlBounds(max_depth=2, max_users=2, max_games=10, max_jobs=20))
-    assert store.crawl_user_count(user_capped, 1) == 2
+    assert user_capped["crawl_users"] == 2
 
     job_capped = run_with_caps(CrawlBounds(max_depth=2, max_users=10, max_games=10, max_jobs=1))
-    assert store.total_jobs_for_run(job_capped, 1) == 1
+    assert job_capped["total_jobs"] == 1
 
     game_capped = run_with_caps(CrawlBounds(max_depth=2, max_users=10, max_games=1, max_jobs=20))
-    assert game_capped.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
-    assert game_capped.execute("SELECT COUNT(*) FROM discovery_edges").fetchone()[0] == 1
+    assert game_capped["games"] == 1
+    assert game_capped["edges"] == 1
+
+
+def test_runner_fetch_user_games_chesscom_advances_month_cursor(
+    initialized_conn: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = initialized_conn
+    calls: list[tuple[str, int, int]] = []
+
+    def fake_month(conn, username, year, month, **kwargs):
+        calls.append((username, year, month))
+        return IngestResult("chess.com", "monthly_archive", 200, 10 + month, (month,), "ok")
+
+    monkeypatch.setattr(runner_module, "fetch_chesscom_month", fake_month)
+    job_id = store.enqueue_job(
+        conn,
+        provider="chess.com",
+        kind="fetch_user_games",
+        target="SameName",
+        params={"since": 1704067200, "until": 1709251200, "max_games": 100},
+    ).job_id
+
+    result = JobRunner(conn).run(max_jobs=1)
+    job = store.get_job(conn, job_id)
+
+    assert result.done == 1
+    assert calls == [("SameName", 2024, 1), ("SameName", 2024, 2)]
+    assert job is not None
+    assert store.load_params(job.params_json)["cursor_index"] == 2
+
+
+def test_runner_fetch_game_by_id_uses_lichess_service(
+    initialized_conn: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = initialized_conn
+    calls: list[str] = []
+
+    def fake_game(conn, game_id, **kwargs):
+        calls.append(game_id)
+        return IngestResult("lichess", "game", 200, 7, (70,), "game ok")
+
+    monkeypatch.setattr(runner_module, "fetch_lichess_game", fake_game)
+    store.enqueue_job(conn, provider="lichess", kind="fetch_game_by_id", target="abc123")
+
+    result = JobRunner(conn).run(max_jobs=1)
+
+    assert result.done == 1
+    assert calls == ["abc123"]
+
+
+def test_runner_records_unexpected_handler_errors(
+    initialized_conn: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = initialized_conn
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("handler exploded")
+
+    monkeypatch.setattr(runner_module, "fetch_user_profile", boom)
+    job_id = store.enqueue_job(conn, provider="lichess", kind="fetch_user_profile", target="SameName").job_id
+
+    result = JobRunner(conn).run(max_jobs=1)
+    job = store.get_job(conn, job_id)
+
+    assert result.errors == 1
+    assert job is not None
+    assert job.state == "error"
+    row = conn.execute("SELECT error_kind, message FROM errors").fetchone()
+    assert row["error_kind"] == "other"
+    assert row["message"] == "handler exploded"

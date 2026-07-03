@@ -16,18 +16,10 @@ from chess_crawl.ingest import (
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.providers.chesscom import endpoints as chesscom_endpoints
 from chess_crawl.providers.lichess import endpoints as lichess_endpoints
-from chess_crawl.storage.db import connect
-from chess_crawl.storage.migrations import initialize
 
 
 def _fixture(fixtures_dir: Path, relative: str) -> bytes:
     return (fixtures_dir / relative).read_bytes()
-
-
-def _conn():
-    conn = connect(":memory:")
-    initialize(conn)
-    return conn
 
 
 def _config() -> Config:
@@ -56,8 +48,8 @@ def test_lichess_endpoint_construction() -> None:
     assert lichess_endpoints.game("abc123") == "https://lichess.org/api/game/abc123"
 
 
-def test_chesscom_200_stores_raw_before_user_normalization(fixtures_dir: Path) -> None:
-    conn = _conn()
+def test_chesscom_200_stores_raw_before_user_normalization(fixtures_dir: Path, initialized_conn) -> None:
+    conn = initialized_conn
     body = _fixture(fixtures_dir, "chesscom/player.json")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -82,8 +74,8 @@ def test_chesscom_200_stores_raw_before_user_normalization(fixtures_dir: Path) -
     assert conn.execute("SELECT raw_payload_id FROM fetch_logs WHERE status_code = 200").fetchone()[0] == result.raw_payload_id
 
 
-def test_raw_payload_exists_before_normalizer_runs() -> None:
-    conn = _conn()
+def test_raw_payload_exists_before_normalizer_runs(initialized_conn) -> None:
+    conn = initialized_conn
     seen: list[int] = []
     record = RawRecord(
         provider="chess.com",
@@ -106,8 +98,8 @@ def test_raw_payload_exists_before_normalizer_runs() -> None:
     assert seen == [1]
 
 
-def test_chesscom_304_uses_conditional_headers_without_new_raw(fixtures_dir: Path) -> None:
-    conn = _conn()
+def test_chesscom_304_uses_conditional_headers_without_new_raw(fixtures_dir: Path, initialized_conn) -> None:
+    conn = initialized_conn
     body = _fixture(fixtures_dir, "chesscom/player.json")
 
     first = fetch_user_profile(
@@ -143,8 +135,8 @@ def test_chesscom_304_uses_conditional_headers_without_new_raw(fixtures_dir: Pat
     assert conn.execute("SELECT COUNT(*) FROM fetch_logs WHERE status_code = 304 AND from_cache = 1").fetchone()[0] == 1
 
 
-def test_404_and_410_are_logged_without_raw_payload() -> None:
-    conn = _conn()
+def test_404_and_410_are_logged_without_raw_payload(initialized_conn) -> None:
+    conn = initialized_conn
     statuses = iter([404, 410])
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -160,8 +152,8 @@ def test_404_and_410_are_logged_without_raw_payload() -> None:
     assert conn.execute("SELECT COUNT(*) FROM errors WHERE error_kind IN ('http_404','http_410')").fetchone()[0] == 2
 
 
-def test_chesscom_stats_store_raw_and_snapshot(fixtures_dir: Path) -> None:
-    conn = _conn()
+def test_chesscom_stats_store_raw_and_snapshot(fixtures_dir: Path, initialized_conn) -> None:
+    conn = initialized_conn
     body = _fixture(fixtures_dir, "chesscom/stats.json")
 
     result = fetch_chesscom_stats(
@@ -182,8 +174,8 @@ def test_chesscom_stats_store_raw_and_snapshot(fixtures_dir: Path) -> None:
     assert "chess_blitz" in snapshot["perfs_or_stats"]
 
 
-def test_lichess_429_waits_60_seconds_then_retries(fixtures_dir: Path) -> None:
-    conn = _conn()
+def test_lichess_429_waits_60_seconds_then_retries(fixtures_dir: Path, initialized_conn) -> None:
+    conn = initialized_conn
     body = _fixture(fixtures_dir, "lichess/user.json")
     sleeps: list[float] = []
     calls = {"count": 0}
@@ -210,8 +202,8 @@ def test_lichess_429_waits_60_seconds_then_retries(fixtures_dir: Path) -> None:
     assert conn.execute("SELECT retry_after FROM fetch_logs WHERE status_code = 429").fetchone()[0] == 1
 
 
-def test_chesscom_monthly_archive_normalizes_game(fixtures_dir: Path) -> None:
-    conn = _conn()
+def test_chesscom_monthly_archive_normalizes_game(fixtures_dir: Path, initialized_conn) -> None:
+    conn = initialized_conn
     body = _fixture(fixtures_dir, "chesscom/archive_2024_01.json")
     result = fetch_chesscom_month(
         conn,
@@ -233,8 +225,8 @@ def test_chesscom_monthly_archive_normalizes_game(fixtures_dir: Path) -> None:
     assert conn.execute("SELECT rating FROM ratings_at_game WHERE game_id = ? AND color = 'white'", (game["id"],)).fetchone()[0] == 1510
 
 
-def test_lichess_games_ndjson_normalizes_ms_timestamps(fixtures_dir: Path) -> None:
-    conn = _conn()
+def test_lichess_games_ndjson_normalizes_ms_timestamps(fixtures_dir: Path, initialized_conn) -> None:
+    conn = initialized_conn
     body = _fixture(fixtures_dir, "lichess/games.ndjson")
     result = fetch_lichess_games(
         conn,
@@ -261,8 +253,8 @@ def test_lichess_games_ndjson_normalizes_ms_timestamps(fixtures_dir: Path) -> No
     assert b"1704067200000" in conn.execute("SELECT raw_body FROM raw_payloads").fetchone()[0]
 
 
-def test_provider_scoped_same_username_across_providers(fixtures_dir: Path) -> None:
-    conn = _conn()
+def test_provider_scoped_same_username_across_providers(fixtures_dir: Path, initialized_conn) -> None:
+    conn = initialized_conn
     chess_body = _fixture(fixtures_dir, "chesscom/player.json")
     lichess_body = _fixture(fixtures_dir, "lichess/user.json")
 

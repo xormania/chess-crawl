@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
@@ -232,7 +233,7 @@ def _cmd_db_info(args: argparse.Namespace) -> int:
         print("Run `chess-crawl init --db PATH` first.", file=sys.stderr)
         return 1
 
-    with connect(db_path) as conn:
+    with _connect_for_read(db_path) as conn:
         summary = database_summary(conn)
 
     print(f"Database: {db_path.resolve()}")
@@ -601,15 +602,25 @@ def _print_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
         print(fmt.format(*row))
 
 
+@contextmanager
 def _connect_for_write(db_path: Path):
     initialize_database(db_path)
-    return connect(db_path)
+    conn = connect(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
+@contextmanager
 def _connect_for_read(db_path: Path):
     if not database_exists(db_path):
         raise SystemExit(f"Database not found: {db_path}\nRun `chess-crawl init --db PATH` first.")
-    return connect(db_path)
+    conn = connect(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _print_ingest_result(result: IngestResult) -> int:
