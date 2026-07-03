@@ -15,6 +15,8 @@ from chess_crawl.storage.db import connect
 from chess_crawl.storage.migrations import initialize_database
 
 
+pytestmark = pytest.mark.workflow
+
 SINCE = 1704067200
 UNTIL = 1704153600
 
