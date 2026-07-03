@@ -17,6 +17,23 @@ data/
 *.sqlite
 *.sqlite3
 *.db
+*.sqlite-shm
+*.sqlite-wal
+*.db-shm
+*.db-wal
+
+# generated exports / local dumps
+exports/
+*.jsonl
+*.csv
+*.pgn
+*.ndjson
+*.raw
+*.dump
+!tests/fixtures/**/*.jsonl
+!tests/fixtures/**/*.csv
+!tests/fixtures/**/*.pgn
+!tests/fixtures/**/*.ndjson
 
 # env/secrets
 .env

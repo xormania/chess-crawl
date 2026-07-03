@@ -1,0 +1,31 @@
+{
+  "chess_blitz": {
+    "last": {
+      "rating": 1510,
+      "date": 1704067200,
+      "rd": 45
+    },
+    "best": {
+      "rating": 1600,
+      "date": 1700000000,
+      "game": "https://www.chess.com/game/live/1000000001"
+    },
+    "record": {
+      "win": 10,
+      "loss": 5,
+      "draw": 2
+    }
+  },
+  "chess_rapid": {
+    "last": {
+      "rating": 1620,
+      "date": 1704067200,
+      "rd": 55
+    },
+    "record": {
+      "win": 3,
+      "loss": 1,
+      "draw": 1
+    }
+  }
+}

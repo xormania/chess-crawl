@@ -1,0 +1,13 @@
+{
+  "@id": "https://api.chess.com/pub/player/samename",
+  "url": "https://www.chess.com/member/SameName",
+  "username": "SameName",
+  "player_id": 12345,
+  "title": "NM",
+  "followers": 42,
+  "country": "https://api.chess.com/pub/country/US",
+  "last_online": 1704068000,
+  "joined": 1609459200,
+  "status": "premium",
+  "is_verified": false
+}

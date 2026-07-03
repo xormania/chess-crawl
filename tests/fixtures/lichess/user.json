@@ -1,0 +1,26 @@
+{
+  "id": "samename",
+  "username": "SameName",
+  "title": "NM",
+  "createdAt": 1609459200000,
+  "seenAt": 1704068000000,
+  "patron": true,
+  "profile": {
+    "country": "US"
+  },
+  "count": {
+    "all": 100,
+    "rated": 80,
+    "win": 40,
+    "loss": 30,
+    "draw": 10
+  },
+  "perfs": {
+    "blitz": {
+      "games": 20,
+      "rating": 1700,
+      "rd": 50,
+      "prog": 12
+    }
+  }
+}

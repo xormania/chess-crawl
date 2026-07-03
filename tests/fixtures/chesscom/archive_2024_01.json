@@ -1,0 +1,27 @@
+{
+  "games": [
+    {
+      "url": "https://www.chess.com/game/live/1000000001",
+      "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[White \"SameName\"]\n[Black \"OpponentOne\"]\n[Result \"1-0\"]\n\n1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7# 1-0",
+      "time_control": "300+2",
+      "end_time": 1704067500,
+      "rated": true,
+      "uuid": "00000000-0000-4000-8000-000000000001",
+      "time_class": "blitz",
+      "rules": "chess",
+      "eco": "https://www.chess.com/openings/Kings-Pawn-Opening",
+      "white": {
+        "rating": 1510,
+        "result": "win",
+        "username": "SameName",
+        "uuid": "12345"
+      },
+      "black": {
+        "rating": 1490,
+        "result": "checkmated",
+        "username": "OpponentOne",
+        "uuid": "67890"
+      }
+    }
+  ]
+}

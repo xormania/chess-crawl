@@ -1,0 +1,35 @@
+{
+  "id": "single01",
+  "rated": false,
+  "variant": "standard",
+  "speed": "rapid",
+  "createdAt": 1704153600000,
+  "lastMoveAt": 1704153900000,
+  "status": "draw",
+  "players": {
+    "white": {
+      "user": {
+        "id": "samename",
+        "name": "SameName"
+      },
+      "rating": 1710
+    },
+    "black": {
+      "user": {
+        "id": "opponentthree",
+        "name": "OpponentThree"
+      },
+      "rating": 1710
+    }
+  },
+  "clock": {
+    "initial": 600,
+    "increment": 5
+  },
+  "opening": {
+    "eco": "D00",
+    "name": "Queen's Pawn Game",
+    "ply": 2
+  },
+  "pgn": "[Event \"Casual Rapid game\"]\n[Site \"https://lichess.org/single01\"]\n[White \"SameName\"]\n[Black \"OpponentThree\"]\n[Result \"1/2-1/2\"]\n\n1. d4 d5 1/2-1/2"
+}
