@@ -1,169 +1,148 @@
 # chess-crawl
 
-Provider-neutral, raw-first, local-first chess data archive.
+A command-line tool for building a local archive of public chess games and profiles from Chess.com and Lichess.
 
-Status: Phase 3 local archive workflow. The package can initialize and inspect
-a local SQLite archive, fetch bounded slices from Chess.com and Lichess public
-APIs, store raw provider responses before normalization, run serial durable
-jobs, perform bounded opponent discovery, report on normalized local data, and
-export non-raw JSONL/CSV views.
+All data stays on your machine in a SQLite database you control. Only public APIs are used.
 
-## Principles
+## What it does
 
-- Provider-neutral: Chess.com and Lichess share one archive schema, but account
-  identity is always provider-scoped. Matching usernames across providers are
-  never treated as the same person.
-- Raw-first: later fetches/imports should store provider response bytes in
-  `raw_payloads` before normalization. Normalized rows are traceable back to raw
-  bodies through `source_records`.
-- Local-first: data stays in the local SQLite file the operator chooses.
-- Public API only: no scraping, no private data access, no undocumented
-  endpoints.
-- No cheating accusations: provider status labels are stored as provider-supplied
-  neutral facts only; this tool does not infer or assert misconduct.
+- Fetch public player profiles and stats
+- Download games within explicit date or month bounds
+- Explore opponents from the games you fetched (bounded, restartable)
+- Query your local archive and export normalized data (JSONL/CSV)
+- Preserve the original responses alongside cleaned-up records
 
-## Implemented Commands
-
-From an installed environment:
+## Installation
 
 ```bash
-chess-crawl init --db ./data/chess-crawl.sqlite
-chess-crawl provider list
-chess-crawl db info --db ./data/chess-crawl.sqlite
-
-chess-crawl fetch user chess.com SameName --db ./data/chess-crawl.sqlite
-chess-crawl fetch user lichess SameName --db ./data/chess-crawl.sqlite
-chess-crawl fetch stats chess.com SameName --db ./data/chess-crawl.sqlite
-chess-crawl fetch archives chess.com SameName --db ./data/chess-crawl.sqlite
-chess-crawl fetch games chess.com SameName --month 2024-01 --db ./data/chess-crawl.sqlite
-chess-crawl fetch games lichess SameName --since 2024-01-01 --until 2024-02-01 --limit 50 --db ./data/chess-crawl.sqlite
-
-chess-crawl query user chess.com SameName --db ./data/chess-crawl.sqlite
-chess-crawl query game lichess lichgame1 --db ./data/chess-crawl.sqlite
-chess-crawl query raw --provider chess.com --limit 10 --db ./data/chess-crawl.sqlite
-
-chess-crawl crawl opponents chess.com SameName \
-  --depth 1 --max-users 25 --max-games 200 --max-jobs 100 \
-  --since 2024-01 --until 2024-02 \
-  --db ./data/chess-crawl.sqlite
-
-chess-crawl jobs status --db ./data/chess-crawl.sqlite
-chess-crawl jobs list --db ./data/chess-crawl.sqlite
-chess-crawl jobs show 1 --db ./data/chess-crawl.sqlite
-chess-crawl jobs resume --db ./data/chess-crawl.sqlite
-
-chess-crawl report summary --db ./data/chess-crawl.sqlite
-chess-crawl report user chess.com SameName --db ./data/chess-crawl.sqlite
-chess-crawl report opponents chess.com SameName --db ./data/chess-crawl.sqlite
-chess-crawl report games-by-month --provider chess.com --db ./data/chess-crawl.sqlite
-
-chess-crawl export games --format jsonl --output games.jsonl --db ./data/chess-crawl.sqlite
-chess-crawl export users --format jsonl --output users.jsonl --db ./data/chess-crawl.sqlite
-chess-crawl export graph --format csv --output graph.csv --db ./data/chess-crawl.sqlite
+pip install chess-crawl
 ```
 
-From the source tree, use:
+Or from a source checkout:
 
 ```bash
-PYTHONPATH=src python3 -m chess_crawl.cli init --db ./data/chess-crawl.sqlite
-PYTHONPATH=src python3 -m chess_crawl.cli provider list
-PYTHONPATH=src python3 -m chess_crawl.cli db info --db ./data/chess-crawl.sqlite
-PYTHONPATH=src python3 -m chess_crawl.cli fetch games chess.com SameName --month 2024-01 --db ./data/chess-crawl.sqlite
-PYTHONPATH=src python3 -m chess_crawl.cli jobs status --db ./data/chess-crawl.sqlite
+pip install -e .
 ```
 
-`python -m chess_crawl` is wired to the same CLI when the package is importable.
-
-## End-to-End Local Workflow
+## Quick start
 
 ```bash
-chess-crawl init --db ./data/chess-crawl.sqlite
+# 1. Create a local archive (defaults to ./chess-crawl.db)
+chess-crawl init
+
+# 2. See supported providers
 chess-crawl provider list
 
-# Direct bounded acquisition.
-chess-crawl fetch user chess.com SameName --db ./data/chess-crawl.sqlite
-chess-crawl fetch games chess.com SameName --month 2024-01 --db ./data/chess-crawl.sqlite
+# 3. Fetch a public profile
+chess-crawl fetch user lichess magnuscarlsen
 
-# Bounded opponent discovery. All caps are required.
-chess-crawl crawl opponents lichess SameName \
-  --depth 1 --max-users 20 --max-games 100 --max-jobs 80 \
-  --since 2024-01-01 --until 2024-02-01 \
-  --db ./data/chess-crawl.sqlite
+# 4. Fetch some games (Lichess uses date ranges)
+chess-crawl fetch games lichess magnuscarlsen \
+  --since 2024-01-01 --until 2024-02-01 --limit 100
 
-# Resume after interruption or inspect durable work.
-chess-crawl jobs status --db ./data/chess-crawl.sqlite
-chess-crawl jobs resume --db ./data/chess-crawl.sqlite
-
-# Read and export only local normalized data.
-chess-crawl report user lichess SameName --db ./data/chess-crawl.sqlite
-chess-crawl export games --format jsonl --output games.jsonl --db ./data/chess-crawl.sqlite
+# 5. Explore your archive
+chess-crawl report summary
+chess-crawl export games --format jsonl --output games.jsonl
 ```
 
-## Raw-First Fetch Behavior
+## Common tasks
 
-Successful `200` provider responses are written to `raw_payloads` before
-normalization runs. Fetch attempts, including `304`, `404`, `410`, `429`, and
-retry attempts, are recorded in `fetch_logs`; body-less statuses do not create
-raw payload rows. Normalization is re-runnable from stored raw bytes.
+### Fetch Chess.com data
 
-Chess.com conditional requests reuse stored ETag/Last-Modified validators when
-available. Lichess game export is requested as NDJSON and is bounded by the
-required date window plus `--limit`.
+Chess.com uses monthly archives:
 
-## Provider Boundaries
+```bash
+chess-crawl fetch user chess.com Hikaru
+chess-crawl fetch games chess.com Hikaru --month 2024-06
+```
 
-User identity is provider-scoped. A Chess.com username and a Lichess username
-with the same spelling are stored as different accounts and are never assumed to
-be the same human.
+### Explore opponents (bounded crawl)
 
-Only documented public APIs are called. There is no scraping, no undocumented
-endpoint use, no rate-limit evasion, and no automated cheating accusation
-logic. Provider account-status labels are stored only as provider-supplied
-neutral facts.
+Opponent discovery is intentionally bounded. All limits are required:
 
-Lichess can use an optional bearer token from `CHESS_CRAWL_LICHESS_TOKEN`; it is
-not required and request headers are not written to raw payloads or fetch logs.
+```bash
+chess-crawl crawl opponents lichess SomePlayer \
+  --depth 1 \
+  --max-users 30 --max-games 200 --max-jobs 100 \
+  --since 2024-01-01 --until 2024-02-01
+```
 
-## Durable Jobs And Bounded Crawls
+Use `jobs status` / `jobs resume` if you need to pause and continue.
 
-Durable work is stored in `discovery_jobs` and grouped by `crawl_runs` for
-crawls. Job states are `pending`, `in_progress`, `done`, `error`, `skipped`, and
-`blocked`. `jobs resume` resets stale `in_progress` jobs and unblocks `blocked`
-jobs before driving the same serial runner.
+### Inspect your archive
 
-Opponent crawl is one discovery strategy. It is provider-scoped and bounded by
-explicit `--depth`, `--max-users`, `--max-games`, `--max-jobs`, `--since`, and
-`--until` arguments. Depth `0` fetches the seed/source user. Depth `1` discovers
-and fetches opponents found from the seed's normalized games. The strategy reads
-opponents from `game_participants`, writes `discovery_edges`, and never crosses
-providers.
+```bash
+chess-crawl db info
+chess-crawl query user lichess magnuscarlsen
+chess-crawl report user lichess magnuscarlsen
+```
 
-## Reports And Exports
+### Inspect and resume work
 
-Reports are factual read-side summaries over normalized tables. They handle
-`outcome IS NULL` as unfinished games and keep provider identity in every query.
-Provider account-status labels, when shown, are rendered as provider-supplied
-facts only.
+```bash
+chess-crawl jobs status
+chess-crawl jobs resume
+```
 
-Exports are bounded local views. Games and users export JSONL; graph edges export
-CSV. Raw payload bodies are not exported by default. Provider is preserved in
-every row, and graph exports do not merge accounts across providers.
+### Reports
 
-## Known Limitations
+```bash
+chess-crawl report summary
+chess-crawl report user chess.com Hikaru
+chess-crawl report opponents lichess SomePlayer
+chess-crawl report games-by-month --provider lichess
+```
 
-- Crawl jobs use a pragmatic serial path: each `crawl_opponents` job fetches the
-  bounded games for that user and then expands from normalized participants.
-  This keeps the current implementation small; the plan's fuller fan-out model
-  remains future work.
-- Lichess NDJSON responses are still buffered for each bounded request before
-  normalization. Incremental per-line checkpointing is not implemented.
-- Chess.com monthly archives are the public API's natural game unit. A crawl can
-  stop scheduling more work at `--max-games`, but a fetched month may contain
-  more games than the remaining normalized-game budget.
-- Game normalization captures core identity, participants, ratings,
-  variant/time class, timestamps, outcome, status, and PGN where present. It
-  does not implement engine analysis, cheating detection, or event containers.
-- Chess.com single-game-by-id is intentionally not implemented because the
-  public API has no such endpoint; fetch the owning monthly archive instead.
-- Exports currently implement JSONL for games/users and CSV for graph edges.
-- Default tests remain offline and fixture-based.
+### Queries and exports
+
+```bash
+chess-crawl query user lichess magnuscarlsen
+chess-crawl query game chess.com <game-id-or-url>
+
+chess-crawl export users --format jsonl --output users.jsonl
+chess-crawl export graph --format csv --output edges.csv
+```
+
+## Configuration
+
+Create a `.env` file or export environment variables.
+
+| Variable                    | Purpose                                      |
+|-----------------------------|----------------------------------------------|
+| `CHESS_CRAWL_LICHESS_TOKEN` | Optional. Raises your rate limits on Lichess. |
+| `CHESS_CRAWL_CONTACT`       | Used to build a polite User-Agent.           |
+
+Example `.env`:
+
+```bash
+CHESS_CRAWL_LICHESS_TOKEN=your_personal_token_here
+CHESS_CRAWL_CONTACT=you@example.com
+```
+
+See `.env.example` for the template.
+
+## How it works
+
+- All data lives in a single SQLite file (use `--db path/to.db` to pick a different one).
+- You always provide explicit bounds when fetching or crawling.
+- Long-running crawls are resumable — interrupt anytime with Ctrl-C and pick up later.
+- Original API responses are saved alongside the cleaned records.
+- Chess.com and Lichess accounts are kept completely separate (even if usernames match).
+
+## Rate limits and etiquette
+
+The tool uses conservative delays and respects provider rules (including 429 backoffs). Crawls are serial by design. Don't use this to hammer APIs.
+
+## Development
+
+```bash
+python -m pytest
+python -m chess_crawl --help
+```
+
+See `AGENTS.md` for contribution guidelines.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).  
+Copyright 2026 xormania (https://github.com/xormania).
