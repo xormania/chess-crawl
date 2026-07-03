@@ -82,6 +82,7 @@ def test_cli_fetch_user_query_user_and_query_raw_smoke(
         )
         raw_payload_id = store_raw_payload(conn, record)
         user_id = normalize_user_payload(conn, raw_payload_id)
+        assert user_id is not None
         return IngestResult(provider, "user_profile", 200, raw_payload_id, (user_id,), "fixture fetch")
 
     monkeypatch.setattr(cli, "fetch_user_profile", fake_fetch_user_profile)

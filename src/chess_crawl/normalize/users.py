@@ -193,7 +193,15 @@ def _user_from_stats_key(source_key: str) -> NormalizedUser:
 def _int_or_none(value: object) -> int | None:
     if value is None:
         return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if not isinstance(value, str):
+        return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except ValueError:
         return None

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from typing import TypedDict
 
 from chess_crawl.normalize.codes import map_variant
 from chess_crawl.providers.base import NormalizedGame, NormalizedParticipant
 from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
+from chess_crawl.storage.db import transaction
 from chess_crawl.storage.raw import insert_source_record, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import (
     get_or_create_time_control,
@@ -23,6 +25,15 @@ from chess_crawl.storage.repository import (
 PARSER_VERSION = "phase2-games-v1"
 
 
+class TimeControlArgs(TypedDict):
+    kind: str
+    initial_seconds: int | None
+    increment_seconds: int | None
+    days: int | None
+    time_class: str
+    raw_label: str
+
+
 def normalize_games_payload(conn: sqlite3.Connection, raw_payload_id: int) -> list[int]:
     raw = read_raw_payload(conn, raw_payload_id)
     if raw.provider == "chess.com" and raw.endpoint_type == "monthly_archive":
@@ -34,32 +45,32 @@ def normalize_games_payload(conn: sqlite3.Connection, raw_payload_id: int) -> li
     else:
         return []
 
-    game_ids: list[int] = []
-    for index, game in enumerate(games):
-        if game.variant_key == "bughouse":
-            continue
-        game_ids.append(
-            _normalize_game(
-                conn,
-                game,
-                raw_payload_id=raw_payload_id,
-                endpoint_type=raw.endpoint_type,
-                source_key=raw.canonical_source_key,
-                json_pointer=f"/games/{index}" if raw.endpoint_type == "monthly_archive" else f"/{index}",
-                fetched_at=raw.fetched_at,
+    with transaction(conn):
+        game_ids: list[int] = []
+        for index, game in enumerate(games):
+            if game.variant_key == "bughouse":
+                continue
+            game_ids.append(
+                _normalize_game(
+                    conn,
+                    game,
+                    raw_payload_id=raw_payload_id,
+                    endpoint_type=raw.endpoint_type,
+                    source_key=raw.canonical_source_key,
+                    json_pointer=f"/games/{index}" if raw.endpoint_type == "monthly_archive" else f"/{index}",
+                    fetched_at=raw.fetched_at,
+                )
             )
-        )
 
-    status = "parsed" if game_ids else "skipped"
-    update_raw_payload_status(
-        conn,
-        raw_payload_id,
-        status=status,
-        parser_version=PARSER_VERSION,
-        normalized_at=int(time.time()),
-        commit=False,
-    )
-    conn.commit()
+        status = "parsed" if game_ids else "skipped"
+        update_raw_payload_status(
+            conn,
+            raw_payload_id,
+            status=status,
+            parser_version=PARSER_VERSION,
+            normalized_at=int(time.time()),
+            commit=False,
+        )
     return game_ids
 
 
@@ -172,7 +183,7 @@ def _normalize_participant(
     )
 
 
-def parse_time_control(raw_label: str | None, time_class: str) -> dict[str, object]:
+def parse_time_control(raw_label: str | None, time_class: str) -> TimeControlArgs:
     label = raw_label or time_class
     if "/" in label:
         try:
@@ -197,8 +208,8 @@ def parse_time_control(raw_label: str | None, time_class: str) -> dict[str, obje
             "time_class": time_class,
             "raw_label": label,
         }
-    initial = None
-    increment = 0
+    initial: int | None = None
+    increment: int | None = 0
     try:
         if "+" in label:
             base, inc = label.split("+", 1)

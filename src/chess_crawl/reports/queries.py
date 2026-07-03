@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from typing import Any
 
 
 def provider_counts(conn: sqlite3.Connection) -> dict[str, int]:
@@ -131,7 +132,7 @@ def query_raw(conn: sqlite3.Connection, provider: str, limit: int) -> list[sqlit
     )
 
 
-def summary_report(conn: sqlite3.Connection) -> dict[str, object]:
+def summary_report(conn: sqlite3.Connection) -> dict[str, Any]:
     providers = list(
         conn.execute(
             """

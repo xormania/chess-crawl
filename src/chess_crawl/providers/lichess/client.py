@@ -101,6 +101,8 @@ class LichessClient:
         until: int | None,
         filters: GameFilters,
     ):
+        if filters.max_games is None or filters.max_games <= 0:
+            raise ValueError("Lichess game iteration requires a positive max_games bound")
         yield self.get_user_games(username, since=since, until=until, limit=filters.max_games)
 
     def get_user_games(

@@ -12,7 +12,7 @@ import httpx
 from chess_crawl.config import Config
 from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.normalize.users import normalize_user_payload
-from chess_crawl.providers.base import RawRecord
+from chess_crawl.providers.base import FetchAttempt, RawRecord
 from chess_crawl.providers.registry import create_provider_client
 from chess_crawl.storage.raw import insert_fetch_log, store_raw_payload, update_raw_payload_status
 
@@ -287,7 +287,7 @@ def _log_attempts(
     conn.commit()
 
 
-def _insert_error_for_attempt(conn: sqlite3.Connection, attempt) -> int | None:
+def _insert_error_for_attempt(conn: sqlite3.Connection, attempt: FetchAttempt) -> int | None:
     if attempt.status_code not in {404, 410, 429}:
         return None
     kind = {404: "http_404", 410: "http_410", 429: "http_429"}[attempt.status_code]
@@ -307,6 +307,8 @@ def _insert_error_for_attempt(conn: sqlite3.Connection, attempt) -> int | None:
             1 if attempt.status_code in {404, 410} else 0,
         ),
     )
+    if cursor.lastrowid is None:
+        raise RuntimeError("error insert did not return a row id")
     return int(cursor.lastrowid)
 
 

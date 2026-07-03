@@ -30,6 +30,7 @@ class FetchAttempt:
     status_code: int | None
     attempted_at: int
     attempt: int
+    request_headers: Mapping[str, Any] = field(default_factory=dict)
     response_headers: Mapping[str, Any] = field(default_factory=dict)
     retry_after: int | None = None
     bytes_count: int | None = None

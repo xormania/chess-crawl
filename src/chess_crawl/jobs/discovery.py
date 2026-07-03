@@ -276,4 +276,12 @@ def run_counters(conn: sqlite3.Connection, crawl_run_id: int) -> dict[str, int]:
 def _int_or_none(value: object) -> int | None:
     if value is None:
         return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if not isinstance(value, str):
+        return None
     return int(value)

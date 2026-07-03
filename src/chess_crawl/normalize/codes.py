@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import Any
 
+from chess_crawl.providers.base import Outcome
+
 
 OUTCOMES = ("white_win", "black_win", "draw")
 TIME_CLASSES = ("bullet", "blitz", "rapid", "classical", "correspondence")
@@ -115,7 +117,7 @@ def map_variant(provider: str, native: str | None) -> tuple[str, bool]:
     return mapped, True
 
 
-def chesscom_outcome(white_result: str | None, black_result: str | None) -> tuple[str | None, bool]:
+def chesscom_outcome(white_result: str | None, black_result: str | None) -> tuple[Outcome | None, bool]:
     white = (white_result or "").strip().lower()
     black = (black_result or "").strip().lower()
     if white == "win":
@@ -129,7 +131,7 @@ def chesscom_outcome(white_result: str | None, black_result: str | None) -> tupl
     return None, False
 
 
-def lichess_outcome(winner: str | None, status: str | None) -> tuple[str | None, bool]:
+def lichess_outcome(winner: str | None, status: str | None) -> tuple[Outcome | None, bool]:
     status_value = status or ""
     if winner == "white":
         return "white_win", False

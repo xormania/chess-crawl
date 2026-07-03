@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
 from chess_crawl.config import Config
 from chess_crawl.ingest import (
@@ -13,9 +14,13 @@ from chess_crawl.ingest import (
     fetch_lichess_games,
     fetch_user_profile,
 )
-from chess_crawl.providers.base import RawRecord
+import chess_crawl.normalize.games as games_module
+from chess_crawl.normalize.games import normalize_games_payload
+from chess_crawl.providers.base import FetchPolicy, RawRecord
 from chess_crawl.providers.chesscom import endpoints as chesscom_endpoints
 from chess_crawl.providers.lichess import endpoints as lichess_endpoints
+from chess_crawl.providers.http import HttpClient
+from chess_crawl.storage.raw import store_raw_payload
 
 
 def _fixture(fixtures_dir: Path, relative: str) -> bytes:
@@ -46,6 +51,51 @@ def test_lichess_endpoint_construction() -> None:
         == "https://lichess.org/api/games/user/samename?since=1704067200000&until=1704153600000&max=1"
     )
     assert lichess_endpoints.game("abc123") == "https://lichess.org/api/game/abc123"
+
+
+def test_http_attempt_records_only_sanitized_request_headers() -> None:
+    outbound_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        outbound_headers.update({key.lower(): value for key, value in request.headers.items()})
+        return httpx.Response(200, headers={"content-type": "application/json"}, content=b"{}")
+
+    client = HttpClient(
+        provider="lichess",
+        user_agent="chess-crawl/test",
+        policy=FetchPolicy(
+            min_delay_s=0,
+            supports_conditional=False,
+            honor_retry_after=False,
+            fixed_429_backoff_s=None,
+            max_retries=0,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = client.request(
+            "GET",
+            "https://example.test/user",
+            endpoint_type="user_profile",
+            headers={
+                "Authorization": "Bearer secret-token",
+                "Cookie": "session=secret",
+                "X-Api-Key": "secret-key",
+                "Accept": "application/json",
+            },
+        )
+    finally:
+        client.close()
+
+    assert outbound_headers["authorization"] == "Bearer secret-token"
+    assert "cookie" not in outbound_headers
+    assert "x-api-key" not in outbound_headers
+    recorded_headers = {key.lower(): value for key, value in result.attempts[0].request_headers.items()}
+    assert recorded_headers["user-agent"] == "chess-crawl/test"
+    assert recorded_headers["accept"] == "application/json"
+    assert "authorization" not in recorded_headers
+    assert "cookie" not in recorded_headers
+    assert "x-api-key" not in recorded_headers
 
 
 def test_chesscom_200_stores_raw_before_user_normalization(fixtures_dir: Path, initialized_conn) -> None:
@@ -223,6 +273,46 @@ def test_chesscom_monthly_archive_normalizes_game(fixtures_dir: Path, initialize
     assert game["ended_at"] == 1704067500
     assert conn.execute("SELECT COUNT(*) FROM game_participants WHERE game_id = ?", (game["id"],)).fetchone()[0] == 2
     assert conn.execute("SELECT rating FROM ratings_at_game WHERE game_id = ? AND color = 'white'", (game["id"],)).fetchone()[0] == 1510
+
+
+def test_game_normalization_failure_rolls_back_partial_normalized_rows(
+    fixtures_dir: Path,
+    initialized_conn,
+    monkeypatch,
+) -> None:
+    conn = initialized_conn
+    archive = json.loads(_fixture(fixtures_dir, "chesscom/archive_2024_01.json"))
+    second_game = dict(archive["games"][0])
+    second_game["uuid"] = "00000000-0000-4000-8000-000000000002"
+    second_game["url"] = "https://www.chess.com/game/live/1000000002"
+    archive["games"].append(second_game)
+    record = RawRecord(
+        provider="chess.com",
+        endpoint_type="monthly_archive",
+        request_url="https://api.chess.com/pub/player/samename/games/2024/01",
+        canonical_source_key="chess.com/player/samename/games/2024/01",
+        fetched_at=123,
+        body=json.dumps(archive).encode(),
+        media_type="application/json",
+    )
+    raw_payload_id = store_raw_payload(conn, record)
+    real_normalize_game = games_module._normalize_game
+
+    def fail_on_second_game(*args, **kwargs):
+        if kwargs["json_pointer"] == "/games/1":
+            raise RuntimeError("injected normalization failure")
+        return real_normalize_game(*args, **kwargs)
+
+    monkeypatch.setattr(games_module, "_normalize_game", fail_on_second_game)
+
+    with pytest.raises(RuntimeError, match="injected normalization failure"):
+        normalize_games_payload(conn, raw_payload_id)
+
+    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
+    assert conn.execute("SELECT normalization_status FROM raw_payloads").fetchone()[0] == "pending"
+    assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM provider_users").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0] == 0
 
 
 def test_lichess_games_ndjson_normalizes_ms_timestamps(fixtures_dir: Path, initialized_conn) -> None:

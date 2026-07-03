@@ -96,8 +96,9 @@ class JobRunner:
             job = store.claim_next_job(self.conn, crawl_run_id=crawl_run_id)
             if job is None:
                 break
+            if job.id is None:
+                raise RuntimeError("claimed job is missing a persisted id")
             outcome = self._execute(job)
-            assert job.id is not None
             if outcome.state == "done":
                 store.mark_done(self.conn, job.id, reason=outcome.reason)
             elif outcome.state == "skipped":
@@ -140,10 +141,6 @@ class JobRunner:
             if job.kind == "fetch_game_by_id":
                 result = self._fetch_game_by_id(job)
                 return _outcome_from_ingest(result)
-            if job.kind == "fetch_games_by_ids":
-                return ExecutionOutcome("skipped", "bounded batch-by-ids is not implemented in this slice")
-            if job.kind == "import_export_dump":
-                return ExecutionOutcome("skipped", "local dump import is not implemented in this slice")
             if job.kind == "crawl_opponents":
                 return self._crawl_opponents(job)
             if job.kind == "resume":
@@ -267,7 +264,14 @@ class JobRunner:
 
     def _fetch_game_by_id(self, job: DiscoveryJob) -> IngestResult:
         if job.provider != "lichess":
-            return IngestResult(job.provider, "game", 400, None, (), "Chess.com game-by-id requires archive resolution")
+            return IngestResult(
+                job.provider,
+                "game",
+                400,
+                None,
+                (),
+                "fetch_game_by_id is supported only for lichess; Chess.com games require monthly archives",
+            )
         return fetch_lichess_game(
             self.conn,
             job.target,
@@ -375,6 +379,14 @@ def _outcome_from_ingest(result: IngestResult) -> ExecutionOutcome:
 
 def _int_or_none(value: object) -> int | None:
     if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if not isinstance(value, str):
         return None
     return int(value)
 

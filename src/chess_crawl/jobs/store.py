@@ -9,7 +9,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from chess_crawl.jobs.models import DiscoveryJob, EnqueueResult, JobKind, JobState
+from chess_crawl.jobs.models import DiscoveryJob, EnqueueResult, JOB_KINDS, JobKind, JobState
 
 
 LIVE_STATES = ("pending", "in_progress", "blocked")
@@ -63,6 +63,7 @@ def enqueue_job(
     dedup_key: str | None = None,
     commit: bool = True,
 ) -> EnqueueResult:
+    _validate_schedulable_job(provider=provider, kind=kind)
     timestamp = now or int(time.time())
     params_text = canonical_params(params)
     dedup = dedup_key or make_dedup_key(
@@ -106,7 +107,16 @@ def enqueue_job(
     )
     if commit:
         conn.commit()
+    if cursor.lastrowid is None:
+        raise RuntimeError("job insert did not return a row id")
     return EnqueueResult(job_id=int(cursor.lastrowid), inserted=True)
+
+
+def _validate_schedulable_job(*, provider: str, kind: str) -> None:
+    if kind not in JOB_KINDS:
+        raise ValueError(f"unsupported job kind: {kind}")
+    if kind == "fetch_game_by_id" and provider != "lichess":
+        raise ValueError("fetch_game_by_id jobs are supported only for lichess")
 
 
 def claim_next_job(
@@ -253,6 +263,8 @@ def create_crawl_run(
         (seed_spec, provider, canonical_params(params), timestamp, timestamp),
     )
     conn.commit()
+    if cursor.lastrowid is None:
+        raise RuntimeError("crawl run insert did not return a row id")
     return int(cursor.lastrowid)
 
 
@@ -416,6 +428,8 @@ def insert_error(
         ),
     )
     conn.commit()
+    if cursor.lastrowid is None:
+        raise RuntimeError("error insert did not return a row id")
     return int(cursor.lastrowid)
 
 

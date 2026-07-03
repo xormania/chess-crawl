@@ -38,8 +38,8 @@ class HttpFetchResult:
 class HttpClient:
     """Small serial HTTP wrapper around httpx.
 
-    The helper never records request headers, so bearer tokens cannot leak into
-    fetch logs or raw provenance through this path.
+    The helper sends provider headers as requested, but only exposes sanitized
+    request metadata so bearer tokens cannot leak through this path.
     """
 
     def __init__(
@@ -82,7 +82,8 @@ class HttpClient:
     ) -> HttpFetchResult:
         attempts: list[FetchAttempt] = []
         max_attempts = self.policy.max_retries + 1
-        request_headers = self._request_headers(headers)
+        request_headers = self._outbound_request_headers(headers)
+        recorded_request_headers = self._request_headers(request_headers)
         method_upper = method.upper()
 
         for attempt_number in range(1, max_attempts + 1):
@@ -112,6 +113,7 @@ class HttpClient:
                         status_code=response.status_code,
                         attempted_at=attempted_at,
                         attempt=attempt_number,
+                        request_headers=recorded_request_headers,
                         response_headers=response_headers,
                         retry_after=retry_after,
                         bytes_count=len(body) if body is not None else None,
@@ -166,6 +168,7 @@ class HttpClient:
                         status_code=None,
                         attempted_at=attempted_at,
                         attempt=attempt_number,
+                        request_headers=recorded_request_headers,
                         duration_ms=duration_ms,
                     )
                 )
@@ -207,11 +210,20 @@ class HttpClient:
             return max(delay, float(retry_after))
         return delay
 
-    def _request_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
+    def _outbound_request_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
         merged = {"User-Agent": self.user_agent}
         if headers:
             merged.update(headers)
-        return {key: value for key, value in merged.items() if key.lower() not in SENSITIVE_REQUEST_HEADERS or key.lower() == "authorization"}
+        return {
+            key: value
+            for key, value in merged.items()
+            if key.lower() not in SENSITIVE_REQUEST_HEADERS or key.lower() == "authorization"
+        }
+
+    def _request_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
+        if not headers:
+            return {}
+        return {key: value for key, value in headers.items() if key.lower() not in SENSITIVE_REQUEST_HEADERS}
 
 
 def _cache_relevant_headers(headers: httpx.Headers) -> dict[str, str]:

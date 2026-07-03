@@ -13,8 +13,6 @@ JobKind = Literal[
     "fetch_user_games",
     "fetch_monthly_archive",
     "fetch_game_by_id",
-    "fetch_games_by_ids",
-    "import_export_dump",
     "crawl_opponents",
     "resume",
 ]
@@ -26,8 +24,6 @@ JOB_KINDS: tuple[str, ...] = (
     "fetch_user_games",
     "fetch_monthly_archive",
     "fetch_game_by_id",
-    "fetch_games_by_ids",
-    "import_export_dump",
     "crawl_opponents",
     "resume",
 )

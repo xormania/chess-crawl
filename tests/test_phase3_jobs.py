@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Mapping
+from typing import Any
 
 import pytest
 
 from conftest import seed_game
 from chess_crawl.ingest import IngestResult
 import chess_crawl.jobs.runner as runner_module
+from chess_crawl.jobs.models import DiscoveryJob
 from chess_crawl.jobs.discovery import (
     CrawlBounds,
     create_opponent_crawl,
@@ -54,10 +56,15 @@ def test_job_state_transitions_and_stale_resume(initialized_conn: sqlite3.Connec
 
     claimed = store.claim_next_job(conn)
     assert claimed is not None
+    assert claimed.id is not None
     store.mark_blocked(conn, claimed.id, reason="429")
-    assert store.get_job(conn, claimed.id).state == "blocked"
+    blocked = store.get_job(conn, claimed.id)
+    assert blocked is not None
+    assert blocked.state == "blocked"
     assert store.unblock_jobs(conn) == 1
-    assert store.get_job(conn, claimed.id).state == "pending"
+    pending = store.get_job(conn, claimed.id)
+    assert pending is not None
+    assert pending.state == "pending"
 
 
 def test_discovery_edge_insertion_is_idempotent(initialized_conn: sqlite3.Connection) -> None:
@@ -250,6 +257,53 @@ def test_runner_fetch_game_by_id_uses_lichess_service(
 
     assert result.done == 1
     assert calls == ["abc123"]
+
+
+@pytest.mark.parametrize("kind", ["fetch_games_by_ids", "import_export_dump"])
+def test_unimplemented_job_kinds_are_not_schedulable(
+    initialized_conn: sqlite3.Connection,
+    kind: str,
+) -> None:
+    unsupported_kind: Any = kind
+
+    with pytest.raises(ValueError, match="unsupported job kind"):
+        store.enqueue_job(initialized_conn, provider="lichess", kind=unsupported_kind, target="abc123")
+
+
+def test_chesscom_fetch_game_by_id_jobs_are_not_schedulable(initialized_conn: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError, match="supported only for lichess"):
+        store.enqueue_job(initialized_conn, provider="chess.com", kind="fetch_game_by_id", target="1000000001")
+
+
+def test_runner_reports_legacy_chesscom_fetch_game_by_id_as_error(initialized_conn: sqlite3.Connection) -> None:
+    conn = initialized_conn
+    conn.execute(
+        """
+        INSERT INTO discovery_jobs(provider, kind, target, params_json, state, priority, depth, attempts, dedup_key, enqueued_at)
+        VALUES ('chess.com', 'fetch_game_by_id', '1000000001', '{}', 'pending', 100, 0, 0, 'legacy-chesscom-game', 123)
+        """
+    )
+    conn.commit()
+
+    result = JobRunner(conn).run(max_jobs=1)
+    job = conn.execute("SELECT state, reason FROM discovery_jobs WHERE dedup_key = 'legacy-chesscom-game'").fetchone()
+
+    assert result.errors == 1
+    assert job["state"] == "error"
+    assert "supported only for lichess" in job["reason"]
+
+
+def test_runner_rejects_claimed_job_without_persisted_id(
+    initialized_conn: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_claim_next_job(*args: object, **kwargs: object) -> DiscoveryJob:
+        return DiscoveryJob(id=None, provider="lichess", kind="resume", target="local")
+
+    monkeypatch.setattr(runner_module.store, "claim_next_job", fake_claim_next_job)
+
+    with pytest.raises(RuntimeError, match="missing a persisted id"):
+        JobRunner(initialized_conn).run(max_jobs=1)
 
 
 def test_runner_records_unexpected_handler_errors(
