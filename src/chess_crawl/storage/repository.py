@@ -1,4 +1,4 @@
-"""Small repository helpers over the Phase 1 schema."""
+"""Repository helpers over normalized archive tables."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
-from chess_crawl.providers.registry import list_provider_infos
 from chess_crawl.storage.migrations import current_version
 
 
@@ -17,20 +16,6 @@ class DatabaseSummary:
     migration_count: int
     table_count: int
     providers: tuple[str, ...]
-
-
-def seed_providers(conn: sqlite3.Connection) -> None:
-    now = int(time.time())
-    for provider in list_provider_infos():
-        conn.execute(
-            """
-            INSERT INTO providers(key, name, base_url, docs_url, added_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(key) DO NOTHING
-            """,
-            (provider.key, provider.name, provider.base_url, provider.docs_url, now),
-        )
-    conn.commit()
 
 
 def list_providers(conn: sqlite3.Connection) -> tuple[str, ...]:
@@ -263,50 +248,6 @@ def get_or_create_time_control(
     ).fetchone()
     if row is None:
         raise RuntimeError("time control upsert did not return a row")
-    return int(row["id"])
-
-
-def upsert_game_stub(
-    conn: sqlite3.Connection,
-    *,
-    provider: str,
-    content_hash: str,
-    variant_id: int,
-    time_control_id: int,
-    rated: bool,
-    provider_game_id: str | None = None,
-    canonical_url: str | None = None,
-    outcome: str | None = None,
-    is_live: bool = False,
-    now: int | None = None,
-) -> int:
-    conn.execute(
-        """
-        INSERT INTO games(
-          provider, provider_game_id, canonical_url, content_hash, variant_id,
-          time_control_id, rated, outcome, is_live, first_seen_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(content_hash) DO UPDATE SET
-          provider_game_id = COALESCE(games.provider_game_id, excluded.provider_game_id),
-          canonical_url = COALESCE(games.canonical_url, excluded.canonical_url)
-        """,
-        (
-            provider,
-            provider_game_id,
-            canonical_url,
-            content_hash,
-            variant_id,
-            time_control_id,
-            int(rated),
-            outcome,
-            int(is_live),
-            now or int(time.time()),
-        ),
-    )
-    row = conn.execute("SELECT id FROM games WHERE content_hash = ?", (content_hash,)).fetchone()
-    if row is None:
-        raise RuntimeError("game upsert did not return a row")
     return int(row["id"])
 
 

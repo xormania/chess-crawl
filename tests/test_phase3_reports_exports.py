@@ -72,6 +72,7 @@ def test_exports_preserve_provider_and_omit_raw_payloads(tmp_path: Path, initial
     game_rows = [json.loads(line) for line in games_path.read_text().splitlines()]
     assert {row["provider"] for row in game_rows} == {"chess.com", "lichess"}
     assert all("raw_body" not in row for row in game_rows)
+    assert all("ply_count" not in row for row in game_rows)
 
     user_rows = [json.loads(line) for line in users_path.read_text().splitlines()]
     assert sorted((row["provider"], row["username_normalized"]) for row in user_rows) == [

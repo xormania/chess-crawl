@@ -17,6 +17,7 @@ from chess_crawl.ingest import (
 import chess_crawl.normalize.games as games_module
 from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.providers.base import FetchPolicy, RawRecord
+from chess_crawl.providers.chesscom.client import ChessComClient
 from chess_crawl.providers.chesscom import endpoints as chesscom_endpoints
 from chess_crawl.providers.lichess import endpoints as lichess_endpoints
 from chess_crawl.providers.http import HttpClient
@@ -51,6 +52,29 @@ def test_lichess_endpoint_construction() -> None:
         == "https://lichess.org/api/games/user/samename?since=1704067200000&until=1704153600000&max=1"
     )
     assert lichess_endpoints.game("abc123") == "https://lichess.org/api/game/abc123"
+
+
+def test_chesscom_archive_units_use_archive_index_fixture(fixtures_dir: Path) -> None:
+    body = _fixture(fixtures_dir, "chesscom/archives.json")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://api.chess.com/pub/player/samename/games/archives"
+        return httpx.Response(200, headers={"content-type": "application/json"}, content=body)
+
+    client = ChessComClient(_config().provider("chess.com"), transport=httpx.MockTransport(handler))
+    try:
+        units = client.list_archive_units("SameName", since=None, until=None)
+    finally:
+        client.close()
+
+    assert [(unit.provider, unit.username, unit.unit_id, unit.url) for unit in units] == [
+        (
+            "chess.com",
+            "samename",
+            "2024/01",
+            "https://api.chess.com/pub/player/samename/games/2024/01",
+        )
+    ]
 
 
 def test_http_attempt_records_only_sanitized_request_headers() -> None:

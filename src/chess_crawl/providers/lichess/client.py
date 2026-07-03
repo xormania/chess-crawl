@@ -154,9 +154,6 @@ class LichessClient:
             target_game_id=game_id,
         )
 
-    def get_games_by_ids(self, refs):
-        raise NotImplementedError("Lichess games-by-ids is reserved for a later bounded batch path")
-
     def close(self) -> None:
         self.http.close()
 

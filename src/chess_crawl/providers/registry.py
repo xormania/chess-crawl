@@ -1,4 +1,4 @@
-"""Static provider registry for Phase 1."""
+"""Provider registry and client factory."""
 
 from __future__ import annotations
 

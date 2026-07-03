@@ -1,4 +1,4 @@
-"""Tiny idempotent migration runner for the Phase 1 schema."""
+"""Idempotent SQLite schema initialization and migration helpers."""
 
 from __future__ import annotations
 

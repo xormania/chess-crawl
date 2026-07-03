@@ -109,14 +109,16 @@ Create a `.env` file or export environment variables.
 
 | Variable                    | Purpose                                      |
 |-----------------------------|----------------------------------------------|
-| `CHESS_CRAWL_LICHESS_TOKEN` | Optional. Raises your rate limits on Lichess. |
 | `CHESS_CRAWL_CONTACT`       | Used to build a polite User-Agent.           |
+| `CHESS_CRAWL_USER_AGENT`    | Optional full User-Agent override.           |
+| `CHESS_CRAWL_LICHESS_TOKEN` | Optional Lichess token for your account limits. |
 
 Example `.env`:
 
 ```bash
-CHESS_CRAWL_LICHESS_TOKEN=your_personal_token_here
 CHESS_CRAWL_CONTACT=you@example.com
+CHESS_CRAWL_USER_AGENT=
+CHESS_CRAWL_LICHESS_TOKEN=
 ```
 
 See `.env.example` for the template.
@@ -136,9 +138,17 @@ The tool uses conservative delays and respects provider rules (including 429 bac
 ## Development
 
 ```bash
-python -m pytest
-python -m chess_crawl --help
+uv run ruff check .
+uv run mypy .
+uv run python -m pytest -q
+uv run python -m pytest -q -m "not live and not slow and not workflow"
+uv run python -m pytest -q -m "workflow and not live and not slow"
+uv run python -m pytest --cov=chess_crawl --cov-report=term-missing -q
+uv run chess-crawl --help
 ```
+
+Default tests are offline. Tests that require provider APIs must be marked `live`
+and are not part of the default local or CI checks.
 
 See `AGENTS.md` for contribution guidelines.
 

@@ -22,7 +22,7 @@ from chess_crawl.storage.repository import (
 )
 
 
-PARSER_VERSION = "phase2-games-v1"
+PARSER_VERSION = "games-normalizer-v1"
 
 
 class TimeControlArgs(TypedDict):

@@ -25,7 +25,3 @@ def user_games(username: str, **params: object) -> str:
 
 def game(game_id: str) -> str:
     return f"{BASE_URL}/game/{quote(game_id.strip(), safe='')}"
-
-
-def games_by_ids() -> str:
-    return f"{BASE_URL}/games/export/_ids"
