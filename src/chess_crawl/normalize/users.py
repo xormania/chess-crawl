@@ -15,7 +15,7 @@ from chess_crawl.storage.raw import insert_source_record, read_raw_payload, upda
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
 
 
-PARSER_VERSION = "phase2-users-v1"
+PARSER_VERSION = "users-normalizer-v1"
 
 
 def normalize_user_payload(conn: sqlite3.Connection, raw_payload_id: int) -> int | None:

@@ -9,6 +9,7 @@ import httpx
 from chess_crawl.config import ProviderSettings
 from chess_crawl.providers.base import ArchiveUnit, FetchPolicy, GameFilters, RawRecord
 from chess_crawl.providers.chesscom import endpoints
+from chess_crawl.providers.chesscom.parser import parse_archives_index
 from chess_crawl.providers.http import HttpClient, HttpFetchResult
 
 
@@ -137,11 +138,8 @@ class ChessComClient:
         record = self.get_archives_index(username)
         if record.body is None:
             return []
-        import json
-
-        body = json.loads(record.body)
         units: list[ArchiveUnit] = []
-        for url in body.get("archives", []):
+        for url in parse_archives_index(record.body):
             year, month = _archive_url_year_month(str(url))
             units.append(
                 ArchiveUnit(
@@ -170,9 +168,6 @@ class ChessComClient:
 
     def get_game(self, game_ref: str) -> RawRecord:
         raise NotImplementedError("Chess.com has no single-game-by-id endpoint; fetch the owning monthly archive")
-
-    def get_games_by_ids(self, refs):
-        raise NotImplementedError("Chess.com has no games-by-ids endpoint; fetch owning monthly archives")
 
     def close(self) -> None:
         self.http.close()

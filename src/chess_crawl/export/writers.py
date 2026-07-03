@@ -21,7 +21,7 @@ def export_games_jsonl(
     rows = conn.execute(
         """
         SELECT g.provider, g.provider_game_id, g.canonical_url, g.outcome, g.is_live,
-               g.status_raw, g.rated, g.created_at, g.ended_at, g.ply_count,
+               g.status_raw, g.rated, g.created_at, g.ended_at,
                v.canonical_name AS variant, v.provider_native_name AS variant_raw,
                tc.time_class, tc.raw_label AS time_control,
                wp.username_normalized AS white_username,

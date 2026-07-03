@@ -1,4 +1,4 @@
-"""Small bounded fetch-and-normalize service used by the Phase 2 CLI."""
+"""Bounded fetch-and-normalize service for provider data."""
 
 from __future__ import annotations
 
@@ -220,7 +220,7 @@ def _store_and_mark_skipped(
         conn,
         raw_payload_id,
         status="skipped",
-        parser_version="phase2-archives-v1",
+        parser_version="chesscom-archives-index-v1",
         normalized_at=int(time.time()),
     )
     return IngestResult(

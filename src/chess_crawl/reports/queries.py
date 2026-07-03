@@ -1,24 +1,10 @@
-"""Small read-side queries available in Phase 1."""
+"""Read-side queries over normalized archive tables."""
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
 from typing import Any
-
-
-def provider_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    return {
-        row["provider"]: int(row["count"])
-        for row in conn.execute(
-            """
-            SELECT provider, COUNT(*) AS count
-            FROM provider_users
-            GROUP BY provider
-            ORDER BY provider
-            """
-        )
-    }
 
 
 @dataclass(frozen=True)

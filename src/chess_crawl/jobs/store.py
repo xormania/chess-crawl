@@ -115,6 +115,8 @@ def enqueue_job(
 def _validate_schedulable_job(*, provider: str, kind: str) -> None:
     if kind not in JOB_KINDS:
         raise ValueError(f"unsupported job kind: {kind}")
+    if kind == "fetch_user_stats" and provider != "chess.com":
+        raise ValueError("fetch_user_stats jobs are supported only for chess.com")
     if kind == "fetch_game_by_id" and provider != "lichess":
         raise ValueError("fetch_game_by_id jobs are supported only for lichess")
 

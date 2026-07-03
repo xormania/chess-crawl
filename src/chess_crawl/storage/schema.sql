@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS errors (
   provider TEXT REFERENCES providers(key),
   url TEXT,
   endpoint_type TEXT,
+  -- timeout/parse/stream are reserved for future structured failure classification.
   error_kind TEXT NOT NULL
     CHECK(error_kind IN ('http_404','http_410','http_429','timeout','parse','stream','other')),
   status_code INTEGER,
@@ -87,6 +88,7 @@ CREATE TABLE IF NOT EXISTS raw_payloads (
   raw_body BLOB NOT NULL,
   body_bytes INTEGER NOT NULL,
   parser_version TEXT,
+  -- stale is reserved for future offline re-normalization of preserved raw payloads.
   normalization_status TEXT NOT NULL DEFAULT 'pending'
     CHECK(normalization_status IN ('pending','parsed','failed','skipped','stale')),
   normalized_at INTEGER,
@@ -199,6 +201,7 @@ CREATE TABLE IF NOT EXISTS games (
   status_raw TEXT,
   created_at INTEGER,
   ended_at INTEGER,
+  -- ply_count and tournament_ref are reserved internal columns; current exports omit unset fields.
   ply_count INTEGER,
   eco TEXT,
   opening_name TEXT,

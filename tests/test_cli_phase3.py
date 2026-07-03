@@ -178,15 +178,19 @@ def test_crawl_opponents_cli_requires_caps_and_passes_month_bounds(
     ) == 2
 
 
-def test_jobs_list_show_and_resume_paths(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_jobs_list_show_and_resume_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     db_path = tmp_path / "archive.sqlite"
     initialize_database(db_path)
     with closing(connect(db_path)) as conn:
         job_id = store.enqueue_job(
             conn,
             provider="lichess",
-            kind="resume",
-            target="local",
+            kind="fetch_user_profile",
+            target="SameName",
             params={"scope": "all"},
         ).job_id
         claimed = store.claim_next_job(conn)
@@ -196,12 +200,34 @@ def test_jobs_list_show_and_resume_paths(tmp_path: Path, capsys: pytest.CaptureF
 
     assert cli.run(["jobs", "list", "--db", str(db_path)]) == 0
     list_out = capsys.readouterr()
-    assert "resume" in list_out.out
+    assert "fetch_user_profile" in list_out.out
 
     assert cli.run(["jobs", "show", str(job_id), "--db", str(db_path)]) == 0
     show_out = capsys.readouterr()
     assert "State: blocked" in show_out.out
     assert '"scope"' in show_out.out
+
+    class FakeRunner:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def run(self, *, crawl_run_id=None, max_jobs=None, resume_stale=False, unblock=False):
+            assert crawl_run_id is None
+            assert max_jobs == 1
+            assert resume_stale is True
+            assert unblock is True
+            stale = store.resume_stale_in_progress(self.conn, crawl_run_id=crawl_run_id)
+            unblocked = store.unblock_jobs(self.conn, crawl_run_id=crawl_run_id)
+            return SimpleNamespace(
+                stale_resumed=stale,
+                unblocked=unblocked,
+                done=0,
+                skipped=0,
+                blocked=0,
+                errors=0,
+            )
+
+    monkeypatch.setattr(cli, "JobRunner", FakeRunner)
 
     assert cli.run(["jobs", "resume", "--max-jobs", "1", "--db", str(db_path)]) == 0
     resume_out = capsys.readouterr()
@@ -209,7 +235,7 @@ def test_jobs_list_show_and_resume_paths(tmp_path: Path, capsys: pytest.CaptureF
     with closing(connect(db_path)) as conn:
         job = store.get_job(conn, job_id)
     assert job is not None
-    assert job.state == "done"
+    assert job.state == "pending"
 
     assert cli.run(["jobs", "list", "--limit", "0", "--db", str(db_path)]) == 2
     assert cli.run(["jobs", "show", "999", "--db", str(db_path)]) == 1

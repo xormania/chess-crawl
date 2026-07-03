@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Mapping
-from typing import Any
 
 import pytest
 
@@ -259,20 +258,14 @@ def test_runner_fetch_game_by_id_uses_lichess_service(
     assert calls == ["abc123"]
 
 
-@pytest.mark.parametrize("kind", ["fetch_games_by_ids", "import_export_dump"])
-def test_unimplemented_job_kinds_are_not_schedulable(
-    initialized_conn: sqlite3.Connection,
-    kind: str,
-) -> None:
-    unsupported_kind: Any = kind
-
-    with pytest.raises(ValueError, match="unsupported job kind"):
-        store.enqueue_job(initialized_conn, provider="lichess", kind=unsupported_kind, target="abc123")
-
-
 def test_chesscom_fetch_game_by_id_jobs_are_not_schedulable(initialized_conn: sqlite3.Connection) -> None:
     with pytest.raises(ValueError, match="supported only for lichess"):
         store.enqueue_job(initialized_conn, provider="chess.com", kind="fetch_game_by_id", target="1000000001")
+
+
+def test_lichess_fetch_user_stats_jobs_are_not_schedulable(initialized_conn: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError, match="supported only for chess.com"):
+        store.enqueue_job(initialized_conn, provider="lichess", kind="fetch_user_stats", target="SameName")
 
 
 def test_runner_reports_legacy_chesscom_fetch_game_by_id_as_error(initialized_conn: sqlite3.Connection) -> None:
@@ -298,7 +291,7 @@ def test_runner_rejects_claimed_job_without_persisted_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_claim_next_job(*args: object, **kwargs: object) -> DiscoveryJob:
-        return DiscoveryJob(id=None, provider="lichess", kind="resume", target="local")
+        return DiscoveryJob(id=None, provider="lichess", kind="fetch_user_profile", target="SameName")
 
     monkeypatch.setattr(runner_module.store, "claim_next_job", fake_claim_next_job)
 

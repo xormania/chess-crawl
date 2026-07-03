@@ -135,17 +135,11 @@ class JobRunner:
             if job.kind == "fetch_user_games":
                 result = self._fetch_user_games(job)
                 return _outcome_from_ingest(result)
-            if job.kind == "fetch_monthly_archive":
-                result = self._fetch_monthly_archive(job)
-                return _outcome_from_ingest(result)
             if job.kind == "fetch_game_by_id":
                 result = self._fetch_game_by_id(job)
                 return _outcome_from_ingest(result)
             if job.kind == "crawl_opponents":
                 return self._crawl_opponents(job)
-            if job.kind == "resume":
-                resumed = store.resume_stale_in_progress(self.conn, crawl_run_id=job.crawl_run_id)
-                return ExecutionOutcome("done", f"resumed {resumed} stale job(s)")
             return ExecutionOutcome("error", f"unknown job kind: {job.kind}")
         except Exception as exc:
             store.insert_error(
@@ -168,15 +162,13 @@ class JobRunner:
                 job_id=job.id,
                 crawl_run_id=job.crawl_run_id,
             )
-        return fetch_user_profile(
-            self.conn,
+        return IngestResult(
             job.provider,
-            job.target,
-            config=self.config,
-            transport=self.transport,
-            sleeper=self.sleeper,
-            job_id=job.id,
-            crawl_run_id=job.crawl_run_id,
+            "user_stats",
+            400,
+            None,
+            (),
+            "fetch_user_stats is supported only for chess.com",
         )
 
     def _fetch_user_games(self, job: DiscoveryJob) -> IngestResult:
@@ -245,22 +237,6 @@ class JobRunner:
             if last_result.status_code not in {200, 304}:
                 return last_result
         return last_result
-
-    def _fetch_monthly_archive(self, job: DiscoveryJob) -> IngestResult:
-        params = store.load_params(job.params_json)
-        year = int(params["year"])
-        month = int(params["month"])
-        return fetch_chesscom_month(
-            self.conn,
-            job.target,
-            year,
-            month,
-            config=self.config,
-            transport=self.transport,
-            sleeper=self.sleeper,
-            job_id=job.id,
-            crawl_run_id=job.crawl_run_id,
-        )
 
     def _fetch_game_by_id(self, job: DiscoveryJob) -> IngestResult:
         if job.provider != "lichess":

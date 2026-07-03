@@ -1,8 +1,4 @@
-"""Configuration value objects for provider clients.
-
-Phase 1 does not load config files or perform HTTP requests. These dataclasses
-define the provider-neutral settings seam used by later phases.
-"""
+"""Configuration value objects for provider clients and CLI runtime settings."""
 
 from __future__ import annotations
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Iterator, Literal, Mapping, Protocol, runtime_checkable
 
 
 ProviderKey = Literal["chess.com", "lichess"]
@@ -14,8 +14,6 @@ EndpointType = Literal[
     "monthly_archive",
     "user_games_stream",
     "game",
-    "games_by_ids",
-    "import_dump",
 ]
 Outcome = Literal["white_win", "black_win", "draw"]
 Color = Literal["white", "black"]
@@ -177,7 +175,5 @@ class ProviderClient(Protocol):
     ) -> Iterator[RawRecord]: ...
 
     def get_game(self, game_ref: str) -> RawRecord: ...
-
-    def get_games_by_ids(self, refs: Sequence[str]) -> Iterator[RawRecord]: ...
 
     def policy(self) -> FetchPolicy: ...

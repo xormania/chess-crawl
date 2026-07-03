@@ -11,10 +11,8 @@ JobKind = Literal[
     "fetch_user_profile",
     "fetch_user_stats",
     "fetch_user_games",
-    "fetch_monthly_archive",
     "fetch_game_by_id",
     "crawl_opponents",
-    "resume",
 ]
 
 JOB_STATES: tuple[str, ...] = ("pending", "in_progress", "done", "error", "skipped", "blocked")
@@ -22,10 +20,8 @@ JOB_KINDS: tuple[str, ...] = (
     "fetch_user_profile",
     "fetch_user_stats",
     "fetch_user_games",
-    "fetch_monthly_archive",
     "fetch_game_by_id",
     "crawl_opponents",
-    "resume",
 )
 
 
