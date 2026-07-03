@@ -98,6 +98,8 @@ def store_raw_payload(
             normalization_status,
         ),
     )
+    if cursor.lastrowid is None:
+        raise RuntimeError("raw payload insert did not return a row id")
     raw_payload_id = int(cursor.lastrowid)
     if commit:
         conn.commit()
@@ -239,6 +241,8 @@ def insert_fetch_log(
     )
     if commit:
         conn.commit()
+    if cursor.lastrowid is None:
+        raise RuntimeError("fetch log insert did not return a row id")
     return int(cursor.lastrowid)
 
 

@@ -10,7 +10,7 @@ from chess_crawl import cli
 import chess_crawl.ingest as ingest_module
 from chess_crawl.jobs import store
 from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
-from chess_crawl.providers.base import RawRecord
+from chess_crawl.providers.base import EndpointType, RawRecord
 from chess_crawl.storage.db import connect
 from chess_crawl.storage.migrations import initialize_database
 
@@ -76,7 +76,7 @@ def _lichess_game(
 def _raw_record(
     *,
     provider: str,
-    endpoint_type: str,
+    endpoint_type: EndpointType,
     canonical_source_key: str,
     body: bytes | None,
     status: int = 200,

@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -92,7 +93,7 @@ def test_crawl_opponents_cli_requires_caps_and_passes_month_bounds(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     db_path = tmp_path / "archive.sqlite"
-    seen: dict[str, object] = {}
+    seen: dict[str, Any] = {}
 
     def fake_create(conn, *, provider, username, since, until, bounds):
         seen.update(
@@ -148,8 +149,10 @@ def test_crawl_opponents_cli_requires_caps_and_passes_month_bounds(
     assert seen["since"] == 1704067200
     assert seen["until"] == 1709251200
     assert seen["crawl_run_id"] == 12
-    assert seen["bounds"].max_depth == 1
-    assert seen["bounds"].max_users == 3
+    bounds = seen["bounds"]
+    assert isinstance(bounds, cli.CrawlBounds)
+    assert bounds.max_depth == 1
+    assert bounds.max_users == 3
 
     assert cli.run(
         [
@@ -182,22 +185,23 @@ def test_jobs_list_show_and_resume_paths(tmp_path: Path, capsys: pytest.CaptureF
         job_id = store.enqueue_job(
             conn,
             provider="lichess",
-            kind="fetch_games_by_ids",
-            target="abc,def",
-            params={"ids": ["abc", "def"]},
+            kind="resume",
+            target="local",
+            params={"scope": "all"},
         ).job_id
         claimed = store.claim_next_job(conn)
         assert claimed is not None
+        assert claimed.id is not None
         store.mark_blocked(conn, claimed.id, reason="waiting")
 
     assert cli.run(["jobs", "list", "--db", str(db_path)]) == 0
     list_out = capsys.readouterr()
-    assert "fetch_games_by_ids" in list_out.out
+    assert "resume" in list_out.out
 
     assert cli.run(["jobs", "show", str(job_id), "--db", str(db_path)]) == 0
     show_out = capsys.readouterr()
     assert "State: blocked" in show_out.out
-    assert '"ids"' in show_out.out
+    assert '"scope"' in show_out.out
 
     assert cli.run(["jobs", "resume", "--max-jobs", "1", "--db", str(db_path)]) == 0
     resume_out = capsys.readouterr()
@@ -205,7 +209,7 @@ def test_jobs_list_show_and_resume_paths(tmp_path: Path, capsys: pytest.CaptureF
     with closing(connect(db_path)) as conn:
         job = store.get_job(conn, job_id)
     assert job is not None
-    assert job.state == "skipped"
+    assert job.state == "done"
 
     assert cli.run(["jobs", "list", "--limit", "0", "--db", str(db_path)]) == 2
     assert cli.run(["jobs", "show", "999", "--db", str(db_path)]) == 1
