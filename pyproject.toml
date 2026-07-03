@@ -7,6 +7,7 @@ name = "chess-crawl"
 version = "0.1.0"
 description = "Provider-neutral, raw-first local chess data archive"
 readme = "README.md"
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = ["httpx>=0.27,<1.0"]
 
@@ -22,6 +23,12 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "workflow: offline CLI workflow tests that exercise multiple commands and SQLite state",
+    "integration: offline integration tests that cross package boundaries",
+    "slow: slow tests excluded from default CI unless explicitly selected",
+    "live: tests requiring live provider APIs or network access; skipped by default",
+]
 
 [dependency-groups]
 dev = [

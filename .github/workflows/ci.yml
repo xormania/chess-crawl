@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  promotion-source:
+    name: Require dev -> master
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check promotion source
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          echo "base_ref=${BASE_REF}"
+          echo "head_ref=${HEAD_REF}"
+          if [ "${BASE_REF}" != "master" ] || [ "${HEAD_REF}" != "dev" ]; then
+            echo "Only pull requests from dev to master are accepted for promotion."
+            exit 1
+          fi
+
+  offline-checks:
+    name: Offline checks (Python 3.11)
+    runs-on: ubuntu-latest
+    needs: promotion-source
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev --group dev
+
+      - name: Ruff
+        run: uv run ruff check .
+
+      - name: Unit tests
+        run: uv run python -m pytest -q -m "not live and not slow and not workflow"
+
+      - name: CLI workflow tests
+        run: uv run python -m pytest -q -m "workflow and not live and not slow"
+
+      - name: Packaged CLI help
+        run: uv run chess-crawl --help
