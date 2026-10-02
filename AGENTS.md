@@ -108,6 +108,21 @@ Keep implementation aligned with these invariants:
 * Keep provider-specific API behavior isolated in provider-specific modules.
 * Keep shared storage and reports provider-neutral.
 
+## Persistence and State Ownership
+
+* `storage/db.py` is the only SQLite connection and transaction implementation.
+  Use its managed connection APIs, `transaction`, and `atomic`; do not add
+  local connection wrappers, direct commits, or optional commit flags.
+* Keep SQL in `storage/` or `jobs/state.py`. CLI handlers, normalizers, exporters,
+  and crawl execution call these owners instead of issuing SQL.
+* `jobs/state.py` owns durable job and crawl-run transitions and recovery.
+  Keep crawl strategy in `jobs/discovery.py` and execution in `jobs/runner.py`.
+* Use `storage/queries.py` for report and export reads. Do not create a parallel
+  query layer or compatibility copies of moved implementations.
+* Commit raw responses and fetch logs before normalization. Group normalized
+  entities, provenance, and normalization status in one transaction. Never
+  hold a database transaction across a provider request.
+
 ## Testing
 
 Use `uv` for Python commands unless the active shell is already known to be inside the project virtualenv.
@@ -151,6 +166,10 @@ Do not add default tests that require internet access.
 Live API tests, if added, must be explicitly marked and skipped by default.
 
 Do not make tests sleep in real time for rate-limit behavior. Use fake clocks, monkeypatching, or fixtures.
+
+Organize tests by behavior, not implementation phase. Reuse database fixtures
+from `tests/conftest.py` and data builders from `tests/support.py`. Parameterize
+shared scenarios while retaining distinct failure and integration checks.
 
 ## Data and Secrets
 

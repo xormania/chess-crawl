@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
@@ -20,11 +19,11 @@ from chess_crawl.ingest import (
     fetch_lichess_games,
     fetch_user_profile,
 )
-from chess_crawl.jobs import store as job_store
+from chess_crawl.jobs import state as job_state
 from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.providers.registry import list_provider_infos
-from chess_crawl.reports.queries import (
+from chess_crawl.storage.queries import (
     games_by_month,
     opponent_report,
     query_game,
@@ -33,8 +32,8 @@ from chess_crawl.reports.queries import (
     summary_report,
     user_game_summary,
 )
-from chess_crawl.storage.db import connect, database_exists
-from chess_crawl.storage.migrations import initialize_database
+from chess_crawl.storage.db import connection, database_exists, open_database
+from chess_crawl.storage.migrations import initialize
 from chess_crawl.storage.repository import database_summary
 
 
@@ -196,7 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    result = initialize_database(args.db)
+    with connection(args.db, mode="rwc") as conn:
+        result = initialize(conn)
     db_path = Path(args.db).resolve()
     applied = ", ".join(result.applied) if result.applied else "none"
 
@@ -233,7 +233,7 @@ def _cmd_db_info(args: argparse.Namespace) -> int:
         print("Run `chess-crawl init --db PATH` first.", file=sys.stderr)
         return 1
 
-    with _connect_for_read(db_path) as conn:
+    with open_database(db_path) as conn:
         summary = database_summary(conn)
 
     print(f"Database: {db_path.resolve()}")
@@ -245,25 +245,25 @@ def _cmd_db_info(args: argparse.Namespace) -> int:
 
 
 def _cmd_fetch_user(args: argparse.Namespace) -> int:
-    with _connect_for_write(args.db) as conn:
+    with open_database(args.db, writable=True) as conn:
         result = fetch_user_profile(conn, args.provider, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_stats(args: argparse.Namespace) -> int:
-    with _connect_for_write(args.db) as conn:
+    with open_database(args.db, writable=True) as conn:
         result = fetch_chesscom_stats(conn, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_archives(args: argparse.Namespace) -> int:
-    with _connect_for_write(args.db) as conn:
+    with open_database(args.db, writable=True) as conn:
         result = fetch_chesscom_archives(conn, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_games(args: argparse.Namespace) -> int:
-    with _connect_for_write(args.db) as conn:
+    with open_database(args.db, writable=True) as conn:
         if args.provider == "chess.com":
             if not args.month:
                 print("Chess.com game fetch requires --month YYYY-MM.", file=sys.stderr)
@@ -288,7 +288,7 @@ def _cmd_fetch_games(args: argparse.Namespace) -> int:
 
 
 def _cmd_query_user(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         row = query_user(conn, args.provider, args.username)
     if row is None:
         print("User not found.", file=sys.stderr)
@@ -304,7 +304,7 @@ def _cmd_query_user(args: argparse.Namespace) -> int:
 
 
 def _cmd_query_game(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         row = query_game(conn, args.provider, args.game_id)
     if row is None:
         print("Game not found.", file=sys.stderr)
@@ -326,7 +326,7 @@ def _cmd_query_raw(args: argparse.Namespace) -> int:
     if args.limit <= 0:
         print("--limit must be greater than zero.", file=sys.stderr)
         return 2
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         rows = query_raw(conn, args.provider, args.limit)
     headers = ("ID", "PROVIDER", "ENDPOINT", "STATUS", "BYTES", "NORM", "SOURCE")
     table = [
@@ -363,7 +363,7 @@ def _cmd_crawl_opponents(args: argparse.Namespace) -> int:
         max_games=args.max_games,
         max_jobs=args.max_jobs,
     )
-    with _connect_for_write(args.db) as conn:
+    with open_database(args.db, writable=True) as conn:
         run_id, root_job_id = create_opponent_crawl(
             conn,
             provider=args.provider,
@@ -387,10 +387,10 @@ def _cmd_crawl_opponents(args: argparse.Namespace) -> int:
 
 
 def _cmd_jobs_status(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
-        runs = job_store.crawl_runs(conn)
-        states = job_store.job_state_counts(conn, crawl_run_id=args.run)
-        by_kind = job_store.job_kind_state_counts(conn, crawl_run_id=args.run)
+    with open_database(args.db) as conn:
+        runs = job_state.crawl_runs(conn)
+        states = job_state.job_state_counts(conn, crawl_run_id=args.run)
+        by_kind = job_state.job_kind_state_counts(conn, crawl_run_id=args.run)
 
     print("Crawl runs")
     run_rows = [
@@ -422,8 +422,8 @@ def _cmd_jobs_list(args: argparse.Namespace) -> int:
     if args.limit <= 0:
         print("--limit must be greater than zero.", file=sys.stderr)
         return 2
-    with _connect_for_read(args.db) as conn:
-        rows = job_store.list_jobs(conn, limit=args.limit)
+    with open_database(args.db) as conn:
+        rows = job_state.list_jobs(conn, limit=args.limit)
     _print_table(
         ("ID", "RUN", "PROVIDER", "KIND", "TARGET", "STATE", "DEPTH", "ATTEMPTS"),
         [
@@ -444,8 +444,8 @@ def _cmd_jobs_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_jobs_show(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
-        job = job_store.get_job(conn, args.job_id)
+    with open_database(args.db) as conn:
+        job = job_state.get_job(conn, args.job_id)
     if job is None:
         print(f"Job not found: {args.job_id}", file=sys.stderr)
         return 1
@@ -462,7 +462,7 @@ def _cmd_jobs_show(args: argparse.Namespace) -> int:
     print(f"Dedup key: {job.dedup_key}")
     print(f"Reason: {job.reason or '-'}")
     print("Params:")
-    print(json.dumps(job_store.load_params(job.params_json), indent=2, sort_keys=True))
+    print(json.dumps(job_state.load_params(job.params_json), indent=2, sort_keys=True))
     return 0
 
 
@@ -470,7 +470,7 @@ def _cmd_jobs_resume(args: argparse.Namespace) -> int:
     if args.max_jobs is not None and args.max_jobs <= 0:
         print("--max-jobs must be greater than zero.", file=sys.stderr)
         return 2
-    with _connect_for_write(args.db) as conn:
+    with open_database(args.db, writable=True) as conn:
         result = JobRunner(conn).run(
             crawl_run_id=args.run,
             max_jobs=args.max_jobs,
@@ -491,7 +491,7 @@ def _cmd_jobs_resume(args: argparse.Namespace) -> int:
 
 
 def _cmd_report_summary(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         report = summary_report(conn)
     print("Providers")
     _print_table(
@@ -509,7 +509,7 @@ def _cmd_report_summary(args: argparse.Namespace) -> int:
 
 
 def _cmd_report_user(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         row = user_game_summary(conn, args.provider, args.username)
     if row is None:
         print("User not found.", file=sys.stderr)
@@ -526,7 +526,7 @@ def _cmd_report_user(args: argparse.Namespace) -> int:
 
 
 def _cmd_report_opponents(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         rows = opponent_report(conn, args.provider, args.username)
     if rows is None:
         print("User not found.", file=sys.stderr)
@@ -550,7 +550,7 @@ def _cmd_report_opponents(args: argparse.Namespace) -> int:
 
 
 def _cmd_report_games_by_month(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         rows = games_by_month(conn, provider=args.provider)
     _print_table(
         ("MONTH", "GAMES", "WHITE_WINS", "BLACK_WINS", "DRAWS", "UNFINISHED"),
@@ -570,21 +570,21 @@ def _cmd_report_games_by_month(args: argparse.Namespace) -> int:
 
 
 def _cmd_export_games(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         count = export_games_jsonl(conn, output=args.output, provider=args.provider)
     _print_export_result("games", count, args.output)
     return 0
 
 
 def _cmd_export_users(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         count = export_users_jsonl(conn, output=args.output, provider=args.provider)
     _print_export_result("users", count, args.output)
     return 0
 
 
 def _cmd_export_graph(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         count = export_graph_csv(conn, output=args.output, provider=args.provider)
     _print_export_result("graph edges", count, args.output)
     return 0
@@ -600,27 +600,6 @@ def _print_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
     print(fmt.format(*headers))
     for row in rows:
         print(fmt.format(*row))
-
-
-@contextmanager
-def _connect_for_write(db_path: Path):
-    initialize_database(db_path)
-    conn = connect(db_path)
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-@contextmanager
-def _connect_for_read(db_path: Path):
-    if not database_exists(db_path):
-        raise SystemExit(f"Database not found: {db_path}\nRun `chess-crawl init --db PATH` first.")
-    conn = connect(db_path)
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 
 def _print_ingest_result(result: IngestResult) -> int:
@@ -671,7 +650,11 @@ def _parse_date_or_month(value: str, *, is_until: bool) -> int:
 def run(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.handler(args)
+    try:
+        return args.handler(args)
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 def main(argv: Sequence[str] | None = None) -> None:

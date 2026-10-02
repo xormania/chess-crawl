@@ -69,7 +69,6 @@ def normalize_games_payload(conn: sqlite3.Connection, raw_payload_id: int) -> li
             status=status,
             parser_version=PARSER_VERSION,
             normalized_at=int(time.time()),
-            commit=False,
         )
     return game_ids
 
@@ -123,7 +122,6 @@ def _normalize_game(
         json_pointer=json_pointer,
         raw_payload_id=raw_payload_id,
         first_seen_at=fetched_at,
-        commit=False,
     )
     _normalize_participant(conn, game_id, game.provider, game.white, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
     _normalize_participant(conn, game_id, game.provider, game.black, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
@@ -150,7 +148,6 @@ def _normalize_participant(
             provider_user_id=participant.provider_user_id,
             display_username=participant.display_username or participant.username_normalized,
             now=fetched_at,
-            commit=False,
         )
     participant_id = upsert_game_participant(
         conn,
@@ -171,7 +168,6 @@ def _normalize_participant(
         source_key=source_key,
         raw_payload_id=raw_payload_id,
         first_seen_at=fetched_at,
-        commit=False,
     )
     upsert_rating_at_game(
         conn,

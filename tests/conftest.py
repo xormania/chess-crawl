@@ -1,19 +1,15 @@
 from __future__ import annotations
 
 import socket
+import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from chess_crawl.storage.db import connect
-from chess_crawl.storage.migrations import initialize
-from chess_crawl.storage.repository import (
-    get_or_create_time_control,
-    get_or_create_variant,
-    upsert_game,
-    upsert_game_participant,
-    upsert_provider_user,
-)
+from chess_crawl.storage.db import open_database
+from support import seed_game
+from chess_crawl.storage.discovery import OpponentEdge, record_discovery_edges
 
 
 @pytest.fixture(autouse=True)
@@ -30,67 +26,33 @@ def fixtures_dir() -> Path:
 
 
 @pytest.fixture
-def initialized_conn():
-    conn = connect(":memory:")
-    initialize(conn)
-    try:
+def initialized_conn() -> Iterator[sqlite3.Connection]:
+    with open_database(":memory:", writable=True) as conn:
         yield conn
-    finally:
-        conn.close()
 
 
-def seed_game(
-    conn,
-    *,
-    provider: str,
-    game_key: str,
-    white: str,
-    black: str,
-    outcome: str | None = "white_win",
-    ended_at: int = 1704067200,
-) -> tuple[int, int, int]:
-    white_id = upsert_provider_user(conn, provider=provider, username=white)
-    black_id = upsert_provider_user(conn, provider=provider, username=black)
-    variant_id = get_or_create_variant(
-        conn,
-        provider=provider,
-        provider_native_name="standard",
-        canonical_name="standard",
-    )
-    time_control_id = get_or_create_time_control(
-        conn,
-        kind="clock",
-        initial_seconds=300,
-        increment_seconds=0,
-        days=None,
-        time_class="blitz",
-        raw_label="300",
-    )
-    game_id = upsert_game(
-        conn,
-        provider=provider,
-        provider_game_id=game_key,
-        canonical_url=f"https://example.test/{provider}/{game_key}",
-        content_hash=f"sha256:{provider}:{game_key}",
-        variant_id=variant_id,
-        time_control_id=time_control_id,
-        rated=True,
-        outcome=outcome,
-        ended_at=ended_at,
-    )
-    upsert_game_participant(
-        conn,
-        game_id=game_id,
-        color="white",
-        provider_user_id=white_id,
-        username_normalized=white.lower(),
-    )
-    upsert_game_participant(
-        conn,
-        game_id=game_id,
-        color="black",
-        provider_user_id=black_id,
-        username_normalized=black.lower(),
-    )
-    conn.commit()
-    return game_id, white_id, black_id
+@pytest.fixture
+def archive_path(tmp_path: Path) -> Path:
+    path = tmp_path / "archive.sqlite"
+    with open_database(path, writable=True):
+        pass
+    return path
+
+
+@pytest.fixture
+def seeded_archive(tmp_path: Path) -> Path:
+    """Two providers with a shared username and one recorded discovery edge."""
+    archive_path = tmp_path / "archive.sqlite"
+    with open_database(archive_path, writable=True) as conn:
+        game_id, same_id, opponent_id = seed_game(
+            conn, provider="chess.com", game_key="cc-1", white="SameName", black="Opponent",
+        )
+        seed_game(
+            conn, provider="lichess", game_key="li-1", white="SameName", black="Opponent",
+            outcome="black_win",
+        )
+        record_discovery_edges(
+            conn, crawl_run_id=None, provider="chess.com", from_user_id=same_id, depth=1,
+            edges=[OpponentEdge(opponent_id, "opponent", game_id, 1)],
+        )
+    return archive_path
