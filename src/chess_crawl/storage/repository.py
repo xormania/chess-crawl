@@ -7,6 +7,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from chess_crawl.storage.db import atomic
 from chess_crawl.storage.migrations import current_version
 
 
@@ -38,6 +39,7 @@ def database_summary(conn: sqlite3.Connection) -> DatabaseSummary:
     )
 
 
+@atomic
 def upsert_provider_user(
     conn: sqlite3.Connection,
     *,
@@ -48,7 +50,6 @@ def upsert_provider_user(
     account_status: str | None = None,
     title: str | None = None,
     now: int | None = None,
-    commit: bool = True,
 ) -> int:
     timestamp = now or int(time.time())
     username_normalized = username.strip().lower()
@@ -75,8 +76,6 @@ def upsert_provider_user(
                 """,
                 (username_normalized, display, account_status, title, timestamp, int(existing["id"])),
             )
-            if commit:
-                conn.commit()
             return int(existing["id"])
 
     conn.execute(
@@ -104,8 +103,6 @@ def upsert_provider_user(
             timestamp,
         ),
     )
-    if commit:
-        conn.commit()
 
     row = conn.execute(
         """
@@ -119,6 +116,7 @@ def upsert_provider_user(
     return int(row["id"])
 
 
+@atomic
 def upsert_user_snapshot(
     conn: sqlite3.Connection,
     *,
@@ -138,7 +136,6 @@ def upsert_user_snapshot(
     count_loss: int | None = None,
     count_draw: int | None = None,
     perfs_or_stats: object | None = None,
-    commit: bool = True,
 ) -> int:
     perfs_text = (
         None
@@ -176,8 +173,6 @@ def upsert_user_snapshot(
             raw_payload_id,
         ),
     )
-    if commit:
-        conn.commit()
     row = conn.execute(
         """
         SELECT id FROM user_snapshots
@@ -190,6 +185,7 @@ def upsert_user_snapshot(
     return int(row["id"])
 
 
+@atomic
 def get_or_create_variant(
     conn: sqlite3.Connection,
     *,
@@ -215,6 +211,7 @@ def get_or_create_variant(
     return int(row["id"])
 
 
+@atomic
 def get_or_create_time_control(
     conn: sqlite3.Connection,
     *,
@@ -251,6 +248,7 @@ def get_or_create_time_control(
     return int(row["id"])
 
 
+@atomic
 def upsert_game(
     conn: sqlite3.Connection,
     *,
@@ -356,6 +354,7 @@ def upsert_game(
     return int(existing["id"])
 
 
+@atomic
 def upsert_game_participant(
     conn: sqlite3.Connection,
     *,
@@ -400,6 +399,7 @@ def upsert_game_participant(
     return int(row["id"])
 
 
+@atomic
 def upsert_rating_at_game(
     conn: sqlite3.Connection,
     *,
@@ -441,3 +441,32 @@ def _find_existing_game(
         if row is not None:
             return row
     return conn.execute("SELECT id FROM games WHERE content_hash = ?", (content_hash,)).fetchone()
+
+
+@atomic
+def insert_error(
+    conn: sqlite3.Connection,
+    *,
+    provider: str | None,
+    error_kind: str,
+    message: str,
+    status_code: int | None = None,
+    url: str | None = None,
+    endpoint_type: str | None = None,
+    retry_count: int = 0,
+    is_dead: bool = True,
+    occurred_at: int | None = None,
+) -> int:
+    """Record fetch and job failures through the same persistence operation."""
+    cursor = conn.execute(
+        """
+        INSERT INTO errors(provider, url, endpoint_type, error_kind, status_code,
+                           message, occurred_at, retry_count, is_dead)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (provider, url, endpoint_type, error_kind, status_code, message,
+         int(time.time()) if occurred_at is None else occurred_at, retry_count, int(is_dead)),
+    )
+    if cursor.lastrowid is None:
+        raise RuntimeError("error insert did not return a row id")
+    return int(cursor.lastrowid)

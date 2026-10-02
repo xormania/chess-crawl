@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import httpx
@@ -15,11 +16,14 @@ from chess_crawl.ingest import (
     fetch_user_profile,
 )
 import chess_crawl.normalize.games as games_module
+import chess_crawl.normalize.users as users_module
 from chess_crawl.normalize.games import normalize_games_payload
+from chess_crawl.normalize.users import normalize_user_payload
 from chess_crawl.providers.base import FetchPolicy, RawRecord
 from chess_crawl.providers.chesscom.client import ChessComClient
 from chess_crawl.providers.chesscom import endpoints as chesscom_endpoints
 from chess_crawl.providers.lichess import endpoints as lichess_endpoints
+from chess_crawl.providers.registry import get_provider_info, known_keys, list_provider_infos
 from chess_crawl.providers.http import HttpClient
 from chess_crawl.storage.raw import store_raw_payload
 
@@ -367,28 +371,61 @@ def test_lichess_games_ndjson_normalizes_ms_timestamps(fixtures_dir: Path, initi
     assert b"1704067200000" in conn.execute("SELECT raw_body FROM raw_payloads").fetchone()[0]
 
 
-def test_provider_scoped_same_username_across_providers(fixtures_dir: Path, initialized_conn) -> None:
+def test_provider_registry_lists_chesscom_and_lichess() -> None:
+    assert known_keys() == ["chess.com", "lichess"]
+
+    infos = {info.key: info for info in list_provider_infos()}
+    assert infos["chess.com"].single_game_by_id is False
+    assert infos["lichess"].single_game_by_id is True
+    assert get_provider_info("lichess").policy.fixed_429_backoff_s == 60.0
+
+
+@pytest.mark.parametrize(
+    ("provider", "endpoint_type", "fixture", "source_key"),
+    [
+        ("chess.com", "user_profile", "chesscom/player.json", "chess.com/player/samename/profile"),
+        ("lichess", "user_profile", "lichess/user.json", "lichess/user/samename/profile"),
+        ("chess.com", "user_stats", "chesscom/stats.json", "chess.com/player/samename/stats"),
+    ],
+)
+def test_user_normalization_failure_rolls_back_all_normalized_rows(
+    fixtures_dir: Path,
+    initialized_conn: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    provider,
+    endpoint_type,
+    fixture: str,
+    source_key: str,
+) -> None:
     conn = initialized_conn
-    chess_body = _fixture(fixtures_dir, "chesscom/player.json")
-    lichess_body = _fixture(fixtures_dir, "lichess/user.json")
-
-    fetch_user_profile(
+    raw_payload_id = store_raw_payload(
         conn,
-        "chess.com",
-        "SameName",
-        config=_config(),
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=chess_body)),
+        RawRecord(
+            provider=provider,
+            endpoint_type=endpoint_type,
+            request_url=f"https://fixture.invalid/{source_key}",
+            canonical_source_key=source_key,
+            fetched_at=123,
+            body=_fixture(fixtures_dir, fixture),
+            media_type="application/json",
+        ),
     )
-    fetch_user_profile(
-        conn,
-        "lichess",
-        "SameName",
-        config=_config(),
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=lichess_body)),
-    )
+    original_insert = users_module.insert_source_record
 
-    rows = conn.execute("SELECT provider, username_normalized FROM provider_users ORDER BY provider").fetchall()
-    assert [(row["provider"], row["username_normalized"]) for row in rows] == [
-        ("chess.com", "samename"),
-        ("lichess", "samename"),
-    ]
+    def fail_after_source_record(*args, **kwargs):
+        original_insert(*args, **kwargs)
+        raise RuntimeError("injected provenance failure")
+
+    monkeypatch.setattr(users_module, "insert_source_record", fail_after_source_record)
+    with pytest.raises(RuntimeError, match="injected provenance failure"):
+        normalize_user_payload(conn, raw_payload_id)
+
+    for table in ("provider_users", "user_snapshots", "source_records"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    assert conn.execute("SELECT normalization_status FROM raw_payloads").fetchone()[0] == "pending"
+
+    monkeypatch.setattr(users_module, "insert_source_record", original_insert)
+    assert normalize_user_payload(conn, raw_payload_id) is not None
+    assert conn.execute("SELECT COUNT(*) FROM user_snapshots").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0] == 2
+    assert conn.execute("SELECT normalization_status FROM raw_payloads").fetchone()[0] == "parsed"

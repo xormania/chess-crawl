@@ -137,18 +137,44 @@ The tool uses conservative delays and respects provider rules (including 429 bac
 
 ## Development
 
+Persistence has explicit owners:
+
+| Module | Responsibility |
+|--------|----------------|
+| `storage/db.py` | Open and close SQLite connections; enforce read/write access; commit and roll back transactions. |
+| `storage/migrations.py` | Initialize the schema using the caller's connection. |
+| `storage/raw.py`, `storage/repository.py`, `storage/discovery.py` | Persist raw responses, normalized records, and discovery edges. |
+| `storage/queries.py` | Supply rows for queries, reports, and exports. |
+| `jobs/state.py` | Own job and crawl-run creation, claiming, checkpoints, recovery, status, and counters. |
+
+Use `open_database(path)` for a read-only archive and
+`open_database(path, writable=True)` for a writer. Storage mutations use the
+shared `atomic` decorator; services group related mutations with `transaction`.
+Nested mutations use savepoints and cannot commit their caller's transaction.
+Persist raw responses and fetch logs before starting normalization, and keep
+network calls outside database transactions.
+
+`jobs/runner.py` executes work and `jobs/discovery.py` applies crawl bounds;
+both delegate durable job transitions to `jobs/state.py`. There is no separate
+job store or report-query implementation.
+
 ```bash
 uv run ruff check .
 uv run mypy .
 uv run python -m pytest -q
-uv run python -m pytest -q -m "not live and not slow and not workflow"
-uv run python -m pytest -q -m "workflow and not live and not slow"
-uv run python -m pytest --cov=chess_crawl --cov-report=term-missing -q
 uv run chess-crawl --help
 ```
 
-Default tests are offline. Tests that require provider APIs must be marked `live`
-and are not part of the default local or CI checks.
+Tests are organized by behavior: storage, providers, jobs, reports/exports, and
+CLI commands/workflows. Shared database fixtures live in `tests/conftest.py`;
+reusable data builders live in `tests/support.py`. Extend these instead of
+copying setup into new phase-specific suites. `test_storage_boundaries.py`
+checks transaction behavior and guards the SQLite/SQL ownership rules.
+
+The current suite is offline and blocks network sockets. CI runs the same suite
+with `-m "not live and not slow"`. To select just CLI workflows, use
+`-m "workflow and not live and not slow"`; to measure coverage, add
+`--cov=chess_crawl --cov-report=term-missing`.
 
 See `AGENTS.md` for contribution guidelines.
 

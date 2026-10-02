@@ -2,20 +2,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from conftest import seed_game
 from chess_crawl import cli
 from chess_crawl.ingest import IngestResult
-from chess_crawl.jobs import store
-from chess_crawl.jobs.discovery import OpponentEdge, record_discovery_edges
-from chess_crawl.storage.db import connect
-from chess_crawl.storage.migrations import initialize_database
+from chess_crawl.jobs import state
+from chess_crawl.storage.db import open_database
 
 
 def test_fetch_subcommands_validate_bounds_and_call_services(
@@ -179,24 +175,23 @@ def test_crawl_opponents_cli_requires_caps_and_passes_month_bounds(
 
 
 def test_jobs_list_show_and_resume_paths(
-    tmp_path: Path,
+    archive_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    db_path = tmp_path / "archive.sqlite"
-    initialize_database(db_path)
-    with closing(connect(db_path)) as conn:
-        job_id = store.enqueue_job(
+    db_path = archive_path
+    with open_database(db_path, writable=True) as conn:
+        job_id = state.enqueue_job(
             conn,
             provider="lichess",
             kind="fetch_user_profile",
             target="SameName",
             params={"scope": "all"},
         ).job_id
-        claimed = store.claim_next_job(conn)
+        claimed = state.claim_next_job(conn)
         assert claimed is not None
         assert claimed.id is not None
-        store.mark_blocked(conn, claimed.id, reason="waiting")
+        state.mark_blocked(conn, claimed.id, reason="waiting")
 
     assert cli.run(["jobs", "list", "--db", str(db_path)]) == 0
     list_out = capsys.readouterr()
@@ -216,8 +211,8 @@ def test_jobs_list_show_and_resume_paths(
             assert max_jobs == 1
             assert resume_stale is True
             assert unblock is True
-            stale = store.resume_stale_in_progress(self.conn, crawl_run_id=crawl_run_id)
-            unblocked = store.unblock_jobs(self.conn, crawl_run_id=crawl_run_id)
+            stale = state.resume_stale_in_progress(self.conn, crawl_run_id=crawl_run_id)
+            unblocked = state.unblock_jobs(self.conn, crawl_run_id=crawl_run_id)
             return SimpleNamespace(
                 stale_resumed=stale,
                 unblocked=unblocked,
@@ -232,8 +227,8 @@ def test_jobs_list_show_and_resume_paths(
     assert cli.run(["jobs", "resume", "--max-jobs", "1", "--db", str(db_path)]) == 0
     resume_out = capsys.readouterr()
     assert "Blocked -> pending: 1" in resume_out.out
-    with closing(connect(db_path)) as conn:
-        job = store.get_job(conn, job_id)
+    with open_database(db_path) as conn:
+        job = state.get_job(conn, job_id)
     assert job is not None
     assert job.state == "pending"
 
@@ -244,34 +239,10 @@ def test_jobs_list_show_and_resume_paths(
     assert "Job not found" in err_out.err
 
 
-def test_query_game_reports_and_filtered_exports(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    db_path = tmp_path / "archive.sqlite"
-    initialize_database(db_path)
-    with closing(connect(db_path)) as conn:
-        game_id, same_id, opponent_id = seed_game(
-            conn,
-            provider="chess.com",
-            game_key="cc-1",
-            white="SameName",
-            black="Opponent",
-            outcome="white_win",
-        )
-        seed_game(
-            conn,
-            provider="lichess",
-            game_key="li-1",
-            white="SameName",
-            black="Opponent",
-            outcome="black_win",
-        )
-        record_discovery_edges(
-            conn,
-            crawl_run_id=None,
-            provider="chess.com",
-            from_user_id=same_id,
-            depth=1,
-            edges=[OpponentEdge(opponent_id, "opponent", game_id, 1)],
-        )
+def test_query_game_reports_and_filtered_exports(
+    tmp_path: Path, seeded_archive: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = seeded_archive
 
     assert cli.run(["query", "game", "chess.com", "cc-1", "--db", str(db_path)]) == 0
     query_out = capsys.readouterr()
@@ -285,6 +256,13 @@ def test_query_game_reports_and_filtered_exports(tmp_path: Path, capsys: pytest.
     assert cli.run(["report", "games-by-month", "--provider", "chess.com", "--db", str(db_path)]) == 0
     month_out = capsys.readouterr()
     assert "2024-01" in month_out.out
+
+    assert cli.run(["report", "user", "chess.com", "SameName", "--db", str(db_path)]) == 0
+    assert "W/D/L/unfinished: 1/0/0/0" in capsys.readouterr().out
+
+    graph_path = tmp_path / "graph.csv"
+    assert cli.run(["export", "graph", "--format", "csv", "--output", str(graph_path), "--db", str(db_path)]) == 0
+    assert "from_username" in graph_path.read_text()
 
     games_path = tmp_path / "chesscom-games.jsonl"
     assert cli.run(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -14,7 +13,9 @@ from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.normalize.users import normalize_user_payload
 from chess_crawl.providers.base import FetchAttempt, RawRecord
 from chess_crawl.providers.registry import create_provider_client
-from chess_crawl.storage.raw import insert_fetch_log, store_raw_payload, update_raw_payload_status
+from chess_crawl.storage.db import transaction
+from chess_crawl.storage.raw import insert_fetch_log, latest_validators, store_raw_payload, update_raw_payload_status
+from chess_crawl.storage.repository import insert_error
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,7 @@ def fetch_user_profile(
     client = create_provider_client(provider, config or Config.from_env(), transport=transport, sleeper=sleeper)
     try:
         if provider == "chess.com":
-            etag, last_modified = _latest_validators(conn, f"chess.com/player/{username.strip().lower()}/profile")
+            etag, last_modified = latest_validators(conn, f"chess.com/player/{username.strip().lower()}/profile")
             record = client.get_user_profile(username, etag=etag, last_modified=last_modified)
         else:
             record = client.get_user_profile(username)
@@ -69,7 +70,7 @@ def fetch_chesscom_stats(
     client = create_provider_client("chess.com", config or Config.from_env(), transport=transport, sleeper=sleeper)
     try:
         key = f"chess.com/player/{username.strip().lower()}/stats"
-        etag, last_modified = _latest_validators(conn, key)
+        etag, last_modified = latest_validators(conn, key)
         record = client.get_user_stats(username, etag=etag, last_modified=last_modified)
         return _store_and_normalize(
             conn,
@@ -95,7 +96,7 @@ def fetch_chesscom_archives(
     client = create_provider_client("chess.com", config or Config.from_env(), transport=transport, sleeper=sleeper)
     try:
         key = f"chess.com/player/{username.strip().lower()}/games/archives"
-        etag, last_modified = _latest_validators(conn, key)
+        etag, last_modified = latest_validators(conn, key)
         record = client.get_archives_index(username, etag=etag, last_modified=last_modified)
         return _store_and_mark_skipped(conn, record, job_id=job_id, crawl_run_id=crawl_run_id)
     finally:
@@ -117,7 +118,7 @@ def fetch_chesscom_month(
     client = create_provider_client("chess.com", config or Config.from_env(), transport=transport, sleeper=sleeper)
     try:
         key = f"chess.com/player/{username.strip().lower()}/games/{year:04d}/{month:02d}"
-        etag, last_modified = _latest_validators(conn, key)
+        etag, last_modified = latest_validators(conn, key)
         record = client.get_monthly_archive(username, year, month, etag=etag, last_modified=last_modified)
         return _store_and_normalize(
             conn,
@@ -189,8 +190,7 @@ def _store_and_normalize(
     job_id: int | None = None,
     crawl_run_id: int | None = None,
 ) -> IngestResult:
-    raw_payload_id = _store_raw_if_present(conn, record)
-    _log_attempts(conn, record, raw_payload_id, job_id=job_id, crawl_run_id=crawl_run_id)
+    raw_payload_id = _persist_response(conn, record, job_id=job_id, crawl_run_id=crawl_run_id)
     if raw_payload_id is None:
         return _non_body_result(record)
     normalized = normalizer(conn, raw_payload_id)
@@ -212,8 +212,7 @@ def _store_and_mark_skipped(
     job_id: int | None = None,
     crawl_run_id: int | None = None,
 ) -> IngestResult:
-    raw_payload_id = _store_raw_if_present(conn, record)
-    _log_attempts(conn, record, raw_payload_id, job_id=job_id, crawl_run_id=crawl_run_id)
+    raw_payload_id = _persist_response(conn, record, job_id=job_id, crawl_run_id=crawl_run_id)
     if raw_payload_id is None:
         return _non_body_result(record)
     update_raw_payload_status(
@@ -233,10 +232,25 @@ def _store_and_mark_skipped(
     )
 
 
+def _persist_response(
+    conn: sqlite3.Connection,
+    record: RawRecord,
+    *,
+    job_id: int | None,
+    crawl_run_id: int | None,
+) -> int | None:
+    # Commit the response and its attempt/error evidence together, before
+    # invoking a normalizer that can fail independently.
+    with transaction(conn):
+        raw_payload_id = _store_raw_if_present(conn, record)
+        _log_attempts(conn, record, raw_payload_id, job_id=job_id, crawl_run_id=crawl_run_id)
+    return raw_payload_id
+
+
 def _store_raw_if_present(conn: sqlite3.Connection, record: RawRecord) -> int | None:
     if record.body is None or record.http_status != 200:
         return None
-    return store_raw_payload(conn, record, commit=True)
+    return store_raw_payload(conn, record)
 
 
 def _log_attempts(
@@ -282,34 +296,24 @@ def _log_attempts(
             crawl_run_id=crawl_run_id,
             raw_payload_id=raw_payload_id if attempt.status_code == 200 else None,
             error_ref=_insert_error_for_attempt(conn, attempt),
-            commit=False,
         )
-    conn.commit()
 
 
 def _insert_error_for_attempt(conn: sqlite3.Connection, attempt: FetchAttempt) -> int | None:
     if attempt.status_code not in {404, 410, 429}:
         return None
     kind = {404: "http_404", 410: "http_410", 429: "http_429"}[attempt.status_code]
-    cursor = conn.execute(
-        """
-        INSERT INTO errors(provider, url, endpoint_type, error_kind, status_code, message, occurred_at, is_dead)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            attempt.provider,
-            attempt.url,
-            attempt.endpoint_type,
-            kind,
-            attempt.status_code,
-            f"HTTP {attempt.status_code}",
-            attempt.attempted_at,
-            1 if attempt.status_code in {404, 410} else 0,
-        ),
+    return insert_error(
+        conn,
+        provider=attempt.provider,
+        url=attempt.url,
+        endpoint_type=attempt.endpoint_type,
+        error_kind=kind,
+        status_code=attempt.status_code,
+        message=f"HTTP {attempt.status_code}",
+        occurred_at=attempt.attempted_at,
+        is_dead=attempt.status_code in {404, 410},
     )
-    if cursor.lastrowid is None:
-        raise RuntimeError("error insert did not return a row id")
-    return int(cursor.lastrowid)
 
 
 def _non_body_result(record: RawRecord) -> IngestResult:
@@ -329,20 +333,3 @@ def _non_body_result(record: RawRecord) -> IngestResult:
         normalized_ids=(),
         message=message,
     )
-
-
-def _latest_validators(conn: sqlite3.Connection, canonical_source_key: str) -> tuple[str | None, str | None]:
-    row = conn.execute(
-        """
-        SELECT response_headers
-          FROM raw_payloads
-         WHERE canonical_source_key = ?
-         ORDER BY fetched_at DESC, id DESC
-         LIMIT 1
-        """,
-        (canonical_source_key,),
-    ).fetchone()
-    if row is None or not row["response_headers"]:
-        return None, None
-    headers = json.loads(row["response_headers"])
-    return headers.get("etag"), headers.get("last-modified") or headers.get("last_modified")

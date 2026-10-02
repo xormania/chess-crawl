@@ -1,4 +1,4 @@
-"""Durable job and crawl-run persistence helpers."""
+"""Single owner of durable job and crawl-run state."""
 
 from __future__ import annotations
 
@@ -10,10 +10,19 @@ from collections.abc import Mapping
 from typing import Any
 
 from chess_crawl.jobs.models import DiscoveryJob, EnqueueResult, JOB_KINDS, JobKind, JobState
+from chess_crawl.storage.db import atomic
+from chess_crawl.storage.discovery import discovery_edge_count
 
 
 LIVE_STATES = ("pending", "in_progress", "blocked")
 TERMINAL_STATES = ("done", "error", "skipped")
+_RUN_ALLOWS_WORK = """
+    NOT EXISTS (
+        SELECT 1 FROM crawl_runs
+         WHERE crawl_runs.id = discovery_jobs.crawl_run_id
+           AND crawl_runs.status = 'cancelled'
+    )
+"""
 
 
 def canonical_params(params: Mapping[str, Any] | None) -> str:
@@ -48,6 +57,7 @@ def make_dedup_key(
     return "sha256:" + hashlib.sha256(body).hexdigest()
 
 
+@atomic
 def enqueue_job(
     conn: sqlite3.Connection,
     *,
@@ -61,10 +71,9 @@ def enqueue_job(
     priority: int = 100,
     now: int | None = None,
     dedup_key: str | None = None,
-    commit: bool = True,
 ) -> EnqueueResult:
     _validate_schedulable_job(provider=provider, kind=kind)
-    timestamp = now or int(time.time())
+    timestamp = int(time.time()) if now is None else now
     params_text = canonical_params(params)
     dedup = dedup_key or make_dedup_key(
         provider=provider,
@@ -105,8 +114,6 @@ def enqueue_job(
             timestamp,
         ),
     )
-    if commit:
-        conn.commit()
     if cursor.lastrowid is None:
         raise RuntimeError("job insert did not return a row id")
     return EnqueueResult(job_id=int(cursor.lastrowid), inserted=True)
@@ -121,25 +128,28 @@ def _validate_schedulable_job(*, provider: str, kind: str) -> None:
         raise ValueError("fetch_game_by_id jobs are supported only for lichess")
 
 
+@atomic
 def claim_next_job(
     conn: sqlite3.Connection,
     *,
     crawl_run_id: int | None = None,
     now: int | None = None,
 ) -> DiscoveryJob | None:
-    timestamp = now or int(time.time())
+    timestamp = int(time.time()) if now is None else now
     row = conn.execute(
-        """
+        f"""
         UPDATE discovery_jobs
            SET state = 'in_progress',
                started_at = ?,
                attempts = attempts + 1,
-               reason = NULL
+               reason = NULL,
+               done_at = NULL
          WHERE id = (
            SELECT id
              FROM discovery_jobs
             WHERE state = 'pending'
               AND (? IS NULL OR crawl_run_id = ?)
+              AND {_RUN_ALLOWS_WORK}
             ORDER BY priority ASC, depth ASC, enqueued_at ASC, id ASC
             LIMIT 1
          )
@@ -147,10 +157,10 @@ def claim_next_job(
         """,
         (timestamp, crawl_run_id, crawl_run_id),
     ).fetchone()
-    conn.commit()
     return None if row is None else row_to_job(row)
 
 
+@atomic
 def mark_job(
     conn: sqlite3.Connection,
     job_id: int,
@@ -158,22 +168,19 @@ def mark_job(
     *,
     reason: str | None = None,
     now: int | None = None,
-    commit: bool = True,
 ) -> None:
-    timestamp = now or int(time.time())
+    timestamp = int(time.time()) if now is None else now
     done_at = timestamp if state in TERMINAL_STATES else None
     conn.execute(
         """
         UPDATE discovery_jobs
            SET state = ?,
-               done_at = CASE WHEN ? IS NULL THEN done_at ELSE ? END,
+               done_at = ?,
                reason = ?
          WHERE id = ?
         """,
-        (state, done_at, done_at, reason, job_id),
+        (state, done_at, reason, job_id),
     )
-    if commit:
-        conn.commit()
 
 
 def mark_done(conn: sqlite3.Connection, job_id: int, *, reason: str | None = None) -> None:
@@ -192,21 +199,19 @@ def mark_blocked(conn: sqlite3.Connection, job_id: int, *, reason: str) -> None:
     mark_job(conn, job_id, "blocked", reason=reason)
 
 
+@atomic
 def update_job_params(
     conn: sqlite3.Connection,
     job_id: int,
     params: Mapping[str, Any],
-    *,
-    commit: bool = True,
 ) -> None:
     conn.execute(
         "UPDATE discovery_jobs SET params_json = ? WHERE id = ?",
         (canonical_params(params), job_id),
     )
-    if commit:
-        conn.commit()
 
 
+@atomic
 def resume_stale_in_progress(
     conn: sqlite3.Connection,
     *,
@@ -214,40 +219,44 @@ def resume_stale_in_progress(
     stale_seconds: int = 0,
     now: int | None = None,
 ) -> int:
-    timestamp = now or int(time.time())
+    timestamp = int(time.time()) if now is None else now
     cutoff = timestamp - stale_seconds
     cursor = conn.execute(
-        """
+        f"""
         UPDATE discovery_jobs
            SET state = 'pending',
                started_at = NULL,
+               done_at = NULL,
                reason = COALESCE(reason, 'resumed stale in_progress job')
          WHERE state = 'in_progress'
            AND (? IS NULL OR crawl_run_id = ?)
+           AND {_RUN_ALLOWS_WORK}
            AND (? = 0 OR started_at IS NULL OR started_at <= ?)
         """,
         (crawl_run_id, crawl_run_id, stale_seconds, cutoff),
     )
-    conn.commit()
     return int(cursor.rowcount)
 
 
+@atomic
 def unblock_jobs(conn: sqlite3.Connection, *, crawl_run_id: int | None = None) -> int:
     cursor = conn.execute(
-        """
+        f"""
         UPDATE discovery_jobs
            SET state = 'pending',
                started_at = NULL,
+               done_at = NULL,
                reason = COALESCE(reason, 'unblocked by jobs resume')
          WHERE state = 'blocked'
            AND (? IS NULL OR crawl_run_id = ?)
+           AND {_RUN_ALLOWS_WORK}
         """,
         (crawl_run_id, crawl_run_id),
     )
-    conn.commit()
     return int(cursor.rowcount)
 
 
+@atomic
 def create_crawl_run(
     conn: sqlite3.Connection,
     *,
@@ -256,7 +265,7 @@ def create_crawl_run(
     params: Mapping[str, Any],
     now: int | None = None,
 ) -> int:
-    timestamp = now or int(time.time())
+    timestamp = int(time.time()) if now is None else now
     cursor = conn.execute(
         """
         INSERT INTO crawl_runs(seed_spec, provider, params_json, status, counters, started_at, updated_at)
@@ -264,12 +273,12 @@ def create_crawl_run(
         """,
         (seed_spec, provider, canonical_params(params), timestamp, timestamp),
     )
-    conn.commit()
     if cursor.lastrowid is None:
         raise RuntimeError("crawl run insert did not return a row id")
     return int(cursor.lastrowid)
 
 
+@atomic
 def update_crawl_run(
     conn: sqlite3.Connection,
     crawl_run_id: int,
@@ -279,14 +288,18 @@ def update_crawl_run(
     finished: bool = False,
     now: int | None = None,
 ) -> None:
-    timestamp = now or int(time.time())
+    timestamp = int(time.time()) if now is None else now
     conn.execute(
         """
         UPDATE crawl_runs
            SET status = COALESCE(?, status),
                counters = COALESCE(?, counters),
                updated_at = ?,
-               finished_at = CASE WHEN ? THEN COALESCE(finished_at, ?) ELSE finished_at END
+               finished_at = CASE
+                 WHEN ? THEN COALESCE(finished_at, ?)
+                 WHEN ? IN ('running', 'paused') THEN NULL
+                 ELSE finished_at
+               END
          WHERE id = ?
         """,
         (
@@ -295,10 +308,95 @@ def update_crawl_run(
             timestamp,
             1 if finished else 0,
             timestamp,
+            status,
             crawl_run_id,
         ),
     )
-    conn.commit()
+
+
+@atomic
+def create_crawl_run_with_root_job(
+    conn: sqlite3.Connection,
+    *,
+    provider: str,
+    seed_spec: str,
+    params: Mapping[str, Any],
+    root_kind: JobKind,
+    root_target: str,
+    priority: int = 100,
+) -> tuple[int, int]:
+    """Create a run and its initial job as one durable operation."""
+    run_id = create_crawl_run(conn, provider=provider, seed_spec=seed_spec, params=params)
+    root = enqueue_job(
+        conn,
+        provider=provider,
+        kind=root_kind,
+        target=root_target,
+        params=params,
+        crawl_run_id=run_id,
+        priority=priority,
+    )
+    return run_id, root.job_id
+
+
+@atomic
+def checkpoint_job(
+    conn: sqlite3.Connection,
+    job_id: int,
+    params: Mapping[str, Any],
+    *,
+    cursor_index: int,
+    status_code: int,
+) -> bool:
+    """Persist a completed acquisition unit; failed units remain resumable."""
+    if status_code not in {200, 304}:
+        return False
+    update_job_params(conn, job_id, {**params, "cursor_index": cursor_index})
+    return True
+
+
+def run_counters(conn: sqlite3.Connection, crawl_run_id: int) -> dict[str, int]:
+    counters = {
+        "jobs_total": total_jobs_for_run(conn, crawl_run_id),
+        "users_seen": crawl_user_count(conn, crawl_run_id),
+        "edges": discovery_edge_count(conn, crawl_run_id),
+    }
+    for row in job_state_counts(conn, crawl_run_id=crawl_run_id):
+        counters[f"jobs_{row['state']}"] = int(row["count"])
+    return counters
+
+
+@atomic
+def refresh_run_status(conn: sqlite3.Connection, crawl_run_id: int) -> None:
+    """Derive run state from its jobs without reopening an explicit cancellation."""
+    run = conn.execute("SELECT status FROM crawl_runs WHERE id = ?", (crawl_run_id,)).fetchone()
+    if run is None or run["status"] == "cancelled":
+        return
+    counts = {row["state"]: int(row["count"]) for row in job_state_counts(conn, crawl_run_id=crawl_run_id)}
+    if counts.get("pending", 0) or counts.get("in_progress", 0):
+        status = "running"
+    elif counts.get("blocked", 0):
+        status = "paused"
+    elif counts.get("error", 0):
+        status = "failed"
+    else:
+        status = "done"
+    update_crawl_run(
+        conn,
+        crawl_run_id,
+        status=status,
+        counters=run_counters(conn, crawl_run_id),
+        finished=status in {"failed", "done"},
+    )
+
+
+@atomic
+def refresh_crawl_runs(conn: sqlite3.Connection, *, crawl_run_id: int | None = None) -> None:
+    if crawl_run_id is not None:
+        refresh_run_status(conn, crawl_run_id)
+    else:
+        for row in crawl_runs(conn):
+            refresh_run_status(conn, int(row["id"]))
 
 
 def get_job(conn: sqlite3.Connection, job_id: int) -> DiscoveryJob | None:
@@ -398,41 +496,6 @@ def known_crawl_depth(
     if row is None or row["depth"] is None:
         return None
     return int(row["depth"])
-
-
-def insert_error(
-    conn: sqlite3.Connection,
-    *,
-    provider: str | None,
-    error_kind: str,
-    message: str,
-    status_code: int | None = None,
-    url: str | None = None,
-    endpoint_type: str | None = None,
-    retry_count: int = 0,
-    is_dead: bool = True,
-) -> int:
-    cursor = conn.execute(
-        """
-        INSERT INTO errors(provider, url, endpoint_type, error_kind, status_code, message, occurred_at, retry_count, is_dead)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            provider,
-            url,
-            endpoint_type,
-            error_kind,
-            status_code,
-            message,
-            int(time.time()),
-            retry_count,
-            int(is_dead),
-        ),
-    )
-    conn.commit()
-    if cursor.lastrowid is None:
-        raise RuntimeError("error insert did not return a row id")
-    return int(cursor.lastrowid)
 
 
 def row_to_job(row: sqlite3.Row) -> DiscoveryJob:

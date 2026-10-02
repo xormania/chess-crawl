@@ -19,8 +19,11 @@ from chess_crawl.ingest import (
     fetch_lichess_games,
     fetch_user_profile,
 )
-from chess_crawl.jobs import discovery, store
-from chess_crawl.jobs.models import DiscoveryJob
+from chess_crawl.jobs import discovery, state
+from chess_crawl.jobs.models import DiscoveryJob, JobState
+from chess_crawl.storage.db import transaction
+from chess_crawl.storage.discovery import opponents_of_user, record_discovery_edges
+from chess_crawl.storage.repository import insert_error
 
 
 GameFetcher = Callable[[sqlite3.Connection, str, str, Mapping[str, Any], int | None], IngestResult]
@@ -61,7 +64,7 @@ class RunnerResult:
 
 @dataclass(frozen=True)
 class ExecutionOutcome:
-    state: str
+    state: JobState
     reason: str
 
 
@@ -89,30 +92,19 @@ class JobRunner:
         resume_stale: bool = False,
         unblock: bool = False,
     ) -> RunnerResult:
-        stale_count = store.resume_stale_in_progress(self.conn, crawl_run_id=crawl_run_id) if resume_stale else 0
-        unblocked_count = store.unblock_jobs(self.conn, crawl_run_id=crawl_run_id) if unblock else 0
+        stale_count = state.resume_stale_in_progress(self.conn, crawl_run_id=crawl_run_id) if resume_stale else 0
+        unblocked_count = state.unblock_jobs(self.conn, crawl_run_id=crawl_run_id) if unblock else 0
         result = RunnerResult().with_resume_counts(stale_resumed=stale_count, unblocked=unblocked_count)
         while max_jobs is None or result.claimed < max_jobs:
-            job = store.claim_next_job(self.conn, crawl_run_id=crawl_run_id)
+            job = state.claim_next_job(self.conn, crawl_run_id=crawl_run_id)
             if job is None:
                 break
             if job.id is None:
                 raise RuntimeError("claimed job is missing a persisted id")
             outcome = self._execute(job)
-            if outcome.state == "done":
-                store.mark_done(self.conn, job.id, reason=outcome.reason)
-            elif outcome.state == "skipped":
-                store.mark_skipped(self.conn, job.id, reason=outcome.reason)
-            elif outcome.state == "blocked":
-                store.mark_blocked(self.conn, job.id, reason=outcome.reason)
-            else:
-                store.mark_error(self.conn, job.id, reason=outcome.reason)
+            state.mark_job(self.conn, job.id, outcome.state, reason=outcome.reason)
             result = result.add(state=outcome.state)
-        if crawl_run_id is not None:
-            self._refresh_run_status(crawl_run_id)
-        else:
-            for row in store.crawl_runs(self.conn):
-                self._refresh_run_status(int(row["id"]))
+        state.refresh_crawl_runs(self.conn, crawl_run_id=crawl_run_id)
         return result
 
     def _execute(self, job: DiscoveryJob) -> ExecutionOutcome:
@@ -142,7 +134,7 @@ class JobRunner:
                 return self._crawl_opponents(job)
             return ExecutionOutcome("error", f"unknown job kind: {job.kind}")
         except Exception as exc:
-            store.insert_error(
+            insert_error(
                 self.conn,
                 provider=job.provider,
                 error_kind="other",
@@ -172,7 +164,7 @@ class JobRunner:
         )
 
     def _fetch_user_games(self, job: DiscoveryJob) -> IngestResult:
-        params = store.load_params(job.params_json)
+        params = state.load_params(job.params_json)
         remaining = discovery.remaining_game_budget(
             self.conn,
             crawl_run_id=job.crawl_run_id,
@@ -231,9 +223,14 @@ class JobRunner:
                 job_id=job.id,
                 crawl_run_id=job.crawl_run_id,
             )
-            params["cursor_index"] = index + 1
             if job.id is not None:
-                store.update_job_params(self.conn, job.id, params)
+                state.checkpoint_job(
+                    self.conn,
+                    job.id,
+                    params,
+                    cursor_index=index + 1,
+                    status_code=last_result.status_code,
+                )
             if last_result.status_code not in {200, 304}:
                 return last_result
         return last_result
@@ -261,7 +258,7 @@ class JobRunner:
     def _crawl_opponents(self, job: DiscoveryJob) -> ExecutionOutcome:
         if job.id is None or job.crawl_run_id is None:
             return ExecutionOutcome("error", "crawl_opponents requires a persisted crawl run")
-        params = store.load_params(job.params_json)
+        params = state.load_params(job.params_json)
         user_id = discovery.ensure_local_user(self.conn, provider=job.provider, username=job.target)
         remaining = discovery.remaining_game_budget(
             self.conn,
@@ -283,7 +280,7 @@ class JobRunner:
             return ExecutionOutcome("done", f"fetched {job.target}; depth cap reached")
 
         user_id = discovery.ensure_local_user(self.conn, provider=job.provider, username=job.target)
-        edges = discovery.opponents_of_user(
+        edges = opponents_of_user(
             self.conn,
             provider=job.provider,
             user_id=user_id,
@@ -301,46 +298,25 @@ class JobRunner:
                 current_depth=job.depth,
             )
         ]
-        edge_count = discovery.record_discovery_edges(
-            self.conn,
-            crawl_run_id=job.crawl_run_id,
-            provider=job.provider,
-            from_user_id=user_id,
-            depth=next_depth,
-            edges=frontier_edges,
-        )
-        child_count = discovery.enqueue_opponent_children(
-            self.conn,
-            crawl_run_id=job.crawl_run_id,
-            parent_job_id=job.id,
-            provider=job.provider,
-            params=child_params,
-            next_depth=next_depth,
-            edges=frontier_edges,
-        )
+        with transaction(self.conn):
+            edge_count = record_discovery_edges(
+                self.conn,
+                crawl_run_id=job.crawl_run_id,
+                provider=job.provider,
+                from_user_id=user_id,
+                depth=next_depth,
+                edges=frontier_edges,
+            )
+            child_count = discovery.enqueue_opponent_children(
+                self.conn,
+                crawl_run_id=job.crawl_run_id,
+                parent_job_id=job.id,
+                provider=job.provider,
+                params=child_params,
+                next_depth=next_depth,
+                edges=frontier_edges,
+            )
         return ExecutionOutcome("done", f"edges={edge_count}; child_jobs={child_count}")
-
-    def _refresh_run_status(self, crawl_run_id: int) -> None:
-        counts = {row["state"]: int(row["count"]) for row in store.job_state_counts(self.conn, crawl_run_id=crawl_run_id)}
-        if counts.get("pending", 0) or counts.get("in_progress", 0):
-            status = "running"
-            finished = False
-        elif counts.get("blocked", 0):
-            status = "paused"
-            finished = False
-        elif counts.get("error", 0):
-            status = "failed"
-            finished = True
-        else:
-            status = "done"
-            finished = True
-        store.update_crawl_run(
-            self.conn,
-            crawl_run_id,
-            status=status,
-            counters=discovery.run_counters(self.conn, crawl_run_id),
-            finished=finished,
-        )
 
 
 def _outcome_from_ingest(result: IngestResult) -> ExecutionOutcome:
@@ -375,7 +351,7 @@ def _known_at_or_before_current_depth(
     username: str,
     current_depth: int,
 ) -> bool:
-    known_depth = store.known_crawl_depth(
+    known_depth = state.known_crawl_depth(
         conn,
         crawl_run_id=crawl_run_id,
         provider=provider,

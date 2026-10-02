@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import json
-from contextlib import closing
 from pathlib import Path
 
 import pytest
 
 from chess_crawl import cli
 import chess_crawl.ingest as ingest_module
-from chess_crawl.jobs import store
+from chess_crawl.jobs import state
 from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
 from chess_crawl.providers.base import EndpointType, RawRecord
-from chess_crawl.storage.db import connect
-from chess_crawl.storage.migrations import initialize_database
+from chess_crawl.storage.db import open_database
 
 
 pytestmark = pytest.mark.workflow
@@ -298,7 +296,9 @@ def test_cli_fresh_archive_rerun_query_export_and_provider_boundaries(
     assert "Schema version: 1" in capsys.readouterr().out
 
     assert cli.run(["fetch", "user", "chess.com", "SameName", "--db", str(db_path)]) == 0
-    assert "Provider: chess.com" in capsys.readouterr().out
+    fetch_out = capsys.readouterr().out
+    assert "Provider: chess.com" in fetch_out
+    assert "Raw payload: 1" in fetch_out
     assert cli.run(["fetch", "user", "lichess", "SameName", "--db", str(db_path)]) == 0
     assert "Provider: lichess" in capsys.readouterr().out
 
@@ -341,7 +341,9 @@ def test_cli_fresh_archive_rerun_query_export_and_provider_boundaries(
     ]
 
     assert cli.run(["query", "user", "chess.com", "SameName", "--db", str(db_path)]) == 0
-    assert "Provider: chess.com" in capsys.readouterr().out
+    query_out = capsys.readouterr().out
+    assert "Provider: chess.com" in query_out
+    assert "Username: SameName (samename)" in query_out
     assert cli.run(["query", "user", "lichess", "SameName", "--db", str(db_path)]) == 0
     assert "Provider: lichess" in capsys.readouterr().out
     assert cli.run(
@@ -378,7 +380,7 @@ def test_cli_fresh_archive_rerun_query_export_and_provider_boundaries(
     }
     assert ("lichess", "samename") in {(row["provider"], row["username_normalized"]) for row in user_rows}
 
-    with closing(connect(db_path)) as conn:
+    with open_database(db_path) as conn:
         counts = {
             table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in ("raw_payloads", "provider_users", "games", "discovery_jobs")
@@ -433,7 +435,7 @@ def test_cli_fresh_archive_rerun_query_export_and_provider_boundaries(
 
 
 def test_cli_resume_finishes_interrupted_crawl_without_refetching_done_jobs(
-    tmp_path: Path,
+    archive_path: Path,
     fixtures_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -446,10 +448,9 @@ def test_cli_resume_finishes_interrupted_crawl_without_refetching_done_jobs(
         },
     )
     monkeypatch.setattr(ingest_module, "create_provider_client", factory)
-    db_path = tmp_path / "archive.sqlite"
-    initialize_database(db_path)
+    db_path = archive_path
 
-    with closing(connect(db_path)) as conn:
+    with open_database(db_path, writable=True) as conn:
         run_id, root_job_id = create_opponent_crawl(
             conn,
             provider="lichess",
@@ -463,9 +464,9 @@ def test_cli_resume_finishes_interrupted_crawl_without_refetching_done_jobs(
     first_resume = capsys.readouterr().out
     assert "Jobs: 1 done" in first_resume
 
-    with closing(connect(db_path)) as conn:
-        root = store.get_job(conn, root_job_id)
-        interrupted = store.claim_next_job(conn, crawl_run_id=run_id)
+    with open_database(db_path, writable=True) as conn:
+        root = state.get_job(conn, root_job_id)
+        interrupted = state.claim_next_job(conn, crawl_run_id=run_id)
         assert root is not None
         assert root.state == "done"
         assert interrupted is not None
@@ -479,7 +480,7 @@ def test_cli_resume_finishes_interrupted_crawl_without_refetching_done_jobs(
     assert "Stale in_progress -> pending: 1" in second_resume
     assert "Jobs: 1 done" in second_resume
 
-    with closing(connect(db_path)) as conn:
+    with open_database(db_path) as conn:
         states = dict(
             conn.execute(
                 """
@@ -535,7 +536,7 @@ def test_cli_provider_failure_leaves_no_normalized_partial_and_rerun_recovers(
     assert "HTTP status: 500" in failure_out
     assert "no raw payload stored" in failure_out
 
-    with closing(connect(db_path)) as conn:
+    with open_database(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0] == 0
@@ -544,7 +545,7 @@ def test_cli_provider_failure_leaves_no_normalized_partial_and_rerun_recovers(
     assert cli.run(fetch_args) == 0
     assert "HTTP status: 200" in capsys.readouterr().out
 
-    with closing(connect(db_path)) as conn:
+    with open_database(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
         assert conn.execute(

@@ -62,11 +62,8 @@ jobs:
       - name: Mypy
         run: uv run mypy .
 
-      - name: Unit tests
-        run: uv run python -m pytest -q -m "not live and not slow and not workflow"
-
-      - name: CLI workflow tests
-        run: uv run python -m pytest -q -m "workflow and not live and not slow"
+      - name: Offline tests
+        run: uv run python -m pytest -q -m "not live and not slow"
 
       - name: Packaged CLI help
         run: uv run chess-crawl --help
