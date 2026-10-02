@@ -3,6 +3,7 @@ name: CI
 on:
   pull_request:
     branches:
+      - dev
       - master
 
 permissions:
@@ -15,6 +16,7 @@ concurrency:
 jobs:
   promotion-source:
     name: Require dev -> master
+    if: github.base_ref == 'master'
     runs-on: ubuntu-latest
     steps:
       - name: Check promotion source
@@ -33,6 +35,8 @@ jobs:
     name: Offline checks (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     needs: promotion-source
+    # The promotion gate is intentionally skipped for development PRs.
+    if: ${{ always() && !cancelled() && (github.base_ref == 'dev' || needs.promotion-source.result == 'success') }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
