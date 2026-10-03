@@ -41,6 +41,7 @@ def opponents_of_user(
     *,
     provider: str,
     user_id: int,
+    crawl_run_id: int | None = None,
     since: int | None = None,
     until: int | None = None,
 ) -> list[OpponentEdge]:
@@ -60,12 +61,15 @@ def opponents_of_user(
            AND gp_o.provider_user_id IS NOT NULL
            AND gp_o.provider_user_id <> ?
            AND pu.provider = ?
+           AND (? IS NULL OR EXISTS (
+             SELECT 1 FROM run_games rg WHERE rg.game_id = g.id AND rg.crawl_run_id = ?
+           ))
            AND (? IS NULL OR g.ended_at IS NULL OR g.ended_at >= ?)
            AND (? IS NULL OR g.ended_at IS NULL OR g.ended_at < ?)
          GROUP BY gp_o.provider_user_id, pu.username_normalized
          ORDER BY game_count DESC, pu.username_normalized
         """,
-        (user_id, provider, user_id, provider, since, since, until, until),
+        (user_id, provider, user_id, provider, crawl_run_id, crawl_run_id, since, since, until, until),
     ).fetchall()
     return [
         OpponentEdge(
