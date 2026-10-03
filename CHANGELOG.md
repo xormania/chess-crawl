@@ -27,6 +27,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   need and of the result; a changelog update requirement for all PRs beyond
   CI/test-only changes.
 
+- A PostgreSQL operations guide with full-database custom backups, isolated
+  restoration, binary payload and event identity verification, authenticated
+  readiness checks, and major-version upgrade and recovery instructions.
+  See [PostgreSQL operations](docs/postgresql-operations.md).
+
 ### Changed
 
 - CI isolates deployment-only checks, overlaps image build/pull and polls
