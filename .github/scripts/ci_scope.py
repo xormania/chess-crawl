@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
+import subprocess  # nosec B404 # Inspects the checked-out Git merge using fixed commands.
 import sys
 from pathlib import Path
 
@@ -53,13 +53,13 @@ def classify(paths: list[str], base_ref: str) -> tuple[bool, bool]:
 
 
 def changed_paths() -> list[str]:
-    parents = subprocess.run(
+    parents = subprocess.run(  # nosec B603, B607 # Fixed argv and trusted runner Git; no shell.
         ["git", "rev-list", "--parents", "-n", "1", "HEAD"],
         check=True, capture_output=True, text=True, timeout=30,
     ).stdout.split()
     if len(parents) != 3:
         raise ValueError("CI scope requires a two-parent pull-request merge commit.")
-    diff = subprocess.run(
+    diff = subprocess.run(  # nosec B603, B607 # Fixed argv and trusted runner Git; no shell.
         ["git", "diff", "--name-only", "--no-renames", "-z", "HEAD^1", "HEAD"],
         check=True, capture_output=True, timeout=30,
     ).stdout

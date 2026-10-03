@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -349,3 +350,82 @@ raise SystemExit(status)
         started = json.loads((tmp_path / f"{role}-started.json").read_text())
         assert started["compose_files"] == "compose.yaml:.github/compose.ci.yaml"
         assert json.loads((tmp_path / f"{role}-finished.json").read_text()) == {"status": status}
+
+
+@pytest.mark.parametrize("case", ["clean", "findings", "syntax-error", "missing-directory", "excluded-file"])
+def test_bandit_step_scans_all_targets_and_preserves_failure(case: str, tmp_path: Path) -> None:
+    """Execute the workflow command with the real scanner, configuration and timer."""
+    root = Path(__file__).resolve().parents[1]
+    project = tmp_path / "project"
+    targets = ("src", "scripts", "docker", ".github/scripts")
+    for target in targets:
+        directory = project / target
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "probe.py").write_text('"""Harmless fixture."""\n')
+    for path in ("pyproject.toml", ".github/scripts/check_bandit.py", ".github/scripts/ci_performance.py"):
+        shutil.copyfile(root / path, project / path)
+    smoke = project / "scripts/compose_smoke.py"
+    smoke.write_text("assert True\n")
+    if case == "findings":
+        for target in targets:
+            (project / target / "probe.py").write_text("eval(input())\n")
+        # Only B101 in this exact executable test is exempt. Other rules and
+        # application assertions/SQL must still be reported.
+        smoke.write_text("assert True\neval(input())\n")
+        (project / "src/unsafe.py").write_text(
+            'assert True\ndef query(conn, value):\n'
+            '    return conn.execute(f"SELECT id FROM users WHERE name = {value}")\n',
+        )
+    elif case == "syntax-error":
+        (project / "src/probe.py").write_text("def broken(\n")
+    elif case == "missing-directory":
+        shutil.rmtree(project / "docker")
+    elif case == "excluded-file":
+        with (project / "pyproject.toml").open("a") as config:
+            config.write('\n[tool.bandit]\nexclude_dirs = ["src"]\n')
+    step = _step("offline-checks", "Bandit")
+    assert "continue-on-error" not in step
+    assert "if: steps.scope.outputs.offline == 'true' && matrix.python-version == '3.11'\n" in step
+    command = step.split("        run: ", 1)[1].strip()
+    evidence = tmp_path / "evidence"
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-c", command], cwd=project,
+        env=os.environ | {
+            "CI_PERFORMANCE_DIR": str(evidence), "UV_OFFLINE": "1",
+            "UV_PROJECT_ENVIRONMENT": sys.prefix,
+        },
+        capture_output=True, text=True, timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert (result.returncode == 0) is (case == "clean"), output
+    sample = json.loads(next(evidence.glob("bandit-*.json")).read_text())
+    assert sample["returncode"] == result.returncode
+    assert sample["status"] == ("success" if case == "clean" else "failure")
+    if case == "findings":
+        for target in targets:
+            assert f"{target}/probe.py:1: B307" in output
+        assert "scripts/compose_smoke.py:2: B307" in output
+        assert "scripts/compose_smoke.py:1: B101" not in output
+        assert "src/unsafe.py:1: B101" in output
+        assert "src/unsafe.py:3: B608" in output
+    elif case == "syntax-error":
+        assert "Unscanned file: src/probe.py" in output
+    elif case == "missing-directory":
+        assert "Missing scan directory: docker" in output
+    elif case == "excluded-file":
+        assert "Bandit did not scan exactly the expected Python files" in output
+    else:
+        assert "0 findings" in output
+
+
+@pytest.mark.parametrize("optimization", ["flag", "environment"])
+def test_compose_smoke_rejects_disabled_assertions(optimization: str) -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts/compose_smoke.py"
+    command = [sys.executable, *(["-O"] if optimization == "flag" else []), str(script)]
+    result = subprocess.run(
+        command, env=os.environ | {"PYTHONOPTIMIZE": "1" if optimization == "environment" else ""},
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode != 0
+    assert "Compose smoke requires assertions" in result.stderr
+    assert "FileNotFoundError" not in result.stderr  # Fail before reading credentials or contacting Docker.

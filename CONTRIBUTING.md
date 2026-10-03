@@ -47,6 +47,7 @@ Run these checks for code changes:
 ```bash
 uv run ruff check .
 uv run mypy .
+uv run python .github/scripts/check_bandit.py
 uv run python -m pytest -q
 uv run chess-crawl --help
 ```
@@ -65,8 +66,9 @@ cases, use `uv run python -m pytest --run-live -m live` with appropriate provide
 credentials and acquisition bounds.
 
 CI runs the offline suite with `-m "not live and not slow"` on Python 3.11 and
-3.13. Both versions run Mypy; Ruff runs once. It classifies the actual PR merge
-result against its base parent, including both sides of renames:
+3.13. Both versions run Mypy; Ruff and Bandit run once, on Python 3.11. CI
+classifies the actual PR merge result against its base parent, including both
+sides of renames:
 
 | Changed files | Offline checks | Compose smoke |
 | --- | --- | --- |
@@ -107,6 +109,25 @@ Normal CI exercises real temporary Git merges for scope and changelog policy,
 executes the workflow's shell guards (including both failures in concurrent
 build/pull), and tests the Compose overlay contract. It also retains the full
 application suite and real API/worker/private-Mercure smoke whenever selected.
+
+Bandit is pinned in the development dependency group and scans every Python
+file under `src/`, `scripts/`, `docker/`, and `.github/scripts/`, including its
+own wrapper. The wrapper rejects findings at every severity/confidence level,
+reported scan errors, missing target directories, and incomplete file coverage.
+It uses the checked-in `pyproject.toml` configuration and the existing required
+offline check; no additional required-check setting is needed. Ruff's optional
+`S` rules are not also enabled.
+
+Review scanner findings before suppressing them. Use a rule-specific comment
+with its reason (for example, `# nosec B608 # Only literal columns; values are bound`).
+Existing exceptions document fixed SQL fragments/columns, trusted workflow or
+operator subprocess arguments, and operator-selected disposable smoke endpoints.
+Do not use blanket suppressions or a baseline to conceal unreviewed findings.
+Pytest fixtures under `tests/` are outside the scan. The executable Compose
+smoke test remains scanned, with only its assertion rule exempted; it refuses
+to run with `-O` or `PYTHONOPTIMIZE` because those options remove its checks.
+Behavior tests execute the actual timed CI command against clean, vulnerable,
+unparseable, and incomplete fixture trees, checking that failures stay failures.
 
 Each selected job writes stage timings to its job summary and uploads a
 `ci-performance-*` artifact retained for 14 days. JSON samples include the

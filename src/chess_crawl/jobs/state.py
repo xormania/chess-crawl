@@ -163,7 +163,7 @@ def claim_next_job(
             LIMIT 1
          )
          RETURNING id
-        """,
+        """,  # nosec B608 # Only the fixed _RUN_ALLOWS_WORK fragment is interpolated; values are bound.
         (timestamp, timestamp, timestamp, crawl_run_id, crawl_run_id),
     ).fetchone()
     # RETURNING precedes AFTER triggers. Read their persisted revision while
@@ -256,7 +256,7 @@ def _resume_stale_in_progress(
            AND (? IS NULL OR crawl_run_id = ?)
            AND {_RUN_ALLOWS_WORK}
            AND (? = 0 OR started_at IS NULL OR started_at <= ?)
-        """,
+        """,  # nosec B608 # Only the fixed _RUN_ALLOWS_WORK fragment is interpolated; values are bound.
         (crawl_run_id, crawl_run_id, stale_seconds, cutoff),
     )
     return int(cursor.rowcount)
@@ -276,7 +276,7 @@ def unblock_jobs(conn: sqlite3.Connection, *, crawl_run_id: int | None = None, n
            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
            AND (? IS NULL OR crawl_run_id = ?)
            AND {_RUN_ALLOWS_WORK}
-        """,
+        """,  # nosec B608 # Only the fixed _RUN_ALLOWS_WORK fragment is interpolated; values are bound.
         (timestamp, crawl_run_id, crawl_run_id),
     )
     return int(cursor.rowcount)

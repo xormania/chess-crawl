@@ -11,7 +11,7 @@ from pathlib import Path
 import platform
 import re
 import statistics
-import subprocess
+import subprocess  # nosec B404 # This CLI intentionally measures operator-selected commands.
 import sys
 import time
 
@@ -60,7 +60,7 @@ def measure(label: str, output_dir: Path, command: list[str]) -> int:
     }
     started = time.perf_counter()
     try:
-        returncode = subprocess.run(command, check=False).returncode
+        returncode = subprocess.run(command, check=False).returncode  # nosec B603 # Trusted workflow/operator argv; no shell.
     except OSError as error:
         returncode = 127 if isinstance(error, FileNotFoundError) else 126
         print(f"Cannot execute measured command ({type(error).__name__}).", file=sys.stderr)

@@ -108,6 +108,10 @@ jobs:
         if: steps.scope.outputs.offline == 'true' && matrix.python-version == '3.11'
         run: python .github/scripts/ci_performance.py measure --label ruff --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync ruff check . .github/scripts
 
+      - name: Bandit
+        if: steps.scope.outputs.offline == 'true' && matrix.python-version == '3.11'
+        run: python .github/scripts/ci_performance.py measure --label bandit --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync python .github/scripts/check_bandit.py
+
       - name: Mypy
         if: steps.scope.outputs.offline == 'true'
         env:
