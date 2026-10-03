@@ -247,20 +247,39 @@ PostgreSQL volume and credentials until the upgraded deployment is accepted.
 Provision an existing database and a login role that owns the application
 schema. For this implementation, use PostgreSQL 18 and allow schema migrations
 and session advisory locks. Set `CHESS_CRAWL_DATABASE_URL` to a password-free
-URL such as `postgresql://chess_crawl@database.example:5432/chess_crawl?sslmode=verify-full`.
-Configure the server CA using PostgreSQL connection options supported by the
-client when certificate verification requires it.
+URL such as `postgresql://chess_crawl@database.example:5432/chess_crawl`.
+TCP connections default to verified TLS (`sslmode=verify-full`), including
+certificate-chain and hostname verification. For source-run clients, set
+`CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE` to the trusted PEM CA file obtained
+from the server operator. Weak URL or libpq environment options cannot downgrade
+this policy. Unix sockets remain local and do not use TLS. Loopback TCP servers
+without TLS require an explicit `CHESS_CRAWL_DATABASE_TRANSPORT=local`; that
+exception is not a remote-server mode.
 
 For source-run services that use password authentication, configure one of
 `CHESS_CRAWL_DATABASE_PASSWORD_FILE` or `CHESS_CRAWL_DATABASE_PASSWORD`; setting
 both is rejected.
 The supplied Compose stack uses the secret file at
 `${CHESS_CRAWL_SECRETS_DIR:-./data/dev-secrets}/postgres_password`; supply the
-matching database password there and override the URL before running Compose.
-Its bundled PostgreSQL service remains provisioned unless a separately reviewed
-Compose configuration changes the dependency graph. Run `chess-crawl init`
-against the selected database before serving requests. The migration role must
-own existing objects when applying later schema changes.
+matching database password there. For an external server, use Compose 2.24.4 or
+newer and the external overlay rather than changing only the bundled stack's
+URL:
+
+```bash
+export CHESS_CRAWL_DATABASE_URL="postgresql://chess_crawl@database.example:5432/chess_crawl"
+export CHESS_CRAWL_DATABASE_CA_FILE="/path/to/postgres-ca.pem"
+docker compose -f compose.yaml -f compose.external.yaml up --build --detach --wait --wait-timeout 120
+```
+
+Make the CA PEM readable by container UID `10001`; for example, use mode `0444`
+inside a protected parent directory. The overlay mounts it read-only in all
+four Python services, enforces verified transport, and omits bundled Postgres
+from the active services and startup dependencies. Application services still
+wait for successful migrations against the selected server. Keep both Compose
+files on subsequent commands. Source-run services require `chess-crawl init`
+before serving requests. The migration role must own existing objects when
+applying later schema changes. See the [external database setup](backend.md#external-postgresql)
+for configuration and failure diagnostics.
 
 Use a direct server connection or a session-preserving pooler for worker and
 publisher ownership. Transaction pooling cannot preserve their session advisory
