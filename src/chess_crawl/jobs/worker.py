@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -63,16 +64,30 @@ class Worker:
     def _heartbeat(self) -> None:
         try:
             # SQLite handles are thread-owned. Never share the runner connection.
-            with connection(self.db_path, mode="rw") as conn:
-                while not self._heartbeat_stop.is_set():
-                    with self._activity_lock:
-                        current_job = self._current_job_id
-                    owned = state.heartbeat_worker(
-                        conn, self.worker_id, max_age=self.settings.heartbeat_max_age,
-                        current_job_id=current_job, stopping=self._stop.is_set(), now=self.clock(),
-                    )
-                    if not owned:
-                        raise RuntimeError("Worker heartbeat ownership was lost")
+            while not self._heartbeat_stop.is_set():
+                try:
+                    with connection(self.db_path, mode="rw") as conn:
+                        while not self._heartbeat_stop.is_set():
+                            try:
+                                with self._activity_lock:
+                                    current_job = self._current_job_id
+                                owned = state.heartbeat_worker(
+                                    conn, self.worker_id, max_age=self.settings.heartbeat_max_age,
+                                    current_job_id=current_job, stopping=self._stop.is_set(), now=self.clock(),
+                                )
+                                if not owned:
+                                    raise RuntimeError("Worker heartbeat ownership was lost")
+                            except sqlite3.OperationalError as exc:
+                                if not _is_sqlite_contention(exc):
+                                    raise
+                                # Normalization owns the writer transaction.
+                                # Liveness may expire, but contention does not
+                                # invalidate the process's exclusive lease.
+                            self._heartbeat_stop.wait(self.settings.heartbeat_interval)
+                except sqlite3.OperationalError as exc:
+                    if not _is_sqlite_contention(exc):
+                        raise
+                    # Connection setup can also encounter a busy archive.
                     self._heartbeat_stop.wait(self.settings.heartbeat_interval)
         except BaseException as exc:
             self._heartbeat_error = exc
@@ -127,6 +142,12 @@ class Worker:
                     heartbeat.join()
                     state.stop_worker(conn, self.worker_id, failed=failed, now=self.clock())
         return claimed
+
+
+def _is_sqlite_contention(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    # Extended SQLite result codes retain their primary code in the low byte.
+    return isinstance(code, int) and code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

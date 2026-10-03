@@ -3,10 +3,12 @@ from __future__ import annotations
 import os
 import json
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import httpx
@@ -14,12 +16,12 @@ import pytest
 
 from chess_crawl.config import Config
 from chess_crawl.ingest import IngestResult
-from chess_crawl.jobs import runner as runner_module, state
+from chess_crawl.jobs import runner as runner_module, state, worker as worker_module
 from chess_crawl.jobs.locking import ExecutorBusy, archive_lock
 from chess_crawl.jobs.runner import ExecutionOutcome, JobRunner
 from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.jobs.worker import Worker
-from chess_crawl.storage.db import open_database
+from chess_crawl.storage.db import connection, open_database, transaction
 
 
 def test_kernel_lock_excludes_live_owner_and_releases_after_process_exit(archive_path: Path) -> None:
@@ -326,6 +328,105 @@ def test_heartbeat_age_is_bounded_and_old_owner_cannot_change_successor(archive_
             state.stop_worker(conn, "old", now=140)
             assert state.worker_status(conn, now=125)["worker_id"] == "new"
             assert state.worker_status(conn, now=125)["alive"]
+
+
+def test_heartbeat_retries_writer_contention_without_stopping_executor(
+    archive_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = Worker(archive_path, clock=lambda: 121.0)
+    heartbeats: list[bool] = []
+    waits: list[float] = []
+    heartbeat_worker = state.heartbeat_worker
+
+    @contextmanager
+    def immediate_connection(*args, **kwargs):
+        with connection(*args, **kwargs) as conn:
+            conn.execute("PRAGMA busy_timeout = 0")
+            yield conn
+
+    def heartbeat(*args, **kwargs):
+        heartbeats.append(True)
+        owned = heartbeat_worker(*args, **kwargs)
+        worker._heartbeat_stop.set()
+        return owned
+
+    monkeypatch.setattr(worker_module, "connection", immediate_connection)
+    monkeypatch.setattr(state, "heartbeat_worker", heartbeat)
+    with archive_lock(archive_path) as lease, open_database(archive_path, writable=True) as conn:
+        state.start_worker(conn, worker.worker_id, lease=lease, max_age=20, now=100)
+        with ExitStack() as writer:
+            writer.enter_context(transaction(conn))
+
+            def wait(delay: float) -> bool:
+                waits.append(delay)
+                if len(waits) == 1:
+                    # A long normalization transaction can expire liveness,
+                    # but the exclusive process lease still owns execution.
+                    assert not state.worker_status(conn, now=121)["alive"]
+                    writer.close()
+                return worker._heartbeat_stop.is_set()
+
+            monkeypatch.setattr(worker._heartbeat_stop, "wait", wait)
+            worker._heartbeat()
+        assert state.worker_status(conn, now=121)["alive"]
+    assert len(heartbeats) == 2
+    assert waits == [worker.settings.heartbeat_interval] * 2
+    assert worker._heartbeat_error is None
+    assert not worker._stop.is_set()
+
+
+@pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_BUSY_SNAPSHOT])
+def test_heartbeat_retries_connection_setup_contention(
+    archive_path: Path, monkeypatch: pytest.MonkeyPatch, code: int,
+) -> None:
+    worker = Worker(archive_path, clock=lambda: 101.0)
+    attempts: list[bool] = []
+    heartbeat_worker = state.heartbeat_worker
+
+    @contextmanager
+    def contended_connection(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            error = sqlite3.OperationalError("database contention")
+            error.sqlite_errorcode = code
+            raise error
+        with connection(*args, **kwargs) as conn:
+            yield conn
+
+    def heartbeat(*args, **kwargs):
+        owned = heartbeat_worker(*args, **kwargs)
+        worker._heartbeat_stop.set()
+        return owned
+
+    monkeypatch.setattr(worker_module, "connection", contended_connection)
+    monkeypatch.setattr(state, "heartbeat_worker", heartbeat)
+    monkeypatch.setattr(worker._heartbeat_stop, "wait", lambda delay: False)
+    with archive_lock(archive_path) as lease, open_database(archive_path, writable=True) as conn:
+        state.start_worker(conn, worker.worker_id, lease=lease, max_age=20, now=100)
+        worker._heartbeat()
+        assert state.worker_status(conn, now=101)["heartbeat_at"] == 101
+    assert len(attempts) == 2
+    assert worker._heartbeat_error is None
+    assert not worker._stop.is_set()
+
+
+@pytest.mark.parametrize("failure", ["io_error", "ownership_lost"])
+def test_heartbeat_still_stops_executor_on_fatal_error(
+    archive_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    worker = Worker(archive_path)
+
+    def heartbeat(*args, **kwargs):
+        if failure == "io_error":
+            error = sqlite3.OperationalError("disk I/O error")
+            error.sqlite_errorcode = sqlite3.SQLITE_IOERR
+            raise error
+        return False
+
+    monkeypatch.setattr(state, "heartbeat_worker", heartbeat)
+    worker._heartbeat()
+    assert worker._heartbeat_error is not None
+    assert worker._stop.is_set()
 
 
 def test_stopping_worker_preserves_rate_limit_evidence_without_retrying_http(archive_path: Path) -> None:

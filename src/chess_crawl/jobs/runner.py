@@ -371,6 +371,7 @@ class JobRunner:
             self.conn,
             provider=job.provider,
             user_id=user_id,
+            crawl_run_id=job.crawl_run_id,
             since=_int_or_none(params.get("since")),
             until=_int_or_none(params.get("until")),
         )
