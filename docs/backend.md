@@ -187,6 +187,21 @@ details when applicable. Relevant statuses are `401` for authentication,
 requests, and `503` when the archive is unavailable. The OpenAPI schema is the
 route and request-shape reference.
 
+### Report result counts
+
+CLI reports and opponent API responses expose two distinct counts:
+
+| Field | Meaning |
+| --- | --- |
+| `no_result` | Games without a normalized win, loss, or draw, including aborted, unknown-status, and ongoing games. |
+| `in_progress` | Games whose provider status is recognized as ongoing. |
+
+These counts overlap. A missing result does not establish that play is ongoing,
+and an unrecognized status does not establish that play has finished. The
+existing API field `unfinished` remains a compatibility alias for `no_result`;
+new consumers should use the explicit fields. CLI labels use the explicit
+meanings.
+
 ## Worker and recovery
 
 One executor owns an archive at a time. The worker and acquisition CLI share a

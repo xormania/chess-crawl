@@ -11,9 +11,12 @@ import pytest
 from support import seed_game
 from chess_crawl.application import list_users
 from chess_crawl.config import Config
-from chess_crawl.ingest import fetch_user_profile
-from chess_crawl.normalize.users import normalize_user_payload
+from chess_crawl.ingest import fetch_user_profile, replay_raw_payload
+from chess_crawl.normalize.codes import canonical_hash
+from chess_crawl.normalize.users import PARSER_VERSION, normalize_user_payload
 from chess_crawl.providers.base import EndpointType, RawRecord
+from chess_crawl.providers.lichess.parser import parse_user_profile
+from chess_crawl.storage.db import transaction
 from chess_crawl.storage.raw import insert_fetch_log, store_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user
 
@@ -190,4 +193,69 @@ def test_304_replays_profiles_normalized_before_metadata_fix(initialized_conn: s
     assert user["account_status"] is None
     assert user["title"] is None
     assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
-    assert conn.execute("SELECT parser_version FROM raw_payloads").fetchone()[0] == "users-normalizer-v2"
+    assert conn.execute("SELECT parser_version FROM raw_payloads").fetchone()[0] == PARSER_VERSION
+
+
+@pytest.mark.parametrize(("first", "second"), [
+    ({"profile": {"flag": "GR"}}, {"profile": {"flag": "pirate"}}),
+    ({"disabled": False}, {"disabled": True}),
+    ({"verified": False}, {"verified": True}),
+    ({"disabled": False}, {}),
+    ({"verified": False}, {}),
+    ({"tosViolation": False}, {}),
+])
+def test_lichess_native_profile_changes_are_preserved_in_snapshots(
+    initialized_conn: sqlite3.Connection, first: dict, second: dict,
+) -> None:
+    conn = initialized_conn
+    identity = {"id": "alice", "username": "Alice", "perfs": {"blitz": {"rating": 1500}}}
+    for metadata, at in ((first, 100), (second, 200), (first, 300)):
+        normalize_observation(conn, "lichess", {**identity, **metadata}, fetched_at=at)
+
+    snapshots = conn.execute("SELECT country, perfs_or_stats, captured_at FROM user_snapshots ORDER BY captured_at").fetchall()
+    assert len(snapshots) == 2
+    assert [json.loads(row["perfs_or_stats"]) for row in snapshots] == [
+        {"perfs": identity["perfs"], **second}, {"perfs": identity["perfs"], **first},
+    ]
+    assert [row["captured_at"] for row in snapshots] == [200, 300]
+    # A Lichess flag may be symbolic; it is not an inferred country.
+    assert all(row["country"] is None for row in snapshots)
+
+
+@pytest.mark.parametrize("verified", [True, False, None])
+def test_lichess_parser_preserves_verified_and_explicit_country(verified: bool | None) -> None:
+    body: dict[str, object] = {"id": "alice", "username": "Alice", "profile": {"country": "GR", "flag": "pirate"}}
+    if verified is not None:
+        body["verified"] = verified
+    user = parse_user_profile(json.dumps(body).encode())
+    assert user.is_verified is verified
+    assert user.country == "GR"
+
+
+def test_v2_lichess_profile_replay_recovers_native_metadata(initialized_conn: sqlite3.Connection) -> None:
+    conn = initialized_conn
+    body = {
+        "id": "alice", "username": "Alice", "profile": {"flag": "pirate", "bio": "Chess player"},
+        "disabled": True, "verified": False, "tosViolation": False,
+    }
+    normalize_observation(conn, "lichess", body, fetched_at=100)
+    raw_id = conn.execute("SELECT id FROM raw_payloads").fetchone()[0]
+    # Persist the old parser's content key and reduced JSON as an existing
+    # archive would contain before upgrading; the raw response is unchanged.
+    old_hash = canonical_hash({
+        "kind": "profile", "username": "Alice", "status": None, "title": None,
+        "country": None, "patron": None, "count": {}, "perfs": {},
+    })
+    with transaction(conn):
+        conn.execute("UPDATE user_snapshots SET perfs_or_stats = ?, content_hash = ?", ('{"perfs":{}}', old_hash))
+        update_raw_payload_status(conn, raw_id, status="parsed", parser_version="users-normalizer-v2")
+
+    replay_raw_payload(conn, raw_id)
+
+    snapshot = conn.execute("SELECT perfs_or_stats FROM user_snapshots ORDER BY captured_at DESC, id DESC").fetchone()
+    assert json.loads(snapshot["perfs_or_stats"]) == {
+        "perfs": {}, "profile": body["profile"], "disabled": True, "verified": False, "tosViolation": False,
+    }
+    assert conn.execute("SELECT parser_version FROM raw_payloads").fetchone()[0] == PARSER_VERSION
+    assert PARSER_VERSION != "users-normalizer-v2"
+    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1

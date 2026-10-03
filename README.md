@@ -137,6 +137,10 @@ and Lichess token to its worker. See [.env.example](.env.example) for provider
 settings and the [backend guide](docs/backend.md) for service configuration and
 request ceilings.
 
+Lichess game requests retain available clocks, evaluations, and accuracy data
+in the raw archive by default. The capture switches are listed in
+[.env.example](.env.example); disabling one affects subsequent requests.
+
 ## Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution

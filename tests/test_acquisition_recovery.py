@@ -235,7 +235,8 @@ def test_session_closes_all_clients_even_if_one_close_fails(monkeypatch) -> None
 
 def test_single_lichess_game_uses_documented_export_endpoint(initialized_conn, fixtures_dir) -> None:
     def handler(request):
-        assert str(request.url) == "https://lichess.org/game/export/lichgame1"
+        assert str(request.url.copy_with(query=None)) == "https://lichess.org/game/export/lichgame1"
+        assert dict(request.url.params) == {"clocks": "true", "evals": "true", "accuracy": "true"}
         assert request.headers["Accept"] == "application/json"
         return httpx.Response(200, content=(fixtures_dir / "lichess/games.ndjson").read_bytes().splitlines()[0])
 

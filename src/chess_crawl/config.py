@@ -18,6 +18,14 @@ class ProviderSettings:
     user_agent: str
     oauth_token: str | None = None
     max_retries: int = 3
+    include_clocks: bool = True
+    include_evals: bool = True
+    include_accuracy: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("include_clocks", "include_evals", "include_accuracy"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -28,6 +36,14 @@ class Config:
     chesscom_delay_s: float = 1.0
     lichess_delay_s: float = 1.5
     max_retries: int = 3
+    lichess_clocks: bool = True
+    lichess_evals: bool = True
+    lichess_accuracy: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("lichess_clocks", "lichess_evals", "lichess_accuracy"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean")
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -35,6 +51,9 @@ class Config:
             contact=os.getenv("CHESS_CRAWL_CONTACT", DEFAULT_CONTACT),
             user_agent=os.getenv("CHESS_CRAWL_USER_AGENT"),
             lichess_token=os.getenv("CHESS_CRAWL_LICHESS_TOKEN"),
+            lichess_clocks=_boolean_from_env("CHESS_CRAWL_LICHESS_CLOCKS", default=True),
+            lichess_evals=_boolean_from_env("CHESS_CRAWL_LICHESS_EVALS", default=True),
+            lichess_accuracy=_boolean_from_env("CHESS_CRAWL_LICHESS_ACCURACY", default=True),
         )
 
     def provider(self, key: str) -> ProviderSettings:
@@ -53,8 +72,23 @@ class Config:
             user_agent=self.user_agent or build_user_agent(self.contact),
             oauth_token=token,
             max_retries=self.max_retries,
+            include_clocks=self.lichess_clocks,
+            include_evals=self.lichess_evals,
+            include_accuracy=self.lichess_accuracy,
         )
 
 
 def build_user_agent(contact: str = DEFAULT_CONTACT) -> str:
     return f"chess-crawl/{__version__} (+contact: {contact})"
+
+
+def _boolean_from_env(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true/false, 1/0, yes/no, or on/off")

@@ -1,4 +1,4 @@
-"""Provider-neutral DTOs and protocol definitions."""
+"""Shared records for provider acquisition and normalization."""
 
 from __future__ import annotations
 

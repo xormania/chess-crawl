@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Mapping
 
 import httpx
@@ -90,48 +89,59 @@ class LichessClient:
         limit: int,
     ) -> RawRecord:
         normalized = _username(username)
+        unit = _range_unit_id(since, until, limit)
+        source_key = f"lichess/games/user/{normalized}/{unit}"
         params = {
             "since": _seconds_to_ms(since),
             "until": _seconds_to_ms(until),
             "max": limit,
             "pgnInJson": "true",
             "opening": "true",
-            "clocks": "false",
-            "evals": "false",
+            **self._evidence_params(),
         }
+        request_params = {key: value for key, value in params.items() if value is not None}
         result = self.http.request(
             "GET",
             endpoints.user_games(username, **params),
             endpoint_type="user_games_stream",
             headers=self._headers("application/x-ndjson"),
         )
-        unit = _range_unit_id(since, until, limit)
         return _raw_record(
             result,
             endpoint_type="user_games_stream",
-            canonical_source_key=f"lichess/games/user/{normalized}/{unit}",
+            canonical_source_key=source_key,
             target_username=normalized,
             archive_unit=unit,
-            request_params={key: value for key, value in params.items() if value is not None},
+            request_params=request_params,
         )
 
     def get_game(self, game_ref: str) -> RawRecord:
         game_id = game_ref.strip()
+        source_key = f"lichess/game/{game_id}"
+        params = self._evidence_params()
         result = self.http.request(
             "GET",
-            endpoints.game(game_id),
+            endpoints.game(game_id, **params),
             endpoint_type="game",
             headers=self._headers("application/json"),
         )
         return _raw_record(
             result,
             endpoint_type="game",
-            canonical_source_key=f"lichess/game/{game_id}",
+            canonical_source_key=source_key,
             target_game_id=game_id,
+            request_params=params,
         )
 
     def close(self) -> None:
         self.http.close()
+
+    def _evidence_params(self) -> dict[str, str]:
+        return {
+            "clocks": str(self.settings.include_clocks).lower(),
+            "evals": str(self.settings.include_evals).lower(),
+            "accuracy": str(self.settings.include_accuracy).lower(),
+        }
 
     def _headers(self, accept: str) -> Mapping[str, str]:
         headers = {"Accept": accept}
@@ -183,7 +193,13 @@ def _range_unit_id(since: int | None, until: int | None, limit: int | None = Non
     def fmt(value: int | None) -> str:
         if value is None:
             return "open"
-        return datetime.fromtimestamp(value, tz=UTC).strftime("%Y-%m-%d")
+        if type(value) is not int:
+            raise ValueError("Date window bounds must be integer Unix seconds")
+        return str(value)
 
+    if limit is not None and (type(limit) is not int or limit <= 0):
+        raise ValueError("Game limit must be a positive integer")
     suffix = f"-limit-{limit}" if limit is not None else ""
-    return f"{fmt(since)}..{fmt(until)}{suffix}"
+    # Exact seconds distinguish subday windows and represent the exclusive end
+    # of year 9999 without trying to construct an unsupported year-10000 date.
+    return f"seconds-{fmt(since)}..{fmt(until)}{suffix}"

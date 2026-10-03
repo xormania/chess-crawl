@@ -25,6 +25,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Changed
 
+- Lichess game requests include available clocks, evaluations, and accuracy
+  data by default, with individual capture switches in source and Compose runs.
+- Reports expose separate `no_result` and `in_progress` counts. The API retains
+  `unfinished` as a compatibility alias for `no_result`; CLI labels now state
+  the actual metric.
 - Tests ignore inherited runtime configuration and require `--run-live` for
   marked provider/network tests; unmarked tests stay offline and isolated.
 - Promotion checks require this repository's `dev` branch, and CI reruns on PR
@@ -41,6 +46,18 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Reconcile renamed accounts with username-only placeholders while preserving
+  their game, snapshot, source, and discovery history. Conflicting stable
+  provider account IDs produce an explicit error instead of overwriting identity.
+- Preserve known zero statistics and keep unavailable rated-game totals
+  unknown. Profile/stat replay refreshes previously normalized snapshot values.
+- Stop treating missing Chess.com archive results as evidence of ongoing play.
+  Parser upgrades repair stored values when data is replayed or reacquired;
+  existing archives are not automatically reprocessed in full.
+- Retain Lichess flag, disabled, and verification observations in normalized
+  profile snapshots without treating a flag as a country claim.
+- Build Lichess acquisition metadata before sending requests and support the
+  accepted exclusive date boundary without losing fetched response evidence.
 - Count shared discovery edges independently for each crawl. Schema migration 5
   preserves original recorded edge provenance; historical memberships that
   were never stored cannot be reconstructed.

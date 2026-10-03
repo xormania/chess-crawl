@@ -37,6 +37,9 @@ Database connections and transactions are consolidated in
 `src/chess_crawl/storage/queries.py`. Extend these shared implementations when
 working in those areas.
 
+SQL statements live in `storage/` or `jobs/state.py`; the storage-boundary test
+checks this consolidation.
+
 ## Validate changes
 
 Run these checks for code changes:

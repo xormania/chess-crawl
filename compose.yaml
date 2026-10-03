@@ -79,6 +79,9 @@ services:
       <<: *archive-env
       CHESS_CRAWL_CONTACT: ${CHESS_CRAWL_CONTACT:-set-me@example.invalid}
       CHESS_CRAWL_LICHESS_TOKEN: ${CHESS_CRAWL_LICHESS_TOKEN:-}
+      CHESS_CRAWL_LICHESS_CLOCKS: ${CHESS_CRAWL_LICHESS_CLOCKS:-true}
+      CHESS_CRAWL_LICHESS_EVALS: ${CHESS_CRAWL_LICHESS_EVALS:-true}
+      CHESS_CRAWL_LICHESS_ACCURACY: ${CHESS_CRAWL_LICHESS_ACCURACY:-true}
     stop_grace_period: 90s
     healthcheck:
       test: ["CMD", "python", "/app/docker/healthcheck.py", "worker"]

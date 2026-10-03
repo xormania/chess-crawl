@@ -161,13 +161,14 @@ def summary_report(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def user_game_summary(conn: sqlite3.Connection, provider: str, username: str) -> sqlite3.Row | None:
+    """Count results and known activity independently; unfinished is a legacy no_result alias."""
     user = query_user(conn, provider, username)
     if user is None:
         return None
     return conn.execute(
         """
         WITH mine AS (
-          SELECT g.id, gp.color, g.outcome, g.rated, g.ended_at
+          SELECT g.id, gp.color, g.outcome, g.rated, g.ended_at, g.is_live
             FROM games g
             JOIN game_participants gp ON gp.game_id = g.id AND gp.provider_user_id = ?
            WHERE g.provider = ?
@@ -194,6 +195,8 @@ def user_game_summary(conn: sqlite3.Connection, provider: str, username: str) ->
           COALESCE(SUM((mine.color='white' AND mine.outcome='black_win')
                     OR (mine.color='black' AND mine.outcome='white_win')), 0) AS losses,
           COALESCE(SUM(mine.outcome IS NULL), 0) AS unfinished,
+          COALESCE(SUM(mine.outcome IS NULL), 0) AS no_result,
+          COALESCE(SUM(mine.is_live = 1), 0) AS in_progress,
           MIN(mine.ended_at) AS first_game_ts,
           MAX(mine.ended_at) AS last_game_ts,
           (SELECT COUNT(*) FROM opp) AS distinct_opponents
@@ -223,7 +226,7 @@ def opponent_report(conn: sqlite3.Connection, provider: str, username: str) -> l
             WITH opp AS (
               SELECT gp_o.provider_user_id AS opponent_id,
                      gp_m.color AS my_color,
-                     g.outcome
+                     g.outcome, g.is_live
                 FROM games g
                 JOIN game_participants gp_m
                   ON gp_m.game_id = g.id AND gp_m.provider_user_id = ?
@@ -241,7 +244,9 @@ def opponent_report(conn: sqlite3.Connection, provider: str, username: str) -> l
                    COALESCE(SUM(outcome='draw'), 0) AS draws,
                    COALESCE(SUM((my_color='white' AND outcome='black_win')
                              OR (my_color='black' AND outcome='white_win')), 0) AS my_losses,
-                   COALESCE(SUM(outcome IS NULL), 0) AS unfinished
+                   COALESCE(SUM(outcome IS NULL), 0) AS unfinished,
+                   COALESCE(SUM(outcome IS NULL), 0) AS no_result,
+                   COALESCE(SUM(is_live = 1), 0) AS in_progress
               FROM opp
               JOIN provider_users pu ON pu.id = opp.opponent_id AND pu.provider = ?
              GROUP BY pu.id
@@ -261,7 +266,9 @@ def games_by_month(conn: sqlite3.Connection, *, provider: str) -> list[sqlite3.R
                    COALESCE(SUM(outcome='white_win'), 0) AS white_wins,
                    COALESCE(SUM(outcome='black_win'), 0) AS black_wins,
                    COALESCE(SUM(outcome='draw'), 0) AS draws,
-                   COALESCE(SUM(outcome IS NULL), 0) AS unfinished
+                   COALESCE(SUM(outcome IS NULL), 0) AS unfinished,
+                   COALESCE(SUM(outcome IS NULL), 0) AS no_result,
+                   COALESCE(SUM(is_live = 1), 0) AS in_progress
               FROM games
              WHERE provider = ?
              GROUP BY month
@@ -429,7 +436,9 @@ def opponent_page(
                COALESCE(SUM(g.outcome='draw'), 0) AS draws,
                COALESCE(SUM((mine.color='white' AND g.outcome='black_win')
                          OR (mine.color='black' AND g.outcome='white_win')), 0) AS my_losses,
-               COALESCE(SUM(g.outcome IS NULL), 0) AS unfinished
+               COALESCE(SUM(g.outcome IS NULL), 0) AS unfinished,
+               COALESCE(SUM(g.outcome IS NULL), 0) AS no_result,
+               COALESCE(SUM(g.is_live = 1), 0) AS in_progress
         """ + source + " AND pu.id > ? GROUP BY pu.id ORDER BY pu.id LIMIT ?",
         (*params, after, limit),
     ))

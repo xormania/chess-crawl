@@ -24,5 +24,7 @@ def user_games(username: str, **params: object) -> str:
     return f"{base}?{query}" if query else base
 
 
-def game(game_id: str) -> str:
-    return f"{ORIGIN}/game/export/{quote(game_id.strip(), safe='')}"
+def game(game_id: str, **params: object) -> str:
+    query = urlencode({key: value for key, value in params.items() if value is not None}, doseq=True)
+    base = f"{ORIGIN}/game/export/{quote(game_id.strip(), safe='')}"
+    return f"{base}?{query}" if query else base
