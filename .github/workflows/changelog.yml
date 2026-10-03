@@ -1,0 +1,69 @@
+name: Changelog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    name: Changelog policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check changed files and changelog entry
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const request = {...context.repo, pull_number: context.issue.number};
+            const {data: pull} = await github.rest.pulls.get(request);
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...request,
+              per_page: 100,
+            });
+
+            // The API returns at most 3,000 files. Never infer an exemption
+            // from an incomplete list of the pull request's changes.
+            if (files.length !== pull.changed_files) {
+              core.setFailed('Cannot inspect every changed file; the PR file list is incomplete.');
+              return;
+            }
+
+            const isCiOrTest = (path) =>
+              path.startsWith('tests/') ||
+              path.startsWith('.github/workflows/') ||
+              path.startsWith('.github/actions/') ||
+              path === 'scripts/compose_smoke.py';
+            const ciOrTestOnly = files.every((file) =>
+              isCiOrTest(file.filename) &&
+              (!file.previous_filename || isCiOrTest(file.previous_filename))
+            );
+            if (ciOrTestOnly) {
+              core.info('Only CI or test files changed; no changelog entry is required.');
+              return;
+            }
+
+            const changelog = files.find((file) => file.filename === 'CHANGELOG.md');
+            const hasEntry = changelog &&
+              changelog.status !== 'removed' &&
+              changelog.additions > 0 &&
+              typeof changelog.patch === 'string' &&
+              changelog.patch.split('\n').some((line) =>
+                line.startsWith('+') && line.slice(1).trim().length > 0
+              );
+            if (!hasEntry) {
+              core.setFailed(
+                'This PR changes files beyond CI/tests. Add a non-empty entry to CHANGELOG.md. ' +
+                'Deletion, mode-only and blank-line-only changes do not satisfy this policy. ' +
+                'The added entry must be visible in the GitHub PR file diff.'
+              );
+              return;
+            }
+
+            core.info('CHANGELOG.md has an added entry. Reviewers must assess its accuracy and the PR evidence.');

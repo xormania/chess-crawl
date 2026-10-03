@@ -1,5 +1,8 @@
 # Standalone backend and integration contract
 
+[README](../README.md) · [CLI guide](cli.md) ·
+[Contributing](../CONTRIBUTING.md)
+
 `chess-crawl` supplies an authenticated JSON API, a serial acquisition worker,
 and a durable Mercure event publisher. Its Docker Compose deployment owns these
 services and its archive. A future Symfony application using Symfony Docker
@@ -8,13 +11,19 @@ user authentication, and UI.
 
 ## Start the development backend
 
-From this repository's root:
+Use a source checkout with Docker, the Compose v2 plugin, Linux container
+support, and Python 3.11+ on the host. The bootstrap script uses only Python's
+standard library. From this repository's root:
 
 ```bash
 python3 scripts/bootstrap_dev.py
 docker compose up --build --detach --wait --wait-timeout 120
 docker compose ps
 ```
+
+An empty archive starts without provider requests. Before submitting live work,
+set `CHESS_CRAWL_CONTACT` to your contact address in the shell or Compose `.env`
+and run `docker compose up -d --wait` to apply the worker configuration.
 
 The bootstrap generates local credentials under `data/dev-secrets/`; these files
 are ignored by Git and excluded from image builds. It preserves `api_token` and
@@ -70,7 +79,8 @@ docker compose start
 
 `docker compose down` removes the containers and network while retaining the
 archive volume. Run `docker compose up -d --wait` to recreate the services using
-that archive.
+that archive. `docker compose down --volumes` removes the named volumes and
+their archive and hub data.
 
 ## HTTP contract
 
@@ -103,7 +113,7 @@ membership in the interval is not attributed to that run.
 For example, enqueue a January 2024 import:
 
 ```bash
-CHESS_CRAWL_REQUEST_TOKEN=$(cat data/dev-secrets/api_token)
+CHESS_CRAWL_REQUEST_TOKEN=$(cat "${CHESS_CRAWL_SECRETS_DIR:-data/dev-secrets}/api_token")
 curl --fail-with-body http://127.0.0.1:8000/v1/imports \
   -H "Authorization: Bearer $CHESS_CRAWL_REQUEST_TOKEN" \
   -H 'Content-Type: application/json' \
@@ -199,11 +209,11 @@ run attribution are transactional and idempotent.
 Outside Compose, the worker entry point is:
 
 ```bash
-python -m chess_crawl.jobs.worker --db /path/to/archive.sqlite
+uv run python -m chess_crawl.jobs.worker --db /path/to/archive.sqlite
 ```
 
 `--once` executes at most one due job. Polling, heartbeat, and retry options are
-listed by `python -m chess_crawl.jobs.worker --help`. Compose exposes
+listed by `uv run python -m chess_crawl.jobs.worker --help`. Compose exposes
 `CHESS_CRAWL_POLL_INTERVAL` (1 second), `CHESS_CRAWL_HEARTBEAT_INTERVAL`
 (5 seconds), `CHESS_CRAWL_JOB_MAX_RETRIES` (3), `CHESS_CRAWL_RETRY_BASE`
 (30 seconds), and `CHESS_CRAWL_RETRY_MAX` (3600 seconds). The retry maximum caps
@@ -281,6 +291,9 @@ when an existing archive must be retained unchanged.
 The current deployment uses SQLite on one host with a local persistent volume.
 API, worker, and event publisher share that archive; only one acquisition
 executor may operate on it. Run separate archives for separate deployments.
+Execution locks require POSIX `flock`; use Linux/WSL or the supplied Linux
+containers. The CLI's default `./chess-crawl.db` is a separate archive from
+Compose's volume unless you explicitly arrange shared storage.
 
 PostgreSQL remains a future storage implementation decision. There is no
 `DATABASE_URL` switch that makes the SQLite schema, transaction behavior,
