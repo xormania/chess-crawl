@@ -14,6 +14,21 @@ from chess_crawl.storage.repository import (
 )
 
 
+class Clock:
+    """An explicit clock whose sleeps advance time without delaying tests."""
+
+    def __init__(self, now: float = 1_700_000_000) -> None:
+        self.now = now
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 def seed_game(
     conn: sqlite3.Connection,
     *,

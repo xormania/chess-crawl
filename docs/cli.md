@@ -133,6 +133,11 @@ Use `query game <provider> <game-id-or-url>` for an individual game. Exports
 accept `--provider` to filter one provider and write to stdout when `--output`
 is omitted. Graph export contains recorded discovery edges; opponent reports
 derive opponents from normalized games.
+Reports distinguish missing results from known ongoing play; see the
+[result-count definitions](backend.md#report-result-counts).
+The graph is deduplicated across runs; its `crawl_run_id` column retains the
+original recorded provenance. Run status counts use separate per-run edge
+membership, so rediscovering an existing edge is counted for the new run.
 
 ## Command reference
 

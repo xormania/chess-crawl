@@ -13,26 +13,13 @@ from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.storage.acquisition import associate_run_game
 from chess_crawl.storage.discovery import opponents_of_user
-from support import seed_game
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = 100.0
-        self.sleeps: list[float] = []
-
-    def __call__(self) -> float:
-        return self.now
-
-    def sleep(self, delay: float) -> None:
-        self.sleeps.append(delay)
-        self.now += delay
+from support import Clock, seed_game
 
 
 @pytest.mark.parametrize("provider", ["chess.com", "lichess"])
 def test_runner_reuses_provider_pacing_across_jobs_and_months(initialized_conn, fixtures_dir: Path, provider) -> None:
     conn = initialized_conn
-    clock = Clock()
+    clock = Clock(100.0)
     calls: list[tuple[str, float]] = []
     closed: list[bool] = []
     state.enqueue_job(conn, provider=provider, kind="fetch_user_profile", target="SameName", priority=10)
@@ -83,7 +70,7 @@ def test_runner_reuses_provider_pacing_across_jobs_and_months(initialized_conn, 
 
 @pytest.mark.parametrize(("provider", "delay"), [("chess.com", 7), ("lichess", 60)])
 def test_exhausted_429_delays_the_next_job(initialized_conn, fixtures_dir, provider, delay) -> None:
-    clock = Clock()
+    clock = Clock(100.0)
     times = []
     for target in ("First", "Second"):
         state.enqueue_job(initialized_conn, provider=provider, kind="fetch_user_profile", target=target)
@@ -150,7 +137,9 @@ def test_opponent_frontier_uses_only_games_selected_by_this_run(initialized_conn
     assert [(edge.opponent_username, edge.via_game_id, edge.game_count) for edge in edges] == (
         [("chosen", selected, 1)] if has_selection else []
     )
-    recorded = conn.execute("SELECT to_user_id FROM discovery_edges WHERE crawl_run_id = ?", (run_id,)).fetchall()
+    recorded = conn.execute(
+        "SELECT discovery_edge_id FROM run_edges WHERE crawl_run_id = ?", (run_id,),
+    ).fetchall()
     assert len(recorded) == (1 if has_selection else 0)
     # Archive-wide reports can still inspect history explicitly without a run filter.
     assert {edge.opponent_username for edge in opponents_of_user(conn, provider="lichess", user_id=alice)} == {

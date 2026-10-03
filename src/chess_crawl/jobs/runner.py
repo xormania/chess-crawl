@@ -345,14 +345,9 @@ class JobRunner:
             return ExecutionOutcome("error", "crawl_opponents requires a persisted crawl run")
         params = state.load_params(job.params_json)
         user_id = discovery.ensure_local_user(self.conn, provider=job.provider, username=job.target)
-        remaining = discovery.remaining_game_budget(
-            self.conn,
-            crawl_run_id=job.crawl_run_id,
-            provider=job.provider,
-            params=params,
-        )
-        if remaining == 0:
-            return ExecutionOutcome("skipped", "max-games cap reached before fetching user")
+        # Acquisition already stops at the game cap. Retained run games still
+        # need frontier processing after a crash between acquisition and the
+        # graph transaction, even when those games exhausted the budget.
         fetch_result = self._fetch_user_games(job)
         if fetch_result.status_code not in {200, 304}:
             return _outcome_from_ingest(fetch_result)
@@ -364,9 +359,8 @@ class JobRunner:
         next_depth = job.depth + 1
         max_depth = int(child_params["max_depth"])
         if next_depth > max_depth:
-            return ExecutionOutcome("done", f"fetched {job.target}; depth cap reached")
+            return ExecutionOutcome("done", f"processed {job.target}; depth cap reached")
 
-        user_id = discovery.ensure_local_user(self.conn, provider=job.provider, username=job.target)
         edges = opponents_of_user(
             self.conn,
             provider=job.provider,

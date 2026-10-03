@@ -7,9 +7,8 @@ from typing import Mapping
 import httpx
 
 from chess_crawl.config import ProviderSettings
-from chess_crawl.providers.base import ArchiveUnit, FetchPolicy, GameFilters, RawRecord
+from chess_crawl.providers.base import FetchPolicy, RawRecord
 from chess_crawl.providers.chesscom import endpoints
-from chess_crawl.providers.chesscom.parser import parse_archives_index
 from chess_crawl.providers.http import HttpClient, HttpFetchResult
 
 
@@ -134,44 +133,6 @@ class ChessComClient:
             last_modified=last_modified,
         )
 
-    def list_archive_units(
-        self,
-        username: str,
-        since: int | None,
-        until: int | None,
-    ) -> list[ArchiveUnit]:
-        del since, until
-        record = self.get_archives_index(username)
-        if record.body is None:
-            return []
-        units: list[ArchiveUnit] = []
-        for url in parse_archives_index(record.body):
-            year, month = _archive_url_year_month(str(url))
-            units.append(
-                ArchiveUnit(
-                    provider=PROVIDER,
-                    username=_username(username),
-                    unit_id=f"{year:04d}/{month:02d}",
-                    url=str(url),
-                    since=None,
-                    until=None,
-                    immutable=False,
-                )
-            )
-        return units
-
-    def iter_user_games(
-        self,
-        username: str,
-        since: int | None,
-        until: int | None,
-        filters: GameFilters,
-    ):
-        del filters
-        for unit in self.list_archive_units(username, since, until):
-            year, month = (int(part) for part in unit.unit_id.split("/", 1))
-            yield self.get_monthly_archive(username, year, month)
-
     def get_game(self, game_ref: str) -> RawRecord:
         raise NotImplementedError("Chess.com has no single-game-by-id endpoint; fetch the owning monthly archive")
 
@@ -238,8 +199,3 @@ def _conditional_headers(etag: str | None, last_modified: str | None) -> Mapping
 
 def _username(username: str) -> str:
     return username.strip().lower()
-
-
-def _archive_url_year_month(url: str) -> tuple[int, int]:
-    parts = url.rstrip("/").split("/")
-    return int(parts[-2]), int(parts[-1])

@@ -571,7 +571,8 @@ def _cmd_report_user(args: argparse.Namespace) -> int:
     print(f"Username: {row['display_username']} ({row['username']})")
     print(f"Provider-supplied account status: {row['account_status'] or '-'}")
     print(f"Games: {row['games']} ({row['rated_games']} rated, {row['unrated_games']} unrated)")
-    print(f"W/D/L/unfinished: {row['wins']}/{row['draws']}/{row['losses']}/{row['unfinished']}")
+    print(f"W/D/L/no result: {row['wins']}/{row['draws']}/{row['losses']}/{row['no_result']}")
+    print(f"In progress: {row['in_progress']}")
     print(f"Distinct opponents: {row['distinct_opponents']}")
     print(f"First game: {row['first_game_ts'] or '-'}")
     print(f"Last game: {row['last_game_ts'] or '-'}")
@@ -585,7 +586,7 @@ def _cmd_report_opponents(args: argparse.Namespace) -> int:
         print("User not found.", file=sys.stderr)
         return 1
     _print_table(
-        ("PROVIDER", "OPPONENT", "GAMES", "MY_WINS", "DRAWS", "MY_LOSSES", "UNFINISHED"),
+        ("PROVIDER", "OPPONENT", "GAMES", "MY_WINS", "DRAWS", "MY_LOSSES", "NO_RESULT", "IN_PROGRESS"),
         [
             (
                 row["provider"],
@@ -594,7 +595,8 @@ def _cmd_report_opponents(args: argparse.Namespace) -> int:
                 str(row["my_wins"]),
                 str(row["draws"]),
                 str(row["my_losses"]),
-                str(row["unfinished"]),
+                str(row["no_result"]),
+                str(row["in_progress"]),
             )
             for row in rows
         ],
@@ -606,7 +608,7 @@ def _cmd_report_games_by_month(args: argparse.Namespace) -> int:
     with open_database(args.db) as conn:
         rows = games_by_month(conn, provider=args.provider)
     _print_table(
-        ("MONTH", "GAMES", "WHITE_WINS", "BLACK_WINS", "DRAWS", "UNFINISHED"),
+        ("MONTH", "GAMES", "WHITE_WINS", "BLACK_WINS", "DRAWS", "NO_RESULT", "IN_PROGRESS"),
         [
             (
                 row["month"],
@@ -614,7 +616,8 @@ def _cmd_report_games_by_month(args: argparse.Namespace) -> int:
                 str(row["white_wins"]),
                 str(row["black_wins"]),
                 str(row["draws"]),
-                str(row["unfinished"]),
+                str(row["no_result"]),
+                str(row["in_progress"]),
             )
             for row in rows
         ],

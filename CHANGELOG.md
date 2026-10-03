@@ -25,6 +25,15 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Changed
 
+- Lichess game requests include available clocks, evaluations, and accuracy
+  data by default, with individual capture switches in source and Compose runs.
+- Reports expose separate `no_result` and `in_progress` counts. The API retains
+  `unfinished` as a compatibility alias for `no_result`; CLI labels now state
+  the actual metric.
+- Tests ignore inherited runtime configuration and require `--run-live` for
+  marked provider/network tests; unmarked tests stay offline and isolated.
+- Promotion checks require this repository's `dev` branch, and CI reruns on PR
+  edits so changing the target cannot reuse stale validation.
 - Reworked agent guidance into a short orientation with local documentation
   links; consolidated branch, PR, and changelog rules in CONTRIBUTING and
   added PROJECT as a basic top-level directory guide. Removed inherited product
@@ -37,6 +46,26 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Reconcile renamed accounts with username-only placeholders while preserving
+  their game, snapshot, source, and discovery history. Conflicting stable
+  provider account IDs produce an explicit error instead of overwriting identity.
+- Preserve known zero statistics and keep unavailable rated-game totals
+  unknown. Profile/stat replay refreshes previously normalized snapshot values.
+- Stop treating missing Chess.com archive results as evidence of ongoing play.
+  Parser upgrades repair stored values when data is replayed or reacquired;
+  existing archives are not automatically reprocessed in full.
+- Retain Lichess flag, disabled, and verification observations in normalized
+  profile snapshots without treating a flag as a country claim.
+- Build Lichess acquisition metadata before sending requests and support the
+  accepted exclusive date boundary without losing fetched response evidence.
+- Count shared discovery edges independently for each crawl. Schema migration 5
+  preserves original recorded edge provenance; historical memberships that
+  were never stored cannot be reconstructed.
+- Resume local opponent discovery when a crash occurs after acquisition fills
+  the run's game budget, without fetching additional games.
+- Clear removed profile status/title fields on authoritative profile refreshes
+  while preserving them during partial game/stat observations; replaying older
+  profiles does not replace newer profile metadata.
 - Parser upgrades refresh previously normalized games without double-counting
   run attribution; opponent discovery uses the selected run's games, and
   provider pacing persists across acquisition calls. ([#7](https://github.com/xormania/chess-crawl/pull/7))
@@ -48,6 +77,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Removed
 
+- Dormant internal provider iteration/protocol abstractions that bypassed the
+  application's bounded acquisition path. Integrations use the documented CLI
+  and HTTP services; active provider endpoint clients remain available.
 - Obsolete `proj/` planning and audit records.
 
 ## 0.1.0 — 2026-07-03

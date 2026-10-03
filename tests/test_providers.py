@@ -12,6 +12,7 @@ from chess_crawl.ingest import (
     _store_and_normalize,
     fetch_chesscom_month,
     fetch_chesscom_stats,
+    fetch_lichess_game,
     fetch_lichess_games,
     fetch_user_profile,
 )
@@ -22,10 +23,11 @@ from chess_crawl.normalize.users import normalize_user_payload
 from chess_crawl.providers.base import FetchPolicy, RawRecord
 from chess_crawl.providers.chesscom.client import ChessComClient
 from chess_crawl.providers.chesscom import endpoints as chesscom_endpoints
+from chess_crawl.providers.chesscom.parser import parse_archives_index
 from chess_crawl.providers.lichess import endpoints as lichess_endpoints
 from chess_crawl.providers.registry import get_provider_info, known_keys, list_provider_infos
 from chess_crawl.providers.http import HttpClient
-from chess_crawl.storage.raw import store_raw_payload
+from chess_crawl.storage.raw import read_raw_payload, store_raw_payload
 
 
 def _fixture(fixtures_dir: Path, relative: str) -> bytes:
@@ -58,7 +60,7 @@ def test_lichess_endpoint_construction() -> None:
     assert lichess_endpoints.game("abc123") == "https://lichess.org/game/export/abc123"
 
 
-def test_chesscom_archive_units_use_archive_index_fixture(fixtures_dir: Path) -> None:
+def test_chesscom_archive_index_preserves_raw_response(fixtures_dir: Path) -> None:
     body = _fixture(fixtures_dir, "chesscom/archives.json")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -67,17 +69,16 @@ def test_chesscom_archive_units_use_archive_index_fixture(fixtures_dir: Path) ->
 
     client = ChessComClient(_config().provider("chess.com"), transport=httpx.MockTransport(handler))
     try:
-        units = client.list_archive_units("SameName", since=None, until=None)
+        record = client.get_archives_index("SameName")
     finally:
         client.close()
 
-    assert [(unit.provider, unit.username, unit.unit_id, unit.url) for unit in units] == [
-        (
-            "chess.com",
-            "samename",
-            "2024/01",
-            "https://api.chess.com/pub/player/samename/games/2024/01",
-        )
+    assert record.provider == "chess.com"
+    assert record.target_username == "samename"
+    assert record.endpoint_type == "archives_index"
+    assert record.body == body
+    assert parse_archives_index(record.body) == [
+        "https://api.chess.com/pub/player/samename/games/2024/01",
     ]
 
 
@@ -369,6 +370,58 @@ def test_lichess_games_ndjson_normalizes_ms_timestamps(fixtures_dir: Path, initi
     assert game["created_at"] == 1704067200
     assert game["ended_at"] == 1704067500
     assert b"1704067200000" in conn.execute("SELECT raw_body FROM raw_payloads").fetchone()[0]
+
+
+@pytest.mark.parametrize("single_game", [False, True], ids=["user-export", "single-export"])
+@pytest.mark.parametrize("options", [None, (False, False, False), (True, False, True), (False, True, False)],
+                         ids=["defaults", "disabled", "clocks-accuracy", "evaluations"])
+def test_lichess_capture_options_preserve_available_raw_evidence(
+    fixtures_dir: Path, initialized_conn, single_game: bool, options,
+) -> None:
+    expected = (True, True, True) if options is None else options
+    values = dict(zip(("clocks", "evals", "accuracy"), expected, strict=True))
+    config = _config() if options is None else Config(
+        lichess_delay_s=0, max_retries=0,
+        lichess_clocks=options[0], lichess_evals=options[1], lichess_accuracy=options[2],
+    )
+    game = json.loads(_fixture(fixtures_dir, "lichess/game.json"))
+    bodies: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        for name, enabled in values.items():
+            assert request.url.params[name] == str(enabled).lower()
+        if values["clocks"]:
+            game["clocks"] = [60000, 59900]
+        if values["evals"]:
+            game["analysis"] = [{"eval": 17}, {"eval": -12}]
+        if values["accuracy"]:
+            game["players"]["white"]["analysis"] = {"accuracy": 98.7}
+        body = json.dumps(game).encode() + (b"" if single_game else b"\n")
+        bodies.append(body)
+        media_type = "application/json" if single_game else "application/x-ndjson"
+        return httpx.Response(200, headers={"content-type": media_type}, content=body)
+
+    transport = httpx.MockTransport(handler)
+    if single_game:
+        result = fetch_lichess_game(initialized_conn, "single01", config=config, transport=transport)
+    else:
+        result = fetch_lichess_games(
+            initialized_conn, "SameName", since=1704153600, until=1704240000,
+            limit=1, config=config, transport=transport,
+        )
+    assert result.normalized_ids
+    assert result.raw_payload_id is not None
+    raw = read_raw_payload(initialized_conn, result.raw_payload_id)
+    assert raw.body == bodies[0]
+    assert raw.request_params is not None
+    request_params = json.loads(raw.request_params)
+    assert {name: request_params[name] for name in values} == {
+        name: str(enabled).lower() for name, enabled in values.items()
+    }
+    stored = json.loads(raw.body)
+    assert ("clocks" in stored) is values["clocks"]
+    assert ("analysis" in stored) is values["evals"]
+    assert ("analysis" in stored["players"]["white"]) is values["accuracy"]
 
 
 def test_provider_registry_lists_chesscom_and_lichess() -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from chess_crawl.config import Config, build_user_agent
+from chess_crawl.config import Config, ProviderSettings, build_user_agent
 from chess_crawl.normalize.codes import (
     canonical_hash,
     chesscom_outcome,
@@ -31,6 +31,37 @@ def test_config_from_env_and_provider_settings(monkeypatch: pytest.MonkeyPatch) 
 def test_default_user_agent_contains_contact() -> None:
     assert "chess-crawl/" in build_user_agent("ops@example.test")
     assert "ops@example.test" in Config(contact="ops@example.test").provider("chess.com").user_agent
+
+
+def test_lichess_capture_defaults_and_independent_environment_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    defaults = Config.from_env().provider("lichess")
+    assert (defaults.include_clocks, defaults.include_evals, defaults.include_accuracy) == (True, True, True)
+    monkeypatch.setenv("CHESS_CRAWL_LICHESS_CLOCKS", "false")
+    monkeypatch.setenv("CHESS_CRAWL_LICHESS_EVALS", "true")
+    monkeypatch.setenv("CHESS_CRAWL_LICHESS_ACCURACY", "0")
+    configured = Config.from_env().provider("lichess")
+    assert (configured.include_clocks, configured.include_evals, configured.include_accuracy) == (False, True, False)
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("1", True), (" TRUE ", True), ("yes", True), ("on", True),
+    ("0", False), ("False", False), ("NO", False), ("off", False),
+])
+def test_lichess_capture_environment_boolean_values(monkeypatch: pytest.MonkeyPatch, value: str, expected: bool) -> None:
+    monkeypatch.setenv("CHESS_CRAWL_LICHESS_CLOCKS", value)
+    assert Config.from_env().provider("lichess").include_clocks is expected
+
+
+@pytest.mark.parametrize("field", ["clocks", "evals", "accuracy"])
+def test_invalid_capture_configuration_is_rejected_before_client_creation(monkeypatch: pytest.MonkeyPatch, field: str) -> None:
+    name = f"CHESS_CRAWL_LICHESS_{field.upper()}"
+    monkeypatch.setenv(name, "maybe")
+    with pytest.raises(ValueError, match=name):
+        Config.from_env()
+    with pytest.raises(ValueError, match=f"lichess_{field}"):
+        Config(**{f"lichess_{field}": "false"})  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=f"include_{field}"):
+        ProviderSettings("lichess", 0, "test", **{f"include_{field}": "false"})  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -81,7 +112,7 @@ def test_map_variant(provider: str, native: str | None, expected: str, mapped: b
         ("win", "checkmated", "white_win", False),
         ("timeout", "win", "black_win", False),
         ("agreed", "agreed", "draw", False),
-        ("none", "", None, True),
+        ("none", "", None, False),
         ("resigned", "checkmated", None, False),
     ],
 )

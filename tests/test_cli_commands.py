@@ -260,7 +260,7 @@ def test_query_game_reports_and_filtered_exports(
     assert "2024-01" in month_out.out
 
     assert cli.run(["report", "user", "chess.com", "SameName", "--db", str(db_path)]) == 0
-    assert "W/D/L/unfinished: 1/0/0/0" in capsys.readouterr().out
+    assert "W/D/L/no result: 1/0/0/0" in capsys.readouterr().out
 
     graph_path = tmp_path / "graph.csv"
     assert cli.run(["export", "graph", "--format", "csv", "--output", str(graph_path), "--db", str(db_path)]) == 0

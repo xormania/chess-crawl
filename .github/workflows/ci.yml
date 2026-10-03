@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    # Retargeting changes the merge result and promotion policy without a push.
+    types: [opened, synchronize, reopened, edited]
     branches:
       - dev
       - 'work/**'
@@ -24,11 +26,13 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
         run: |
           echo "base_ref=${BASE_REF}"
           echo "head_ref=${HEAD_REF}"
-          if [ "${BASE_REF}" != "master" ] || [ "${HEAD_REF}" != "dev" ]; then
-            echo "Only pull requests from dev to master are accepted for promotion."
+          if [ "${BASE_REF}" != "master" ] || [ "${HEAD_REF}" != "dev" ] || [ "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]; then
+            echo "Only pull requests from this repository's dev to master are accepted for promotion."
             exit 1
           fi
 

@@ -12,11 +12,11 @@ from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
 from chess_crawl.providers.base import NormalizedUser
 from chess_crawl.storage.db import transaction
-from chess_crawl.storage.raw import insert_source_record, read_raw_payload, update_raw_payload_status
+from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
 
 
-PARSER_VERSION = "users-normalizer-v1"
+PARSER_VERSION = "users-normalizer-v3"
 
 
 def normalize_user_payload(conn: sqlite3.Connection, raw_payload_id: int) -> int | None:
@@ -37,6 +37,7 @@ def normalize_user_payload(conn: sqlite3.Connection, raw_payload_id: int) -> int
         return None
 
     with transaction(conn):
+        observed_at = payload_observed_at(conn, raw_payload_id)
         provider_user_id = upsert_provider_user(
             conn,
             provider=user.provider,
@@ -45,12 +46,13 @@ def normalize_user_payload(conn: sqlite3.Connection, raw_payload_id: int) -> int
             display_username=user.display_username,
             account_status=user.account_status_raw,
             title=user.title,
-            now=raw.fetched_at,
+            now=observed_at,
+            profile_raw_payload_id=raw_payload_id if raw.endpoint_type == "user_profile" else None,
         )
         snapshot_id = upsert_user_snapshot(
             conn,
             provider_user_id=provider_user_id,
-            captured_at=raw.fetched_at,
+            captured_at=observed_at,
             observed_username=user.display_username,
             status=user.account_status_raw,
             title=user.title,
@@ -116,6 +118,12 @@ def _lichess_profile_snapshot(body: bytes, user: NormalizedUser) -> dict[str, An
     data = json.loads(body)
     count = data.get("count") or {}
     perfs = data.get("perfs") or {}
+    # Keep provider-native profile/account facts, including explicit false and
+    # absent values. In particular, profile.flag need not represent a country.
+    profile_facts = {"perfs": perfs}
+    for key in ("profile", "disabled", "verified", "tosViolation"):
+        if key in data:
+            profile_facts[key] = data[key]
     payload = {
         "kind": "profile",
         "username": user.display_username,
@@ -124,7 +132,7 @@ def _lichess_profile_snapshot(body: bytes, user: NormalizedUser) -> dict[str, An
         "country": user.country,
         "patron": data.get("patron"),
         "count": count,
-        "perfs": perfs,
+        **profile_facts,
     }
     return {
         "patron": bool(data.get("patron")) if data.get("patron") is not None else None,
@@ -133,7 +141,7 @@ def _lichess_profile_snapshot(body: bytes, user: NormalizedUser) -> dict[str, An
         "count_win": _int_or_none(count.get("win")),
         "count_loss": _int_or_none(count.get("loss")),
         "count_draw": _int_or_none(count.get("draw")),
-        "perfs_or_stats": {"perfs": perfs},
+        "perfs_or_stats": profile_facts,
         "content_hash": canonical_hash(payload),
     }
 
@@ -154,25 +162,39 @@ def _chesscom_stats_snapshot(body: bytes, user: NormalizedUser) -> dict[str, Any
 
 
 def _aggregate_chesscom_stats(stats: dict[str, Any]) -> dict[str, int | None]:
-    wins = losses = draws = 0
-    rated_count = 0
-    for value in stats.values():
-        if not isinstance(value, dict):
-            continue
-        record = value.get("record")
-        if isinstance(record, dict):
-            wins += int(record.get("win") or 0)
-            losses += int(record.get("loss") or 0)
-            draws += int(record.get("draw") or 0)
-            rated_count += int(record.get("win") or 0) + int(record.get("loss") or 0) + int(record.get("draw") or 0)
-    total = rated_count if rated_count else None
+    # The stats endpoint describes each record as all games played, without a
+    # rated-only total. A present game type with incomplete data must not be
+    # silently counted as zero; absent game types have no reported play.
+    records = []
+    for name, value in stats.items():
+        if isinstance(value, dict) and (
+            "record" in value or name.rsplit("_", 1)[-1] in {"daily", "bullet", "blitz", "rapid"}
+        ):
+            record = value.get("record")
+            records.append(record if isinstance(record, dict) else {})
+    wins = _sum_record_counts(records, "win")
+    losses = _sum_record_counts(records, "loss")
+    draws = _sum_record_counts(records, "draw")
+    total = None if wins is None or losses is None or draws is None else wins + losses + draws
     return {
         "count_all": total,
-        "count_rated": total,
-        "count_win": wins or None,
-        "count_loss": losses or None,
-        "count_draw": draws or None,
+        "count_rated": None,
+        "count_win": wins,
+        "count_loss": losses,
+        "count_draw": draws,
     }
+
+
+def _sum_record_counts(records: list[dict[str, Any]], field: str) -> int | None:
+    if not records:
+        return None
+    total = 0
+    for record in records:
+        value = record.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        total += value
+    return total
 
 
 def _user_from_stats_key(source_key: str) -> NormalizedUser:
