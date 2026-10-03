@@ -13,12 +13,16 @@ dependencies = ["httpx>=0.27,<1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+api = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1"]
 
 [project.scripts]
 chess-crawl = "chess_crawl.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"chess_crawl.storage" = ["*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

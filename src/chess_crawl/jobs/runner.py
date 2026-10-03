@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import time
+from contextlib import nullcontext
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,6 +23,8 @@ from chess_crawl.ingest import (
 )
 from chess_crawl.jobs import discovery, state
 from chess_crawl.jobs.models import DiscoveryJob, JobState
+from chess_crawl.providers.registry import ProviderSession
+from chess_crawl.storage.acquisition import associate_run_game
 from chess_crawl.storage.db import transaction
 from chess_crawl.storage.discovery import opponents_of_user, record_discovery_edges
 from chess_crawl.storage.repository import insert_error
@@ -77,12 +81,17 @@ class JobRunner:
         transport: httpx.BaseTransport | None = None,
         sleeper=None,
         game_fetcher: GameFetcher | None = None,
+        clock: Callable[[], float] = time.time,
+        session: ProviderSession | None = None,
     ) -> None:
         self.conn = conn
         self.config = config or Config.from_env()
         self.transport = transport
         self.sleeper = sleeper
         self.game_fetcher = game_fetcher
+        self.clock = clock
+        self.session = session
+        self._active_session: ProviderSession | None = None
 
     def run(
         self,
@@ -92,20 +101,28 @@ class JobRunner:
         resume_stale: bool = False,
         unblock: bool = False,
     ) -> RunnerResult:
-        stale_count = state.resume_stale_in_progress(self.conn, crawl_run_id=crawl_run_id) if resume_stale else 0
-        unblocked_count = state.unblock_jobs(self.conn, crawl_run_id=crawl_run_id) if unblock else 0
-        result = RunnerResult().with_resume_counts(stale_resumed=stale_count, unblocked=unblocked_count)
-        while max_jobs is None or result.claimed < max_jobs:
-            job = state.claim_next_job(self.conn, crawl_run_id=crawl_run_id)
-            if job is None:
-                break
-            if job.id is None:
-                raise RuntimeError("claimed job is missing a persisted id")
-            outcome = self._execute(job)
-            state.mark_job(self.conn, job.id, outcome.state, reason=outcome.reason)
-            result = result.add(state=outcome.state)
-        state.refresh_crawl_runs(self.conn, crawl_run_id=crawl_run_id)
-        return result
+        sessions = nullcontext(self.session) if self.session is not None else ProviderSession(
+            self.config, transport=self.transport, sleeper=self.sleeper, clock=self.clock,
+        )
+        with sessions as session:
+            self._active_session = session
+            try:
+                stale_count = state.resume_stale_in_progress(self.conn, crawl_run_id=crawl_run_id) if resume_stale else 0
+                unblocked_count = state.unblock_jobs(self.conn, crawl_run_id=crawl_run_id) if unblock else 0
+                result = RunnerResult().with_resume_counts(stale_resumed=stale_count, unblocked=unblocked_count)
+                while max_jobs is None or result.claimed < max_jobs:
+                    job = state.claim_next_job(self.conn, crawl_run_id=crawl_run_id)
+                    if job is None:
+                        break
+                    if job.id is None:
+                        raise RuntimeError("claimed job is missing a persisted id")
+                    outcome = self._execute(job)
+                    state.mark_job(self.conn, job.id, outcome.state, reason=outcome.reason)
+                    result = result.add(state=outcome.state)
+                state.refresh_crawl_runs(self.conn, crawl_run_id=crawl_run_id)
+                return result
+            finally:
+                self._active_session = None
 
     def _execute(self, job: DiscoveryJob) -> ExecutionOutcome:
         try:
@@ -117,6 +134,7 @@ class JobRunner:
                     config=self.config,
                     transport=self.transport,
                     sleeper=self.sleeper,
+                    session=self._active_session,
                     job_id=job.id,
                     crawl_run_id=job.crawl_run_id,
                 )
@@ -151,6 +169,7 @@ class JobRunner:
                 config=self.config,
                 transport=self.transport,
                 sleeper=self.sleeper,
+                session=self._active_session,
                 job_id=job.id,
                 crawl_run_id=job.crawl_run_id,
             )
@@ -174,7 +193,12 @@ class JobRunner:
         if remaining == 0:
             return IngestResult(job.provider, "user_games_stream", 304, None, (), "max-games cap already reached")
         if self.game_fetcher is not None:
-            return self.game_fetcher(self.conn, job.provider, job.target, params, remaining)
+            result = self.game_fetcher(self.conn, job.provider, job.target, params, remaining)
+            if job.crawl_run_id is not None:
+                with transaction(self.conn):
+                    for game_id in result.normalized_ids:
+                        associate_run_game(self.conn, job.crawl_run_id, game_id)
+            return result
         if job.provider == "chess.com":
             return self._fetch_chesscom_bounded_months(job, params)
         limit = int(params.get("limit") or remaining or params.get("max_games") or 0)
@@ -191,6 +215,7 @@ class JobRunner:
             config=self.config,
             transport=self.transport,
             sleeper=self.sleeper,
+            session=self._active_session,
             job_id=job.id,
             crawl_run_id=job.crawl_run_id,
         )
@@ -217,9 +242,11 @@ class JobRunner:
                 job.target,
                 year,
                 month,
+                max_games=remaining,
                 config=self.config,
                 transport=self.transport,
                 sleeper=self.sleeper,
+                session=self._active_session,
                 job_id=job.id,
                 crawl_run_id=job.crawl_run_id,
             )
@@ -251,6 +278,7 @@ class JobRunner:
             config=self.config,
             transport=self.transport,
             sleeper=self.sleeper,
+            session=self._active_session,
             job_id=job.id,
             crawl_run_id=job.crawl_run_id,
         )
@@ -284,6 +312,7 @@ class JobRunner:
             self.conn,
             provider=job.provider,
             user_id=user_id,
+            crawl_run_id=job.crawl_run_id,
             since=_int_or_none(params.get("since")),
             until=_int_or_none(params.get("until")),
         )

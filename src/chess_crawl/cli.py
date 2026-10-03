@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
 
 from chess_crawl import __version__
+from chess_crawl import application
 from chess_crawl.export.writers import export_games_jsonl, export_graph_csv, export_users_jsonl
 from chess_crawl.ingest import (
     IngestResult,
@@ -20,7 +22,6 @@ from chess_crawl.ingest import (
     fetch_user_profile,
 )
 from chess_crawl.jobs import state as job_state
-from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.providers.registry import list_provider_infos
 from chess_crawl.storage.queries import (
@@ -95,6 +96,18 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_games_parser.add_argument("--limit", type=int, help="Lichess max games to fetch")
     fetch_games_parser.set_defaults(handler=_cmd_fetch_games)
 
+    submit_parser = subcommands.add_parser("submit", help="Queue durable acquisition for a separate worker")
+    submit_commands = submit_parser.add_subparsers(dest="submit_command", required=True)
+    import_parser = submit_commands.add_parser("import", help="Queue a bounded player profile and game import")
+    import_parser.add_argument("provider", choices=("chess.com", "lichess"))
+    import_parser.add_argument("username")
+    import_parser.add_argument("--since", required=True, help="Inclusive YYYY-MM or YYYY-MM-DD")
+    import_parser.add_argument("--until", required=True, help="Exclusive YYYY-MM or YYYY-MM-DD")
+    import_parser.add_argument("--max-games", required=True, type=int)
+    import_parser.add_argument("--idempotency-key", required=True)
+    import_parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    import_parser.set_defaults(handler=_cmd_submit_import)
+
     query_parser = subcommands.add_parser("query", help="Query the local archive")
     query_subcommands = query_parser.add_subparsers(dest="query_command", required=True)
 
@@ -128,6 +141,8 @@ def build_parser() -> argparse.ArgumentParser:
     crawl_opp_parser.add_argument("--since", required=True, help="YYYY-MM or YYYY-MM-DD inclusive lower bound")
     crawl_opp_parser.add_argument("--until", required=True, help="YYYY-MM or YYYY-MM-DD exclusive upper bound")
     crawl_opp_parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite archive path")
+    crawl_opp_parser.add_argument("--enqueue-only", action="store_true", help="Leave execution to the archive worker")
+    crawl_opp_parser.add_argument("--idempotency-key", help="Reuse a previous submission with these exact parameters")
     crawl_opp_parser.set_defaults(handler=_cmd_crawl_opponents)
 
     jobs_parser = subcommands.add_parser("jobs", help="Inspect and resume durable jobs")
@@ -345,33 +360,39 @@ def _cmd_query_raw(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_submit_import(args: argparse.Namespace) -> int:
+    limits = application.Limits.from_env()
+    request = application.validate_import(application.ImportRequest(
+        provider=args.provider, username=args.username,
+        since=_parse_date_or_month(args.since), until=_parse_date_or_month(args.until),
+        max_games=args.max_games,
+    ), limits=limits)
+    application.validate_idempotency_key(args.idempotency_key)
+    with open_database(args.db, writable=True) as conn:
+        result = application.submit_import(conn, request, idempotency_key=args.idempotency_key, limits=limits)
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def _cmd_crawl_opponents(args: argparse.Namespace) -> int:
-    if args.depth < 0:
-        print("--depth must be >= 0.", file=sys.stderr)
-        return 2
-    if min(args.max_users, args.max_games, args.max_jobs) <= 0:
-        print("--max-users, --max-games, and --max-jobs must be greater than zero.", file=sys.stderr)
-        return 2
-    since = _parse_date_or_month(args.since, is_until=False)
-    until = _parse_date_or_month(args.until, is_until=True)
-    if since >= until:
-        print("--since must be earlier than --until.", file=sys.stderr)
-        return 2
-    bounds = CrawlBounds(
+    limits = application.Limits.from_env()
+    request = application.validate_crawl(application.CrawlRequest(
+        provider=args.provider,
+        username=args.username,
+        since=_parse_date_or_month(args.since),
+        until=_parse_date_or_month(args.until),
         max_depth=args.depth,
         max_users=args.max_users,
         max_games=args.max_games,
         max_jobs=args.max_jobs,
-    )
+    ), limits=limits)
+    key = application.validate_idempotency_key(args.idempotency_key or uuid.uuid4().hex)
     with open_database(args.db, writable=True) as conn:
-        run_id, root_job_id = create_opponent_crawl(
-            conn,
-            provider=args.provider,
-            username=args.username,
-            since=since,
-            until=until,
-            bounds=bounds,
-        )
+        submission = application.submit_crawl(conn, request, idempotency_key=key, limits=limits)
+        if args.enqueue_only:
+            print(json.dumps(submission, sort_keys=True))
+            return 0
+        run_id, root_job_id = submission["run_id"], submission["job_ids"][0]
         result = JobRunner(conn).run(crawl_run_id=run_id)
     print(f"crawl_run #{run_id} started ({args.provider}, seed={args.username.strip().lower()}, depth={args.depth})")
     print(f"root job: {root_job_id}")
@@ -634,14 +655,9 @@ def _parse_date(value: str) -> int:
     return int(parsed.timestamp())
 
 
-def _parse_date_or_month(value: str, *, is_until: bool) -> int:
+def _parse_date_or_month(value: str) -> int:
     if len(value) == 7:
         year, month = _parse_month(value)
-        if is_until:
-            month += 1
-            if month == 13:
-                year += 1
-                month = 1
         parsed = datetime(year, month, 1, tzinfo=UTC)
         return int(parsed.timestamp())
     return _parse_date(value)
@@ -652,6 +668,12 @@ def run(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
+    except application.ValidationError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    except application.ApplicationError as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
     except (FileNotFoundError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

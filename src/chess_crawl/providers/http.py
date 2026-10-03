@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import math
 import time
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 import httpx
 
-from chess_crawl.providers.base import EndpointType, FetchAttempt, FetchPolicy
+from chess_crawl.providers.base import EndpointType, FetchAttempt, FetchPolicy, ProviderRequestStopped
 from chess_crawl.storage.raw import compute_body_hash
 
 
@@ -52,6 +55,7 @@ class HttpClient:
         transport: httpx.BaseTransport | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.time,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> None:
         self.provider = provider
         self.user_agent = user_agent
@@ -59,7 +63,9 @@ class HttpClient:
         self.timeout_s = timeout_s
         self._sleeper = sleeper
         self._clock = clock
+        self._stop_requested = stop_requested or (lambda: False)
         self._last_request_at: float | None = None
+        self._not_before: float = 0
         self._client = httpx.Client(
             timeout=timeout_s,
             transport=transport,
@@ -86,115 +92,85 @@ class HttpClient:
         recorded_request_headers = self._request_headers(request_headers)
         method_upper = method.upper()
 
+        last_result: HttpFetchResult | None = None
         for attempt_number in range(1, max_attempts + 1):
-            self._respect_serial_delay()
+            if not self._stop_requested():
+                self._respect_serial_delay()
+            if self._stop_requested():
+                if last_result is not None:
+                    return last_result
+                raise ProviderRequestStopped("Provider request stopped before network acquisition")
             attempted_at = int(self._clock())
             started = self._clock()
+            retry_after = None
 
             try:
                 response = self._client.request(
-                    method_upper,
-                    url,
-                    headers=request_headers,
-                    params=params,
-                    content=content,
+                    method_upper, url, headers=request_headers, params=params, content=content,
                 )
                 duration_ms = int(max(0.0, self._clock() - started) * 1000)
                 body = response.content if response.status_code == 200 else None
                 response_headers = _cache_relevant_headers(response.headers)
-                retry_after = _parse_retry_after(response.headers.get("retry-after"))
+                retry_after = _parse_retry_after(response.headers.get("retry-after"), now=self._clock())
                 final_url = str(response.url)
                 attempts.append(
                     FetchAttempt(
-                        provider=self.provider,
-                        endpoint_type=endpoint_type,
-                        url=final_url,
-                        method=method_upper,
-                        status_code=response.status_code,
-                        attempted_at=attempted_at,
-                        attempt=attempt_number,
-                        request_headers=recorded_request_headers,
-                        response_headers=response_headers,
-                        retry_after=retry_after,
-                        bytes_count=len(body) if body is not None else None,
-                        duration_ms=duration_ms,
-                        from_cache=response.status_code == 304,
+                        provider=self.provider, endpoint_type=endpoint_type, url=final_url,
+                        method=method_upper, status_code=response.status_code,
+                        attempted_at=attempted_at, attempt=attempt_number,
+                        request_headers=recorded_request_headers, response_headers=response_headers,
+                        retry_after=retry_after, bytes_count=len(body) if body is not None else None,
+                        duration_ms=duration_ms, from_cache=response.status_code == 304,
                     )
                 )
-                if response.status_code in {200, 304, 404, 410}:
-                    return HttpFetchResult(
-                        status_code=response.status_code,
-                        url=final_url,
-                        headers=response_headers,
-                        content_type=response.headers.get("content-type"),
-                        body=body,
-                        body_hash=compute_body_hash(body) if body is not None else None,
-                        fetched_at=attempted_at,
-                        attempts=tuple(attempts),
-                    )
-                if response.status_code == 429 or 500 <= response.status_code <= 599:
-                    if attempt_number < max_attempts:
-                        self._sleeper(self._retry_delay(response.status_code, retry_after, attempt_number))
-                        continue
-                    return HttpFetchResult(
-                        status_code=response.status_code,
-                        url=final_url,
-                        headers=response_headers,
-                        content_type=response.headers.get("content-type"),
-                        body=None,
-                        body_hash=None,
-                        fetched_at=attempted_at,
-                        attempts=tuple(attempts),
-                    )
-
-                return HttpFetchResult(
-                    status_code=response.status_code,
-                    url=final_url,
-                    headers=response_headers,
-                    content_type=response.headers.get("content-type"),
-                    body=body,
+                last_result = HttpFetchResult(
+                    status_code=response.status_code, url=final_url, headers=response_headers,
+                    content_type=response.headers.get("content-type"), body=body,
                     body_hash=compute_body_hash(body) if body is not None else None,
-                    fetched_at=attempted_at,
-                    attempts=tuple(attempts),
+                    fetched_at=attempted_at, attempts=tuple(attempts),
                 )
-            except httpx.TimeoutException:
+            except httpx.RequestError as exc:
                 duration_ms = int(max(0.0, self._clock() - started) * 1000)
                 attempts.append(
                     FetchAttempt(
-                        provider=self.provider,
-                        endpoint_type=endpoint_type,
-                        url=url,
-                        method=method_upper,
-                        status_code=None,
-                        attempted_at=attempted_at,
-                        attempt=attempt_number,
-                        request_headers=recorded_request_headers,
+                        provider=self.provider, endpoint_type=endpoint_type, url=url,
+                        method=method_upper, status_code=None, attempted_at=attempted_at,
+                        attempt=attempt_number, request_headers=recorded_request_headers,
                         duration_ms=duration_ms,
+                        error_kind="timeout" if isinstance(exc, httpx.TimeoutException) else "network_error",
                     )
                 )
-                if attempt_number < max_attempts:
-                    self._sleeper(self._retry_delay(None, None, attempt_number))
-                    continue
-                return HttpFetchResult(
-                    status_code=0,
-                    url=url,
-                    headers={},
-                    content_type=None,
-                    body=None,
-                    body_hash=None,
-                    fetched_at=attempted_at,
-                    attempts=tuple(attempts),
+                last_result = HttpFetchResult(
+                    status_code=0, url=url, headers={}, content_type=None, body=None,
+                    body_hash=None, fetched_at=attempted_at, attempts=tuple(attempts),
                 )
+
+            status = last_result.status_code
+            if status not in {0, 429} and not 500 <= status <= 599:
+                return last_result
+            delay = self._retry_delay(status, retry_after, attempt_number)
+            self._not_before = self._clock() + delay
+            if attempt_number == max_attempts or self._stop_requested():
+                return last_result
+            self._sleeper(delay)
+            if self._stop_requested():
+                # Return the actual last response so ingestion commits fetch
+                # evidence and the runner persists the provider backoff floor.
+                return last_result
+            self._not_before = 0
 
         raise RuntimeError("unreachable HTTP retry state")
 
     def _respect_serial_delay(self) -> None:
+        not_before = self._not_before
         if self._last_request_at is not None:
-            elapsed = self._clock() - self._last_request_at
-            delay = self.policy.min_delay_s - elapsed
-            if delay > 0:
-                self._sleeper(delay)
-        self._last_request_at = self._clock()
+            not_before = max(not_before, self._last_request_at + self.policy.min_delay_s)
+        delay = not_before - self._clock()
+        if delay > 0:
+            self._sleeper(delay)
+        if not self._stop_requested():
+            self._not_before = 0
+            self._last_request_at = self._clock()
 
     def _retry_delay(
         self,
@@ -231,11 +207,17 @@ def _cache_relevant_headers(headers: httpx.Headers) -> dict[str, str]:
     return {key.lower(): value for key, value in headers.items() if key.lower() in keep}
 
 
-def _parse_retry_after(value: str | None) -> int | None:
+def _parse_retry_after(value: str | None, *, now: float | None = None) -> int | None:
     if value is None:
         return None
     try:
-        parsed = int(value)
+        return max(0, int(value))
     except ValueError:
+        pass
+    try:
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=UTC)
+        return max(0, math.ceil(date.timestamp() - (time.time() if now is None else now)))
+    except (ValueError, TypeError, OverflowError):
         return None
-    return max(0, parsed)

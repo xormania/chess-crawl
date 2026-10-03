@@ -524,3 +524,11 @@ def _normalize_target(kind: str, target: str) -> str:
     if kind in {"fetch_user_profile", "fetch_user_stats", "fetch_user_games", "crawl_opponents"}:
         return stripped.lower()
     return stripped
+
+
+def get_run(conn: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM crawl_runs WHERE id = ?", (run_id,)).fetchone()
+
+
+def job_ids_for_run(conn: sqlite3.Connection, run_id: int) -> list[int]:
+    return [int(row["id"]) for row in conn.execute("SELECT id FROM discovery_jobs WHERE crawl_run_id = ? ORDER BY id", (run_id,))]

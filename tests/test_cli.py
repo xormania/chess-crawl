@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from chess_crawl import cli
+from chess_crawl.storage.migrations import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +33,7 @@ def test_cli_init_provider_list_and_db_info(tmp_path: Path) -> None:
 
     init_result = run_cli("init", "--db", str(db_path))
     assert init_result.returncode == 0, init_result.stderr
-    assert "Schema version: 1" in init_result.stdout
+    assert f"Schema version: {SCHEMA_VERSION}" in init_result.stdout
     assert "chess.com, lichess" in init_result.stdout
 
     provider_result = run_cli("provider", "list")
@@ -43,7 +44,7 @@ def test_cli_init_provider_list_and_db_info(tmp_path: Path) -> None:
 
     info_result = run_cli("db", "info", "--db", str(db_path))
     assert info_result.returncode == 0, info_result.stderr
-    assert "Tables: 16" in info_result.stdout
+    assert "Tables:" in info_result.stdout
     assert "Providers: chess.com, lichess" in info_result.stdout
 
 

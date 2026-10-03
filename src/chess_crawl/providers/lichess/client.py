@@ -23,6 +23,8 @@ class LichessClient:
         *,
         transport: httpx.BaseTransport | None = None,
         sleeper=None,
+        clock=None,
+        stop_requested=None,
         timeout_s: float = 60.0,
     ) -> None:
         self.settings = settings
@@ -36,6 +38,10 @@ class LichessClient:
         kwargs = {}
         if sleeper is not None:
             kwargs["sleeper"] = sleeper
+        if clock is not None:
+            kwargs["clock"] = clock
+        if stop_requested is not None:
+            kwargs["stop_requested"] = stop_requested
         self.http = HttpClient(
             provider=PROVIDER,
             user_agent=settings.user_agent,

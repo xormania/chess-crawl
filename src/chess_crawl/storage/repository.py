@@ -272,7 +272,7 @@ def upsert_game(
     now: int | None = None,
 ) -> int:
     timestamp = now or int(time.time())
-    existing = _find_existing_game(conn, provider, provider_game_id, canonical_url, content_hash)
+    existing = find_existing_game(conn, provider, provider_game_id, canonical_url, content_hash)
     if existing is None:
         conn.execute(
             """
@@ -422,7 +422,7 @@ def upsert_rating_at_game(
     )
 
 
-def _find_existing_game(
+def find_existing_game(
     conn: sqlite3.Connection,
     provider: str,
     provider_game_id: str | None,

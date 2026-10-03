@@ -6,11 +6,12 @@ from pathlib import Path
 import pytest
 
 from chess_crawl import cli
-import chess_crawl.ingest as ingest_module
+import chess_crawl.providers.registry as provider_registry
 from chess_crawl.jobs import state
 from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
 from chess_crawl.providers.base import EndpointType, RawRecord
 from chess_crawl.storage.db import open_database
+from chess_crawl.storage.migrations import SCHEMA_VERSION
 
 
 pytestmark = pytest.mark.workflow
@@ -281,7 +282,7 @@ def provider_factory(
             ]
         },
     )
-    monkeypatch.setattr(ingest_module, "create_provider_client", factory)
+    monkeypatch.setattr(provider_registry, "create_provider_client", factory)
     return factory
 
 
@@ -293,7 +294,7 @@ def test_cli_fresh_archive_rerun_query_export_and_provider_boundaries(
     db_path = tmp_path / "archive.sqlite"
 
     assert cli.run(["init", "--db", str(db_path)]) == 0
-    assert "Schema version: 1" in capsys.readouterr().out
+    assert f"Schema version: {SCHEMA_VERSION}" in capsys.readouterr().out
 
     assert cli.run(["fetch", "user", "chess.com", "SameName", "--db", str(db_path)]) == 0
     fetch_out = capsys.readouterr().out
@@ -447,7 +448,7 @@ def test_cli_resume_finishes_interrupted_crawl_without_refetching_done_jobs(
             "opponentone": [],
         },
     )
-    monkeypatch.setattr(ingest_module, "create_provider_client", factory)
+    monkeypatch.setattr(provider_registry, "create_provider_client", factory)
     db_path = archive_path
 
     with open_database(db_path, writable=True) as conn:
@@ -512,7 +513,7 @@ def test_cli_provider_failure_leaves_no_normalized_partial_and_rerun_recovers(
         lichess_games={"samename": [_lichess_game("recovery-1", white="SameName", black="OpponentTwo")]},
         lichess_failures={"samename": 1},
     )
-    monkeypatch.setattr(ingest_module, "create_provider_client", factory)
+    monkeypatch.setattr(provider_registry, "create_provider_client", factory)
     db_path = tmp_path / "archive.sqlite"
     assert cli.run(["init", "--db", str(db_path)]) == 0
     capsys.readouterr()

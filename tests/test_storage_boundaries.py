@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from chess_crawl.storage import db
-from chess_crawl.storage.migrations import initialize
+from chess_crawl.storage.migrations import initialize, migration_resources
 from chess_crawl.storage.repository import upsert_provider_user
 
 
@@ -138,4 +138,4 @@ def test_schema_initialization_does_not_commit_an_enclosing_operation() -> None:
                 raise RuntimeError("initialization interrupted")
         assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0] == 0
         initialize(conn)
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == len(migration_resources())

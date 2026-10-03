@@ -91,17 +91,17 @@ def test_crawl_opponents_cli_requires_caps_and_passes_month_bounds(
     db_path = tmp_path / "archive.sqlite"
     seen: dict[str, Any] = {}
 
-    def fake_create(conn, *, provider, username, since, until, bounds):
+    def fake_create(conn, request, *, idempotency_key, limits):
         seen.update(
             {
-                "provider": provider,
-                "username": username,
-                "since": since,
-                "until": until,
-                "bounds": bounds,
+                "provider": request.provider,
+                "username": request.username,
+                "since": request.since,
+                "until": request.until,
+                "bounds": request,
             }
         )
-        return 12, 34
+        return {"run_id": 12, "job_ids": [34], "replayed": False}
 
     class FakeRunner:
         def __init__(self, conn):
@@ -111,7 +111,7 @@ def test_crawl_opponents_cli_requires_caps_and_passes_month_bounds(
             seen["crawl_run_id"] = crawl_run_id
             return SimpleNamespace(done=2, skipped=0, blocked=0, errors=0)
 
-    monkeypatch.setattr(cli, "create_opponent_crawl", fake_create)
+    monkeypatch.setattr(cli.application, "submit_crawl", fake_create)
     monkeypatch.setattr(cli, "JobRunner", FakeRunner)
 
     rc = cli.run(
@@ -141,12 +141,12 @@ def test_crawl_opponents_cli_requires_caps_and_passes_month_bounds(
     assert rc == 0
     assert "crawl_run #12" in out.out
     assert seen["provider"] == "chess.com"
-    assert seen["username"] == "SameName"
+    assert seen["username"] == "samename"
     assert seen["since"] == 1704067200
-    assert seen["until"] == 1709251200
+    assert seen["until"] == 1706745600
     assert seen["crawl_run_id"] == 12
     bounds = seen["bounds"]
-    assert isinstance(bounds, cli.CrawlBounds)
+    assert isinstance(bounds, cli.application.CrawlRequest)
     assert bounds.max_depth == 1
     assert bounds.max_users == 3
 

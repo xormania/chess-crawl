@@ -336,3 +336,101 @@ def iter_graph_edges(
         """,
         (provider, provider),
     )
+
+
+def archive_freshness(conn: sqlite3.Connection, *, provider: str | None = None) -> dict[str, Any]:
+    """Describe preserved and normalized observations, without implying live data."""
+    row = conn.execute(
+        """
+        SELECT (SELECT MAX(attempted_at) FROM fetch_logs
+                 WHERE (? IS NULL OR provider = ?) AND status_code IN (200, 304)) AS last_checked_at,
+               MAX(fetched_at) AS last_fetched_at,
+               MAX(normalized_at) AS last_normalized_at,
+               COALESCE(SUM(normalization_status IN ('pending', 'stale')), 0) AS pending_payloads,
+               COALESCE(SUM(normalization_status = 'failed'), 0) AS failed_payloads
+          FROM raw_payloads
+         WHERE (? IS NULL OR provider = ?)
+        """,
+        (provider, provider, provider, provider),
+    ).fetchone()
+    return {"provider": provider, **dict(row)}
+
+
+def game_page(
+    conn: sqlite3.Connection, *, provider: str | None, after: int, limit: int
+) -> tuple[list[sqlite3.Row], int]:
+    """Read a bounded page ordered by immutable storage ID, plus matching count."""
+    total = int(conn.execute(
+        "SELECT COUNT(*) FROM games WHERE (? IS NULL OR provider = ?)", (provider, provider),
+    ).fetchone()[0])
+    rows = list(conn.execute(
+        """
+        SELECT g.id, g.provider, g.provider_game_id, g.canonical_url, g.outcome,
+               g.is_live, g.status_raw, g.rated, g.created_at, g.ended_at, g.first_seen_at,
+               v.canonical_name AS variant, tc.time_class,
+               wp.username_normalized AS white_username, bp.username_normalized AS black_username
+          FROM games g
+          JOIN variants v ON v.id = g.variant_id
+          JOIN time_controls tc ON tc.id = g.time_control_id
+          LEFT JOIN game_participants wp ON wp.game_id = g.id AND wp.color = 'white'
+          LEFT JOIN game_participants bp ON bp.game_id = g.id AND bp.color = 'black'
+         WHERE g.id > ? AND (? IS NULL OR g.provider = ?)
+         ORDER BY g.id
+         LIMIT ?
+        """,
+        (after, provider, provider, limit),
+    ))
+    return rows, total
+
+
+def user_page(
+    conn: sqlite3.Connection, *, provider: str | None, after: int, limit: int
+) -> tuple[list[sqlite3.Row], int]:
+    total = int(conn.execute(
+        "SELECT COUNT(*) FROM provider_users WHERE (? IS NULL OR provider = ?)", (provider, provider),
+    ).fetchone()[0])
+    rows = list(conn.execute(
+        """
+        SELECT pu.id, pu.provider, pu.provider_user_id, pu.username_normalized,
+               pu.display_username, pu.account_status, pu.title, pu.first_seen_at, pu.updated_at,
+               (SELECT COUNT(*) FROM user_snapshots us WHERE us.provider_user_id = pu.id) AS snapshots,
+               (SELECT COUNT(*) FROM game_participants gp
+                  JOIN games g ON g.id = gp.game_id
+                 WHERE gp.provider_user_id = pu.id AND g.provider = pu.provider) AS games
+          FROM provider_users pu
+         WHERE pu.id > ? AND (? IS NULL OR pu.provider = ?)
+         ORDER BY pu.id
+         LIMIT ?
+        """,
+        (after, provider, provider, limit),
+    ))
+    return rows, total
+
+
+def opponent_page(
+    conn: sqlite3.Connection, *, provider: str, user_id: int, after: int, limit: int
+) -> tuple[list[sqlite3.Row], int]:
+    # Limit applies to opponent groups, never individual games within a group.
+    source = """
+      FROM games g
+      JOIN game_participants mine ON mine.game_id = g.id AND mine.provider_user_id = ?
+      JOIN game_participants other ON other.game_id = g.id AND other.color <> mine.color
+      JOIN provider_users pu ON pu.id = other.provider_user_id AND pu.provider = ?
+     WHERE g.provider = ? AND pu.id <> ?
+    """
+    params = (user_id, provider, provider, user_id)
+    total = int(conn.execute("SELECT COUNT(DISTINCT pu.id) " + source, params).fetchone()[0])
+    rows = list(conn.execute(
+        """
+        SELECT pu.id, pu.provider, pu.username_normalized AS opponent_username,
+               pu.display_username AS opponent_display, COUNT(*) AS games,
+               COALESCE(SUM((mine.color='white' AND g.outcome='white_win')
+                         OR (mine.color='black' AND g.outcome='black_win')), 0) AS my_wins,
+               COALESCE(SUM(g.outcome='draw'), 0) AS draws,
+               COALESCE(SUM((mine.color='white' AND g.outcome='black_win')
+                         OR (mine.color='black' AND g.outcome='white_win')), 0) AS my_losses,
+               COALESCE(SUM(g.outcome IS NULL), 0) AS unfinished
+        """ + source + " AND pu.id > ? GROUP BY pu.id ORDER BY pu.id LIMIT ?",
+        (*params, after, limit),
+    ))
+    return rows, total

@@ -283,18 +283,43 @@ def _json(value: Mapping[str, Any]) -> str:
     return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
 
 
-def latest_validators(conn: sqlite3.Connection, canonical_source_key: str) -> tuple[str | None, str | None]:
+def latest_raw_payload_id(conn: sqlite3.Connection, canonical_source_key: str) -> int | None:
+    # Fetch evidence determines the current representation when an older body
+    # hash reappears. Raw bodies and their original capture metadata stay immutable.
     row = conn.execute(
         """
-        SELECT response_headers
-          FROM raw_payloads
-         WHERE canonical_source_key = ?
-         ORDER BY fetched_at DESC, id DESC
+        SELECT r.id
+          FROM raw_payloads r
+          LEFT JOIN fetch_logs f ON f.raw_payload_id = r.id
+         WHERE r.canonical_source_key = ?
+         ORDER BY COALESCE(f.attempted_at, r.fetched_at) DESC, f.id DESC, r.id DESC
          LIMIT 1
         """,
         (canonical_source_key,),
     ).fetchone()
-    if row is None or not row["response_headers"]:
+    return int(row["id"]) if row is not None else None
+
+
+def latest_validators(conn: sqlite3.Connection, canonical_source_key: str) -> tuple[str | None, str | None]:
+    raw_payload_id = latest_raw_payload_id(conn, canonical_source_key)
+    if raw_payload_id is None:
         return None, None
-    headers = json.loads(row["response_headers"])
-    return headers.get("etag"), headers.get("last-modified") or headers.get("last_modified")
+    row = conn.execute(
+        """
+        SELECT r.response_headers,
+               (SELECT etag FROM fetch_logs
+                 WHERE raw_payload_id = r.id AND etag IS NOT NULL
+                 ORDER BY attempted_at DESC, id DESC LIMIT 1) AS etag,
+               (SELECT last_modified FROM fetch_logs
+                 WHERE raw_payload_id = r.id AND last_modified IS NOT NULL
+                 ORDER BY attempted_at DESC, id DESC LIMIT 1) AS last_modified
+          FROM raw_payloads r
+         WHERE r.id = ?
+        """,
+        (raw_payload_id,),
+    ).fetchone()
+    headers = json.loads(row["response_headers"] or "{}")
+    return (
+        row["etag"] or headers.get("etag"),
+        row["last_modified"] or headers.get("last-modified") or headers.get("last_modified"),
+    )
