@@ -25,6 +25,12 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Changed
 
+- CI scopes application checks to the PR merge diff while preserving required
+  check names and full promotion validation. Documentation-only changes skip
+  application work, test-only changes skip Compose, and unrecognized paths run
+  all checks. Python analysis reuses caches and Docker separates dependencies
+  from application packaging; the offline suite and API/Mercure smoke still
+  execute when selected.
 - Lichess game requests include available clocks, evaluations, and accuracy
   data by default, with individual capture switches in source and Compose runs.
 - Reports expose separate `no_result` and `in_progress` counts. The API retains
