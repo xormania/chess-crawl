@@ -126,8 +126,7 @@ def chesscom_outcome(white_result: str | None, black_result: str | None) -> tupl
         return "black_win", False
     if white in CHESSCOM_DRAW_RESULTS or black in CHESSCOM_DRAW_RESULTS:
         return "draw", False
-    if white in {"", "none"} and black in {"", "none"}:
-        return None, True
+    # Missing or "none" results do not establish that an archived game is active.
     return None, False
 
 

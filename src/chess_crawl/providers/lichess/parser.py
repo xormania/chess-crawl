@@ -27,7 +27,7 @@ def parse_user_profile(body: bytes) -> NormalizedUser:
         created_at=_ms_to_s(data.get("createdAt")),
         last_seen_at=_ms_to_s(data.get("seenAt")),
         country=profile.get("country"),
-        is_verified=None,
+        is_verified=data.get("verified") if isinstance(data.get("verified"), bool) else None,
     )
 
 

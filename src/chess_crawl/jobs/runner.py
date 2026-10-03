@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import time
+from contextlib import nullcontext
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,8 +21,16 @@ from chess_crawl.ingest import (
     fetch_lichess_games,
     fetch_user_profile,
 )
-from chess_crawl.jobs import discovery, store
-from chess_crawl.jobs.models import DiscoveryJob
+from chess_crawl.jobs import discovery, state
+from chess_crawl.jobs.models import DiscoveryJob, JobState
+from chess_crawl.jobs.locking import ExecutorLease, executor_lock
+from chess_crawl.jobs.settings import WorkerSettings
+from chess_crawl.providers.registry import ProviderSession, get_provider_info
+from chess_crawl.providers.base import ProviderRequestStopped
+from chess_crawl.storage.acquisition import associate_run_game
+from chess_crawl.storage.db import transaction
+from chess_crawl.storage.discovery import opponents_of_user, record_discovery_edges
+from chess_crawl.storage.repository import insert_error
 
 
 GameFetcher = Callable[[sqlite3.Connection, str, str, Mapping[str, Any], int | None], IngestResult]
@@ -61,8 +71,15 @@ class RunnerResult:
 
 @dataclass(frozen=True)
 class ExecutionOutcome:
-    state: str
+    state: JobState
     reason: str
+    transient: bool = False
+    retry_after: float | None = None
+    status_code: int | None = None
+
+
+class _AcquisitionStopped(Exception):
+    """The current acquisition is durable; leave later work unclaimed."""
 
 
 class JobRunner:
@@ -74,12 +91,25 @@ class JobRunner:
         transport: httpx.BaseTransport | None = None,
         sleeper=None,
         game_fetcher: GameFetcher | None = None,
+        settings: WorkerSettings | None = None,
+        clock: Callable[[], float] = time.time,
+        session: ProviderSession | None = None,
+        lease: ExecutorLease | None = None,
+        stop_requested: Callable[[], bool] | None = None,
+        on_job: Callable[[int | None], None] | None = None,
     ) -> None:
         self.conn = conn
         self.config = config or Config.from_env()
         self.transport = transport
         self.sleeper = sleeper
         self.game_fetcher = game_fetcher
+        self.settings = settings or WorkerSettings()
+        self.clock = clock
+        self.session = session
+        self.lease = lease
+        self.stop_requested = stop_requested or (lambda: False)
+        self.on_job = on_job or (lambda job_id: None)
+        self._active_session: ProviderSession | None = None
 
     def run(
         self,
@@ -89,30 +119,56 @@ class JobRunner:
         resume_stale: bool = False,
         unblock: bool = False,
     ) -> RunnerResult:
-        stale_count = store.resume_stale_in_progress(self.conn, crawl_run_id=crawl_run_id) if resume_stale else 0
-        unblocked_count = store.unblock_jobs(self.conn, crawl_run_id=crawl_run_id) if unblock else 0
+        with executor_lock(self.conn, lease=self.lease) as lease:
+            sessions = nullcontext(self.session) if self.session is not None else ProviderSession(
+                self.config, transport=self.transport, sleeper=self.sleeper, clock=self.clock,
+                stop_requested=self.stop_requested,
+            )
+            with sessions as session:
+                self._active_session = session
+                try:
+                    return self._run_owned(
+                        lease, crawl_run_id=crawl_run_id, max_jobs=max_jobs,
+                        resume_stale=resume_stale, unblock=unblock,
+                    )
+                finally:
+                    self._active_session = None
+
+    def _run_owned(
+        self, lease: ExecutorLease, *, crawl_run_id: int | None,
+        max_jobs: int | None, resume_stale: bool, unblock: bool,
+    ) -> RunnerResult:
+        stale_count = state.resume_stale_in_progress(
+            self.conn, crawl_run_id=crawl_run_id, now=int(self.clock()), lease=lease,
+        ) if resume_stale else 0
+        unblocked_count = state.unblock_jobs(self.conn, crawl_run_id=crawl_run_id, now=self.clock()) if unblock else 0
         result = RunnerResult().with_resume_counts(stale_resumed=stale_count, unblocked=unblocked_count)
-        while max_jobs is None or result.claimed < max_jobs:
-            job = store.claim_next_job(self.conn, crawl_run_id=crawl_run_id)
+        while (max_jobs is None or result.claimed < max_jobs) and not self.stop_requested():
+            job = state.claim_next_job(self.conn, crawl_run_id=crawl_run_id, now=self.clock())
             if job is None:
                 break
             if job.id is None:
                 raise RuntimeError("claimed job is missing a persisted id")
-            outcome = self._execute(job)
-            if outcome.state == "done":
-                store.mark_done(self.conn, job.id, reason=outcome.reason)
-            elif outcome.state == "skipped":
-                store.mark_skipped(self.conn, job.id, reason=outcome.reason)
-            elif outcome.state == "blocked":
-                store.mark_blocked(self.conn, job.id, reason=outcome.reason)
-            else:
-                store.mark_error(self.conn, job.id, reason=outcome.reason)
-            result = result.add(state=outcome.state)
-        if crawl_run_id is not None:
-            self._refresh_run_status(crawl_run_id)
-        else:
-            for row in store.crawl_runs(self.conn):
-                self._refresh_run_status(int(row["id"]))
+            self.on_job(job.id)
+            if job.crawl_run_id is not None:
+                state.refresh_run_status(self.conn, job.crawl_run_id)
+            try:
+                outcome = self._execute(job)
+                minimum_delay = self.config.provider(job.provider).min_delay_s
+                if outcome.status_code == 429:
+                    minimum_delay = max(minimum_delay, get_provider_info(job.provider).policy.next_delay(429, outcome.retry_after))
+                completed = state.finish_attempt(
+                    self.conn, job.id, outcome.state, reason=outcome.reason,
+                    transient=outcome.transient, retry_after=outcome.retry_after,
+                    minimum_delay=minimum_delay, settings=self.settings, now=self.clock(),
+                )
+                result = result.add(state=completed)
+            finally:
+                self.on_job(None)
+        # Normal completions already refreshed their own run. Avoid rewriting
+        # every historical run on each idle daemon poll.
+        if crawl_run_id is not None or stale_count or unblocked_count:
+            state.refresh_crawl_runs(self.conn, crawl_run_id=crawl_run_id)
         return result
 
     def _execute(self, job: DiscoveryJob) -> ExecutionOutcome:
@@ -125,6 +181,7 @@ class JobRunner:
                     config=self.config,
                     transport=self.transport,
                     sleeper=self.sleeper,
+                    session=self._active_session,
                     job_id=job.id,
                     crawl_run_id=job.crawl_run_id,
                 )
@@ -141,15 +198,17 @@ class JobRunner:
             if job.kind == "crawl_opponents":
                 return self._crawl_opponents(job)
             return ExecutionOutcome("error", f"unknown job kind: {job.kind}")
+        except (_AcquisitionStopped, ProviderRequestStopped) as exc:
+            return ExecutionOutcome("pending", str(exc))
         except Exception as exc:
-            store.insert_error(
+            insert_error(
                 self.conn,
                 provider=job.provider,
                 error_kind="other",
                 message=str(exc),
                 retry_count=job.attempts,
             )
-            return ExecutionOutcome("error", str(exc))
+            return ExecutionOutcome("error", str(exc), transient=isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)))
 
     def _fetch_stats(self, job: DiscoveryJob) -> IngestResult:
         if job.provider == "chess.com":
@@ -159,6 +218,7 @@ class JobRunner:
                 config=self.config,
                 transport=self.transport,
                 sleeper=self.sleeper,
+                session=self._active_session,
                 job_id=job.id,
                 crawl_run_id=job.crawl_run_id,
             )
@@ -172,7 +232,7 @@ class JobRunner:
         )
 
     def _fetch_user_games(self, job: DiscoveryJob) -> IngestResult:
-        params = store.load_params(job.params_json)
+        params = state.load_params(job.params_json)
         remaining = discovery.remaining_game_budget(
             self.conn,
             crawl_run_id=job.crawl_run_id,
@@ -182,7 +242,12 @@ class JobRunner:
         if remaining == 0:
             return IngestResult(job.provider, "user_games_stream", 304, None, (), "max-games cap already reached")
         if self.game_fetcher is not None:
-            return self.game_fetcher(self.conn, job.provider, job.target, params, remaining)
+            result = self.game_fetcher(self.conn, job.provider, job.target, params, remaining)
+            if job.crawl_run_id is not None:
+                with transaction(self.conn):
+                    for game_id in result.normalized_ids:
+                        associate_run_game(self.conn, job.crawl_run_id, game_id)
+            return result
         if job.provider == "chess.com":
             return self._fetch_chesscom_bounded_months(job, params)
         limit = int(params.get("limit") or remaining or params.get("max_games") or 0)
@@ -199,6 +264,7 @@ class JobRunner:
             config=self.config,
             transport=self.transport,
             sleeper=self.sleeper,
+            session=self._active_session,
             job_id=job.id,
             crawl_run_id=job.crawl_run_id,
         )
@@ -212,6 +278,8 @@ class JobRunner:
         cursor_index = int(params.get("cursor_index") or 0)
         last_result = IngestResult(job.provider, "monthly_archive", 304, None, (), "no months in date window")
         for index, (year, month) in enumerate(months[cursor_index:], start=cursor_index):
+            if self.stop_requested() or self._cancelled(job):
+                raise _AcquisitionStopped("Acquisition stopped; month checkpoint retained")
             remaining = discovery.remaining_game_budget(
                 self.conn,
                 crawl_run_id=job.crawl_run_id,
@@ -225,18 +293,31 @@ class JobRunner:
                 job.target,
                 year,
                 month,
+                max_games=remaining,
                 config=self.config,
                 transport=self.transport,
                 sleeper=self.sleeper,
+                session=self._active_session,
                 job_id=job.id,
                 crawl_run_id=job.crawl_run_id,
             )
-            params["cursor_index"] = index + 1
             if job.id is not None:
-                store.update_job_params(self.conn, job.id, params)
+                state.checkpoint_job(
+                    self.conn,
+                    job.id,
+                    params,
+                    cursor_index=index + 1,
+                    status_code=last_result.status_code,
+                )
             if last_result.status_code not in {200, 304}:
                 return last_result
         return last_result
+
+    def _cancelled(self, job: DiscoveryJob) -> bool:
+        if job.crawl_run_id is None:
+            return False
+        run = state.get_run(self.conn, job.crawl_run_id)
+        return run is not None and run["status"] == "cancelled"
 
     def _fetch_game_by_id(self, job: DiscoveryJob) -> IngestResult:
         if job.provider != "lichess":
@@ -254,6 +335,7 @@ class JobRunner:
             config=self.config,
             transport=self.transport,
             sleeper=self.sleeper,
+            session=self._active_session,
             job_id=job.id,
             crawl_run_id=job.crawl_run_id,
         )
@@ -261,32 +343,29 @@ class JobRunner:
     def _crawl_opponents(self, job: DiscoveryJob) -> ExecutionOutcome:
         if job.id is None or job.crawl_run_id is None:
             return ExecutionOutcome("error", "crawl_opponents requires a persisted crawl run")
-        params = store.load_params(job.params_json)
+        params = state.load_params(job.params_json)
         user_id = discovery.ensure_local_user(self.conn, provider=job.provider, username=job.target)
-        remaining = discovery.remaining_game_budget(
-            self.conn,
-            crawl_run_id=job.crawl_run_id,
-            provider=job.provider,
-            params=params,
-        )
-        if remaining == 0:
-            return ExecutionOutcome("skipped", "max-games cap reached before fetching user")
+        # Acquisition already stops at the game cap. Retained run games still
+        # need frontier processing after a crash between acquisition and the
+        # graph transaction, even when those games exhausted the budget.
         fetch_result = self._fetch_user_games(job)
         if fetch_result.status_code not in {200, 304}:
             return _outcome_from_ingest(fetch_result)
+        if self._cancelled(job):
+            return ExecutionOutcome("pending", "Crawl cancelled; acquisition retained")
         child_params = dict(params)
         child_params.pop("cursor_index", None)
 
         next_depth = job.depth + 1
         max_depth = int(child_params["max_depth"])
         if next_depth > max_depth:
-            return ExecutionOutcome("done", f"fetched {job.target}; depth cap reached")
+            return ExecutionOutcome("done", f"processed {job.target}; depth cap reached")
 
-        user_id = discovery.ensure_local_user(self.conn, provider=job.provider, username=job.target)
-        edges = discovery.opponents_of_user(
+        edges = opponents_of_user(
             self.conn,
             provider=job.provider,
             user_id=user_id,
+            crawl_run_id=job.crawl_run_id,
             since=_int_or_none(params.get("since")),
             until=_int_or_none(params.get("until")),
         )
@@ -301,46 +380,25 @@ class JobRunner:
                 current_depth=job.depth,
             )
         ]
-        edge_count = discovery.record_discovery_edges(
-            self.conn,
-            crawl_run_id=job.crawl_run_id,
-            provider=job.provider,
-            from_user_id=user_id,
-            depth=next_depth,
-            edges=frontier_edges,
-        )
-        child_count = discovery.enqueue_opponent_children(
-            self.conn,
-            crawl_run_id=job.crawl_run_id,
-            parent_job_id=job.id,
-            provider=job.provider,
-            params=child_params,
-            next_depth=next_depth,
-            edges=frontier_edges,
-        )
+        with transaction(self.conn):
+            edge_count = record_discovery_edges(
+                self.conn,
+                crawl_run_id=job.crawl_run_id,
+                provider=job.provider,
+                from_user_id=user_id,
+                depth=next_depth,
+                edges=frontier_edges,
+            )
+            child_count = discovery.enqueue_opponent_children(
+                self.conn,
+                crawl_run_id=job.crawl_run_id,
+                parent_job_id=job.id,
+                provider=job.provider,
+                params=child_params,
+                next_depth=next_depth,
+                edges=frontier_edges,
+            )
         return ExecutionOutcome("done", f"edges={edge_count}; child_jobs={child_count}")
-
-    def _refresh_run_status(self, crawl_run_id: int) -> None:
-        counts = {row["state"]: int(row["count"]) for row in store.job_state_counts(self.conn, crawl_run_id=crawl_run_id)}
-        if counts.get("pending", 0) or counts.get("in_progress", 0):
-            status = "running"
-            finished = False
-        elif counts.get("blocked", 0):
-            status = "paused"
-            finished = False
-        elif counts.get("error", 0):
-            status = "failed"
-            finished = True
-        else:
-            status = "done"
-            finished = True
-        store.update_crawl_run(
-            self.conn,
-            crawl_run_id,
-            status=status,
-            counters=discovery.run_counters(self.conn, crawl_run_id),
-            finished=finished,
-        )
 
 
 def _outcome_from_ingest(result: IngestResult) -> ExecutionOutcome:
@@ -349,8 +407,8 @@ def _outcome_from_ingest(result: IngestResult) -> ExecutionOutcome:
     if result.status_code in {404, 410}:
         return ExecutionOutcome("skipped", result.message)
     if result.status_code == 429:
-        return ExecutionOutcome("blocked", result.message)
-    return ExecutionOutcome("error", result.message)
+        return ExecutionOutcome("blocked", result.message, transient=True, retry_after=result.retry_after, status_code=result.status_code)
+    return ExecutionOutcome("error", result.message, transient=result.status_code == 0 or 500 <= result.status_code <= 599, retry_after=result.retry_after, status_code=result.status_code)
 
 
 def _int_or_none(value: object) -> int | None:
@@ -375,7 +433,7 @@ def _known_at_or_before_current_depth(
     username: str,
     current_depth: int,
 ) -> bool:
-    known_depth = store.known_crawl_depth(
+    known_depth = state.known_crawl_depth(
         conn,
         crawl_run_id=crawl_run_id,
         provider=provider,

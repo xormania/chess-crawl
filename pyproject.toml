@@ -13,12 +13,16 @@ dependencies = ["httpx>=0.27,<1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+api = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1"]
 
 [project.scripts]
 chess-crawl = "chess_crawl.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"chess_crawl.storage" = ["*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -27,12 +31,14 @@ markers = [
     "workflow: offline CLI workflow tests that exercise multiple commands and SQLite state",
     "integration: offline integration tests that cross package boundaries",
     "slow: slow tests excluded from default CI unless explicitly selected",
-    "live: tests requiring live provider APIs or network access; skipped by default",
+    "live: requires explicit --run-live to use provider APIs or network access; skipped by default",
 ]
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.115,<1",
     "mypy>=2.1.0",
+    "pytest>=8,<10",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.20",
 ]

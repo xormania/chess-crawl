@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
 
 import httpx
@@ -97,9 +98,54 @@ def create_provider_client(
     *,
     transport: httpx.BaseTransport | None = None,
     sleeper=None,
+    clock=None,
+    stop_requested=None,
 ):
     if key == "chess.com":
-        return ChessComClient(config.provider(key), transport=transport, sleeper=sleeper)
+        return ChessComClient(config.provider(key), transport=transport, sleeper=sleeper, clock=clock, stop_requested=stop_requested)
     if key == "lichess":
-        return LichessClient(config.provider(key), transport=transport, sleeper=sleeper)
+        return LichessClient(config.provider(key), transport=transport, sleeper=sleeper, clock=clock, stop_requested=stop_requested)
     raise UnknownProvider(key)
+
+
+class ProviderSession(AbstractContextManager["ProviderSession"]):
+    """Own reusable provider clients and their serial pacing for one worker.
+
+    A session must be used serially. Ingestion borrows clients without closing
+    them; leaving the session closes every client even when one close fails.
+    """
+
+    def __init__(self, config: Config, *, transport=None, sleeper=None, clock=None, stop_requested=None) -> None:
+        self.config = config
+        self._transport = transport
+        self._sleeper = sleeper
+        self._clock = clock
+        self._stop_requested = stop_requested
+        self._clients: dict[str, ChessComClient | LichessClient] = {}
+        self._resources = ExitStack()
+        self._closed = False
+
+    def client(self, provider: str):
+        if self._closed:
+            raise RuntimeError("provider session is closed")
+        if provider not in self._clients:
+            client = create_provider_client(
+                provider, self.config, transport=self._transport,
+                sleeper=self._sleeper, clock=self._clock, stop_requested=self._stop_requested,
+            )
+            self._resources.callback(client.close)
+            self._clients[provider] = client
+        return self._clients[provider]
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._resources.close()
+
+    def __enter__(self) -> ProviderSession:
+        if self._closed:
+            raise RuntimeError("provider session is closed")
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()

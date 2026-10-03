@@ -6,10 +6,13 @@ import csv
 import json
 import sqlite3
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TextIO
+
+from chess_crawl.storage.db import database_paths
+from chess_crawl.storage.queries import iter_games, iter_graph_edges, iter_users
 
 
 def export_games_jsonl(
@@ -18,25 +21,8 @@ def export_games_jsonl(
     output: Path | None = None,
     provider: str | None = None,
 ) -> int:
-    rows = conn.execute(
-        """
-        SELECT g.provider, g.provider_game_id, g.canonical_url, g.outcome, g.is_live,
-               g.status_raw, g.rated, g.created_at, g.ended_at,
-               v.canonical_name AS variant, v.provider_native_name AS variant_raw,
-               tc.time_class, tc.raw_label AS time_control,
-               wp.username_normalized AS white_username,
-               bp.username_normalized AS black_username
-          FROM games g
-          JOIN variants v ON v.id = g.variant_id
-          JOIN time_controls tc ON tc.id = g.time_control_id
-          LEFT JOIN game_participants wp ON wp.game_id = g.id AND wp.color = 'white'
-          LEFT JOIN game_participants bp ON bp.game_id = g.id AND bp.color = 'black'
-         WHERE (? IS NULL OR g.provider = ?)
-         ORDER BY g.provider, g.ended_at, g.provider_game_id, g.id
-        """,
-        (provider, provider),
-    )
-    with _open_output(output) as handle:
+    rows = iter_games(conn, provider=provider)
+    with _open_output(conn, output) as handle:
         return _write_jsonl(handle, (_row_dict(row) for row in rows))
 
 
@@ -46,17 +32,8 @@ def export_users_jsonl(
     output: Path | None = None,
     provider: str | None = None,
 ) -> int:
-    rows = conn.execute(
-        """
-        SELECT provider, provider_user_id, username_normalized, display_username,
-               account_status, title, first_seen_at, updated_at
-          FROM provider_users
-         WHERE (? IS NULL OR provider = ?)
-         ORDER BY provider, username_normalized
-        """,
-        (provider, provider),
-    )
-    with _open_output(output) as handle:
+    rows = iter_users(conn, provider=provider)
+    with _open_output(conn, output) as handle:
         return _write_jsonl(handle, (_row_dict(row) for row in rows))
 
 
@@ -66,27 +43,8 @@ def export_graph_csv(
     output: Path | None = None,
     provider: str | None = None,
 ) -> int:
-    rows = conn.execute(
-        """
-        SELECT e.provider,
-               e.crawl_run_id,
-               fu.username_normalized AS from_username,
-               tu.username_normalized AS to_username,
-               e.from_user_id,
-               e.to_user_id,
-               e.via_game_id,
-               e.game_count,
-               e.depth,
-               e.edge_kind
-          FROM discovery_edges e
-          JOIN provider_users fu ON fu.id = e.from_user_id AND fu.provider = e.provider
-          JOIN provider_users tu ON tu.id = e.to_user_id AND tu.provider = e.provider
-         WHERE (? IS NULL OR e.provider = ?)
-         ORDER BY e.provider, e.depth, from_username, to_username
-        """,
-        (provider, provider),
-    )
-    with _open_output(output) as handle:
+    rows = iter_graph_edges(conn, provider=provider)
+    with _open_output(conn, output) as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=(
@@ -124,10 +82,20 @@ def _row_dict(row: sqlite3.Row) -> dict[str, object]:
 
 
 @contextmanager
-def _open_output(output: Path | None):
+def _open_output(conn: sqlite3.Connection, output: Path | None) -> Iterator[TextIO]:
     if output is None:
         yield sys.stdout
         return
+    for database in database_paths(conn):
+        protected_paths = (
+            database,
+            *(Path(f"{database}{suffix}") for suffix in ("-wal", "-shm", "-journal")),
+        )
+        for protected in protected_paths:
+            if output.resolve() == protected.resolve() or (
+                output.exists() and protected.exists() and output.samefile(protected)
+            ):
+                raise ValueError("Export output must not overwrite the source database or its sidecars")
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as handle:
         yield handle

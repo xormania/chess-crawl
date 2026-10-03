@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from contextlib import contextmanager
+import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
+from time import time
 
 from chess_crawl import __version__
+from chess_crawl import application
 from chess_crawl.export.writers import export_games_jsonl, export_graph_csv, export_users_jsonl
 from chess_crawl.ingest import (
     IngestResult,
@@ -20,11 +23,11 @@ from chess_crawl.ingest import (
     fetch_lichess_games,
     fetch_user_profile,
 )
-from chess_crawl.jobs import store as job_store
-from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
+from chess_crawl.jobs import state as job_state
 from chess_crawl.jobs.runner import JobRunner
+from chess_crawl.jobs.locking import ExecutorBusy, archive_lock
 from chess_crawl.providers.registry import list_provider_infos
-from chess_crawl.reports.queries import (
+from chess_crawl.storage.queries import (
     games_by_month,
     opponent_report,
     query_game,
@@ -33,8 +36,8 @@ from chess_crawl.reports.queries import (
     summary_report,
     user_game_summary,
 )
-from chess_crawl.storage.db import connect, database_exists
-from chess_crawl.storage.migrations import initialize_database
+from chess_crawl.storage.db import connection, database_exists, is_memory_database, open_database
+from chess_crawl.storage.migrations import initialize
 from chess_crawl.storage.repository import database_summary
 
 
@@ -96,6 +99,18 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_games_parser.add_argument("--limit", type=int, help="Lichess max games to fetch")
     fetch_games_parser.set_defaults(handler=_cmd_fetch_games)
 
+    submit_parser = subcommands.add_parser("submit", help="Queue durable acquisition for a separate worker")
+    submit_commands = submit_parser.add_subparsers(dest="submit_command", required=True)
+    import_parser = submit_commands.add_parser("import", help="Queue a bounded player profile and game import")
+    import_parser.add_argument("provider", choices=("chess.com", "lichess"))
+    import_parser.add_argument("username")
+    import_parser.add_argument("--since", required=True, help="Inclusive YYYY-MM or YYYY-MM-DD")
+    import_parser.add_argument("--until", required=True, help="Exclusive YYYY-MM or YYYY-MM-DD")
+    import_parser.add_argument("--max-games", required=True, type=int)
+    import_parser.add_argument("--idempotency-key", required=True)
+    import_parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    import_parser.set_defaults(handler=_cmd_submit_import)
+
     query_parser = subcommands.add_parser("query", help="Query the local archive")
     query_subcommands = query_parser.add_subparsers(dest="query_command", required=True)
 
@@ -129,6 +144,8 @@ def build_parser() -> argparse.ArgumentParser:
     crawl_opp_parser.add_argument("--since", required=True, help="YYYY-MM or YYYY-MM-DD inclusive lower bound")
     crawl_opp_parser.add_argument("--until", required=True, help="YYYY-MM or YYYY-MM-DD exclusive upper bound")
     crawl_opp_parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite archive path")
+    crawl_opp_parser.add_argument("--enqueue-only", action="store_true", help="Leave execution to the archive worker")
+    crawl_opp_parser.add_argument("--idempotency-key", help="Reuse a previous submission with these exact parameters")
     crawl_opp_parser.set_defaults(handler=_cmd_crawl_opponents)
 
     jobs_parser = subcommands.add_parser("jobs", help="Inspect and resume durable jobs")
@@ -196,7 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    result = initialize_database(args.db)
+    with connection(args.db, mode="rwc") as conn:
+        result = initialize(conn)
     db_path = Path(args.db).resolve()
     applied = ", ".join(result.applied) if result.applied else "none"
 
@@ -233,7 +251,7 @@ def _cmd_db_info(args: argparse.Namespace) -> int:
         print("Run `chess-crawl init --db PATH` first.", file=sys.stderr)
         return 1
 
-    with _connect_for_read(db_path) as conn:
+    with open_database(db_path) as conn:
         summary = database_summary(conn)
 
     print(f"Database: {db_path.resolve()}")
@@ -244,26 +262,49 @@ def _cmd_db_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_provider_ready(conn, provider: str) -> None:
+    deadline = job_state.provider_ready_at(conn, provider)
+    if deadline is not None and deadline > time():
+        ready_at = datetime.fromtimestamp(deadline, UTC).isoformat()
+        raise ValueError(f"{provider} is cooling down until {ready_at}; retry this fetch after that deadline.")
+
+
 def _cmd_fetch_user(args: argparse.Namespace) -> int:
-    with _connect_for_write(args.db) as conn:
+    with (
+        nullcontext() if is_memory_database(args.db) else archive_lock(args.db),
+        open_database(args.db, writable=True) as conn,
+    ):
+        _require_provider_ready(conn, args.provider)
         result = fetch_user_profile(conn, args.provider, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_stats(args: argparse.Namespace) -> int:
-    with _connect_for_write(args.db) as conn:
+    with (
+        nullcontext() if is_memory_database(args.db) else archive_lock(args.db),
+        open_database(args.db, writable=True) as conn,
+    ):
+        _require_provider_ready(conn, args.provider)
         result = fetch_chesscom_stats(conn, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_archives(args: argparse.Namespace) -> int:
-    with _connect_for_write(args.db) as conn:
+    with (
+        nullcontext() if is_memory_database(args.db) else archive_lock(args.db),
+        open_database(args.db, writable=True) as conn,
+    ):
+        _require_provider_ready(conn, args.provider)
         result = fetch_chesscom_archives(conn, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_games(args: argparse.Namespace) -> int:
-    with _connect_for_write(args.db) as conn:
+    with (
+        nullcontext() if is_memory_database(args.db) else archive_lock(args.db),
+        open_database(args.db, writable=True) as conn,
+    ):
+        _require_provider_ready(conn, args.provider)
         if args.provider == "chess.com":
             if not args.month:
                 print("Chess.com game fetch requires --month YYYY-MM.", file=sys.stderr)
@@ -288,7 +329,7 @@ def _cmd_fetch_games(args: argparse.Namespace) -> int:
 
 
 def _cmd_query_user(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         row = query_user(conn, args.provider, args.username)
     if row is None:
         print("User not found.", file=sys.stderr)
@@ -304,7 +345,7 @@ def _cmd_query_user(args: argparse.Namespace) -> int:
 
 
 def _cmd_query_game(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         row = query_game(conn, args.provider, args.game_id)
     if row is None:
         print("Game not found.", file=sys.stderr)
@@ -326,7 +367,7 @@ def _cmd_query_raw(args: argparse.Namespace) -> int:
     if args.limit <= 0:
         print("--limit must be greater than zero.", file=sys.stderr)
         return 2
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         rows = query_raw(conn, args.provider, args.limit)
     headers = ("ID", "PROVIDER", "ENDPOINT", "STATUS", "BYTES", "NORM", "SOURCE")
     table = [
@@ -345,34 +386,43 @@ def _cmd_query_raw(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_submit_import(args: argparse.Namespace) -> int:
+    limits = application.Limits.from_env()
+    request = application.validate_import(application.ImportRequest(
+        provider=args.provider, username=args.username,
+        since=_parse_date_or_month(args.since), until=_parse_date_or_month(args.until),
+        max_games=args.max_games,
+    ), limits=limits)
+    application.validate_idempotency_key(args.idempotency_key)
+    with open_database(args.db, writable=True) as conn:
+        result = application.submit_import(conn, request, idempotency_key=args.idempotency_key, limits=limits)
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def _cmd_crawl_opponents(args: argparse.Namespace) -> int:
-    if args.depth < 0:
-        print("--depth must be >= 0.", file=sys.stderr)
-        return 2
-    if min(args.max_users, args.max_games, args.max_jobs) <= 0:
-        print("--max-users, --max-games, and --max-jobs must be greater than zero.", file=sys.stderr)
-        return 2
-    since = _parse_date_or_month(args.since, is_until=False)
-    until = _parse_date_or_month(args.until, is_until=True)
-    if since >= until:
-        print("--since must be earlier than --until.", file=sys.stderr)
-        return 2
-    bounds = CrawlBounds(
+    limits = application.Limits.from_env()
+    request = application.validate_crawl(application.CrawlRequest(
+        provider=args.provider,
+        username=args.username,
+        since=_parse_date_or_month(args.since),
+        until=_parse_date_or_month(args.until),
         max_depth=args.depth,
         max_users=args.max_users,
         max_games=args.max_games,
         max_jobs=args.max_jobs,
-    )
-    with _connect_for_write(args.db) as conn:
-        run_id, root_job_id = create_opponent_crawl(
-            conn,
-            provider=args.provider,
-            username=args.username,
-            since=since,
-            until=until,
-            bounds=bounds,
-        )
-        result = JobRunner(conn).run(crawl_run_id=run_id)
+    ), limits=limits)
+    key = application.validate_idempotency_key(args.idempotency_key or uuid.uuid4().hex)
+    with (
+        nullcontext() if args.enqueue_only or is_memory_database(args.db) else archive_lock(args.db) as lease,
+        open_database(args.db, writable=True) as conn,
+    ):
+        submission = application.submit_crawl(conn, request, idempotency_key=key, limits=limits)
+        if args.enqueue_only:
+            print(json.dumps(submission, sort_keys=True))
+            return 0
+        run_id, root_job_id = submission["run_id"], submission["job_ids"][0]
+        result = JobRunner(conn, lease=lease).run(crawl_run_id=run_id)
     print(f"crawl_run #{run_id} started ({args.provider}, seed={args.username.strip().lower()}, depth={args.depth})")
     print(f"root job: {root_job_id}")
     print(
@@ -387,10 +437,10 @@ def _cmd_crawl_opponents(args: argparse.Namespace) -> int:
 
 
 def _cmd_jobs_status(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
-        runs = job_store.crawl_runs(conn)
-        states = job_store.job_state_counts(conn, crawl_run_id=args.run)
-        by_kind = job_store.job_kind_state_counts(conn, crawl_run_id=args.run)
+    with open_database(args.db) as conn:
+        runs = job_state.crawl_runs(conn)
+        states = job_state.job_state_counts(conn, crawl_run_id=args.run)
+        by_kind = job_state.job_kind_state_counts(conn, crawl_run_id=args.run)
 
     print("Crawl runs")
     run_rows = [
@@ -422,8 +472,8 @@ def _cmd_jobs_list(args: argparse.Namespace) -> int:
     if args.limit <= 0:
         print("--limit must be greater than zero.", file=sys.stderr)
         return 2
-    with _connect_for_read(args.db) as conn:
-        rows = job_store.list_jobs(conn, limit=args.limit)
+    with open_database(args.db) as conn:
+        rows = job_state.list_jobs(conn, limit=args.limit)
     _print_table(
         ("ID", "RUN", "PROVIDER", "KIND", "TARGET", "STATE", "DEPTH", "ATTEMPTS"),
         [
@@ -444,8 +494,8 @@ def _cmd_jobs_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_jobs_show(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
-        job = job_store.get_job(conn, args.job_id)
+    with open_database(args.db) as conn:
+        job = job_state.get_job(conn, args.job_id)
     if job is None:
         print(f"Job not found: {args.job_id}", file=sys.stderr)
         return 1
@@ -462,7 +512,7 @@ def _cmd_jobs_show(args: argparse.Namespace) -> int:
     print(f"Dedup key: {job.dedup_key}")
     print(f"Reason: {job.reason or '-'}")
     print("Params:")
-    print(json.dumps(job_store.load_params(job.params_json), indent=2, sort_keys=True))
+    print(json.dumps(job_state.load_params(job.params_json), indent=2, sort_keys=True))
     return 0
 
 
@@ -470,8 +520,11 @@ def _cmd_jobs_resume(args: argparse.Namespace) -> int:
     if args.max_jobs is not None and args.max_jobs <= 0:
         print("--max-jobs must be greater than zero.", file=sys.stderr)
         return 2
-    with _connect_for_write(args.db) as conn:
-        result = JobRunner(conn).run(
+    with (
+        nullcontext() if is_memory_database(args.db) else archive_lock(args.db) as lease,
+        open_database(args.db, writable=True) as conn,
+    ):
+        result = JobRunner(conn, lease=lease).run(
             crawl_run_id=args.run,
             max_jobs=args.max_jobs,
             resume_stale=True,
@@ -491,7 +544,7 @@ def _cmd_jobs_resume(args: argparse.Namespace) -> int:
 
 
 def _cmd_report_summary(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         report = summary_report(conn)
     print("Providers")
     _print_table(
@@ -509,7 +562,7 @@ def _cmd_report_summary(args: argparse.Namespace) -> int:
 
 
 def _cmd_report_user(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         row = user_game_summary(conn, args.provider, args.username)
     if row is None:
         print("User not found.", file=sys.stderr)
@@ -518,7 +571,8 @@ def _cmd_report_user(args: argparse.Namespace) -> int:
     print(f"Username: {row['display_username']} ({row['username']})")
     print(f"Provider-supplied account status: {row['account_status'] or '-'}")
     print(f"Games: {row['games']} ({row['rated_games']} rated, {row['unrated_games']} unrated)")
-    print(f"W/D/L/unfinished: {row['wins']}/{row['draws']}/{row['losses']}/{row['unfinished']}")
+    print(f"W/D/L/no result: {row['wins']}/{row['draws']}/{row['losses']}/{row['no_result']}")
+    print(f"In progress: {row['in_progress']}")
     print(f"Distinct opponents: {row['distinct_opponents']}")
     print(f"First game: {row['first_game_ts'] or '-'}")
     print(f"Last game: {row['last_game_ts'] or '-'}")
@@ -526,13 +580,13 @@ def _cmd_report_user(args: argparse.Namespace) -> int:
 
 
 def _cmd_report_opponents(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         rows = opponent_report(conn, args.provider, args.username)
     if rows is None:
         print("User not found.", file=sys.stderr)
         return 1
     _print_table(
-        ("PROVIDER", "OPPONENT", "GAMES", "MY_WINS", "DRAWS", "MY_LOSSES", "UNFINISHED"),
+        ("PROVIDER", "OPPONENT", "GAMES", "MY_WINS", "DRAWS", "MY_LOSSES", "NO_RESULT", "IN_PROGRESS"),
         [
             (
                 row["provider"],
@@ -541,7 +595,8 @@ def _cmd_report_opponents(args: argparse.Namespace) -> int:
                 str(row["my_wins"]),
                 str(row["draws"]),
                 str(row["my_losses"]),
-                str(row["unfinished"]),
+                str(row["no_result"]),
+                str(row["in_progress"]),
             )
             for row in rows
         ],
@@ -550,10 +605,10 @@ def _cmd_report_opponents(args: argparse.Namespace) -> int:
 
 
 def _cmd_report_games_by_month(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         rows = games_by_month(conn, provider=args.provider)
     _print_table(
-        ("MONTH", "GAMES", "WHITE_WINS", "BLACK_WINS", "DRAWS", "UNFINISHED"),
+        ("MONTH", "GAMES", "WHITE_WINS", "BLACK_WINS", "DRAWS", "NO_RESULT", "IN_PROGRESS"),
         [
             (
                 row["month"],
@@ -561,7 +616,8 @@ def _cmd_report_games_by_month(args: argparse.Namespace) -> int:
                 str(row["white_wins"]),
                 str(row["black_wins"]),
                 str(row["draws"]),
-                str(row["unfinished"]),
+                str(row["no_result"]),
+                str(row["in_progress"]),
             )
             for row in rows
         ],
@@ -570,21 +626,21 @@ def _cmd_report_games_by_month(args: argparse.Namespace) -> int:
 
 
 def _cmd_export_games(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         count = export_games_jsonl(conn, output=args.output, provider=args.provider)
     _print_export_result("games", count, args.output)
     return 0
 
 
 def _cmd_export_users(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         count = export_users_jsonl(conn, output=args.output, provider=args.provider)
     _print_export_result("users", count, args.output)
     return 0
 
 
 def _cmd_export_graph(args: argparse.Namespace) -> int:
-    with _connect_for_read(args.db) as conn:
+    with open_database(args.db) as conn:
         count = export_graph_csv(conn, output=args.output, provider=args.provider)
     _print_export_result("graph edges", count, args.output)
     return 0
@@ -600,27 +656,6 @@ def _print_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
     print(fmt.format(*headers))
     for row in rows:
         print(fmt.format(*row))
-
-
-@contextmanager
-def _connect_for_write(db_path: Path):
-    initialize_database(db_path)
-    conn = connect(db_path)
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-@contextmanager
-def _connect_for_read(db_path: Path):
-    if not database_exists(db_path):
-        raise SystemExit(f"Database not found: {db_path}\nRun `chess-crawl init --db PATH` first.")
-    conn = connect(db_path)
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 
 def _print_ingest_result(result: IngestResult) -> int:
@@ -655,14 +690,9 @@ def _parse_date(value: str) -> int:
     return int(parsed.timestamp())
 
 
-def _parse_date_or_month(value: str, *, is_until: bool) -> int:
+def _parse_date_or_month(value: str) -> int:
     if len(value) == 7:
         year, month = _parse_month(value)
-        if is_until:
-            month += 1
-            if month == 13:
-                year += 1
-                month = 1
         parsed = datetime(year, month, 1, tzinfo=UTC)
         return int(parsed.timestamp())
     return _parse_date(value)
@@ -671,7 +701,17 @@ def _parse_date_or_month(value: str, *, is_until: bool) -> int:
 def run(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.handler(args)
+    try:
+        return args.handler(args)
+    except application.ValidationError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    except application.ApplicationError as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
+    except (FileNotFoundError, ValueError, ExecutorBusy) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 def main(argv: Sequence[str] | None = None) -> None:

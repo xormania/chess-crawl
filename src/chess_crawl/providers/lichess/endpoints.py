@@ -5,7 +5,8 @@ from __future__ import annotations
 from urllib.parse import quote, urlencode
 
 
-BASE_URL = "https://lichess.org/api"
+ORIGIN = "https://lichess.org"
+BASE_URL = f"{ORIGIN}/api"
 
 
 def _user(username: str) -> str:
@@ -23,5 +24,7 @@ def user_games(username: str, **params: object) -> str:
     return f"{base}?{query}" if query else base
 
 
-def game(game_id: str) -> str:
-    return f"{BASE_URL}/game/{quote(game_id.strip(), safe='')}"
+def game(game_id: str, **params: object) -> str:
+    query = urlencode({key: value for key, value in params.items() if value is not None}, doseq=True)
+    base = f"{ORIGIN}/game/export/{quote(game_id.strip(), safe='')}"
+    return f"{base}?{query}" if query else base

@@ -1,9 +1,9 @@
-"""Provider-neutral DTOs and protocol definitions."""
+"""Shared records for provider acquisition and normalization."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal, Mapping, Protocol, runtime_checkable
+from typing import Any, Literal, Mapping
 
 
 ProviderKey = Literal["chess.com", "lichess"]
@@ -17,6 +17,10 @@ EndpointType = Literal[
 ]
 Outcome = Literal["white_win", "black_win", "draw"]
 Color = Literal["white", "black"]
+
+
+class ProviderRequestStopped(Exception):
+    """Shutdown was requested before any provider request was sent."""
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,7 @@ class FetchAttempt:
     bytes_count: int | None = None
     duration_ms: int | None = None
     from_cache: bool = False
+    error_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,29 +114,6 @@ class NormalizedGame:
 
 
 @dataclass(frozen=True)
-class ArchiveUnit:
-    provider: str
-    username: str
-    unit_id: str
-    url: str | None
-    since: int | None
-    until: int | None
-    immutable: bool
-
-
-@dataclass(frozen=True)
-class GameFilters:
-    rated: bool | None = None
-    perf_types: tuple[str, ...] = ()
-    color: str | None = None
-    include_moves: bool = True
-    include_clocks: bool = False
-    include_evals: bool = False
-    include_opening: bool = True
-    max_games: int | None = None
-
-
-@dataclass(frozen=True)
 class FetchPolicy:
     min_delay_s: float
     supports_conditional: bool
@@ -141,39 +123,7 @@ class FetchPolicy:
 
     def next_delay(self, status: int, retry_after: float | None = None) -> float:
         if status == 429 and self.fixed_429_backoff_s is not None:
-            return self.fixed_429_backoff_s
+            return max(self.fixed_429_backoff_s, retry_after or 0)
         if status == 429 and self.honor_retry_after and retry_after is not None:
             return max(self.min_delay_s, retry_after)
         return self.min_delay_s
-
-
-@runtime_checkable
-class ProviderClient(Protocol):
-    def key(self) -> str: ...
-
-    def display_name(self) -> str: ...
-
-    def user_agent(self) -> str: ...
-
-    def get_user_profile(self, username: str) -> RawRecord: ...
-
-    def get_user_stats(self, username: str) -> RawRecord: ...
-
-    def list_archive_units(
-        self,
-        username: str,
-        since: int | None,
-        until: int | None,
-    ) -> list[ArchiveUnit]: ...
-
-    def iter_user_games(
-        self,
-        username: str,
-        since: int | None,
-        until: int | None,
-        filters: GameFilters,
-    ) -> Iterator[RawRecord]: ...
-
-    def get_game(self, game_ref: str) -> RawRecord: ...
-
-    def policy(self) -> FetchPolicy: ...

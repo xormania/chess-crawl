@@ -7,6 +7,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from chess_crawl.storage.db import atomic
 from chess_crawl.storage.migrations import current_version
 
 
@@ -38,6 +39,7 @@ def database_summary(conn: sqlite3.Connection) -> DatabaseSummary:
     )
 
 
+@atomic
 def upsert_provider_user(
     conn: sqlite3.Connection,
     *,
@@ -48,77 +50,191 @@ def upsert_provider_user(
     account_status: str | None = None,
     title: str | None = None,
     now: int | None = None,
-    commit: bool = True,
+    profile_raw_payload_id: int | None = None,
 ) -> int:
-    timestamp = now or int(time.time())
+    """Merge sparse observations; full profiles replace metadata in observation order."""
+    timestamp = int(time.time()) if now is None else now
     username_normalized = username.strip().lower()
     display = display_username or username
-
-    if provider_user_id is not None:
-        existing = conn.execute(
+    named = conn.execute(
+        "SELECT * FROM provider_users WHERE provider = ? AND username_normalized = ?",
+        (provider, username_normalized),
+    ).fetchone()
+    identified = None if provider_user_id is None else conn.execute(
+        "SELECT * FROM provider_users WHERE provider = ? AND provider_user_id = ?",
+        (provider, provider_user_id),
+    ).fetchone()
+    existing = identified if identified is not None else named
+    # A username match is not evidence that two different stable IDs refer to
+    # the same account. Check before the stale-profile fast path as well.
+    if identified is None and named is not None and provider_user_id is not None:
+        if named["provider_user_id"] not in {None, provider_user_id}:
+            raise ValueError(f"Cannot reconcile {provider}/{username_normalized}: conflicting provider user IDs")
+    if existing is not None:
+        user_id = int(existing["id"])
+        if profile_raw_payload_id is not None and not _is_latest_profile(conn, user_id, profile_raw_payload_id):
+            return user_id
+        if identified is not None and profile_raw_payload_id is None and timestamp < int(existing["updated_at"]):
+            return user_id
+        if named is not None and int(named["id"]) != user_id:
+            if named["provider_user_id"] is not None:
+                raise ValueError(f"Cannot reconcile {provider}/{username_normalized}: conflicting provider user IDs")
+            if profile_raw_payload_id is not None and not _is_latest_profile(conn, int(named["id"]), profile_raw_payload_id):
+                # A historical name observation must not absorb a placeholder
+                # that may represent a later holder of that username.
+                return user_id
+            _merge_user_placeholder(conn, user_id, int(named["id"]))
+        conn.execute(
             """
-            SELECT id FROM provider_users
-            WHERE provider = ? AND provider_user_id = ?
+            UPDATE provider_users
+               SET provider_user_id = COALESCE(?, provider_user_id),
+                   username_normalized = ?, display_username = ?,
+                   account_status = CASE WHEN ? THEN ? ELSE COALESCE(?, account_status) END,
+                   title = CASE WHEN ? THEN ? ELSE COALESCE(?, title) END,
+                   updated_at = MAX(updated_at, ?)
+             WHERE id = ?
             """,
-            (provider, provider_user_id),
-        ).fetchone()
-        if existing is not None:
-            conn.execute(
-                """
-                UPDATE provider_users
-                   SET username_normalized = ?,
-                       display_username = ?,
-                       account_status = COALESCE(?, account_status),
-                       title = COALESCE(?, title),
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (username_normalized, display, account_status, title, timestamp, int(existing["id"])),
-            )
-            if commit:
-                conn.commit()
-            return int(existing["id"])
+            (provider_user_id, username_normalized, display,
+             profile_raw_payload_id is not None, account_status, account_status,
+             profile_raw_payload_id is not None, title, title, timestamp, user_id),
+        )
+        return user_id
 
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT INTO provider_users(
           provider, provider_user_id, username_normalized, display_username,
           account_status, title, first_seen_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(provider, username_normalized) DO UPDATE SET
-          provider_user_id = COALESCE(excluded.provider_user_id, provider_users.provider_user_id),
-          display_username = excluded.display_username,
-          account_status = COALESCE(excluded.account_status, provider_users.account_status),
-          title = COALESCE(excluded.title, provider_users.title),
-          updated_at = excluded.updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (
-            provider,
-            provider_user_id,
-            username_normalized,
-            display,
-            account_status,
-            title,
-            timestamp,
-            timestamp,
-        ),
+        (provider, provider_user_id, username_normalized, display, account_status, title, timestamp, timestamp),
     )
-    if commit:
-        conn.commit()
+    if cursor.lastrowid is None:
+        raise RuntimeError("provider user insert did not return a row id")
+    return int(cursor.lastrowid)
 
+
+def _merge_source_records(conn: sqlite3.Connection, entity_type: str, survivor: int, replaced: int) -> None:
+    conn.execute(
+        """INSERT INTO source_records(entity_type, entity_id, provider, endpoint_type, source_key,
+                     json_pointer, raw_payload_id, first_seen_at)
+           SELECT entity_type, ?, provider, endpoint_type, source_key, json_pointer, raw_payload_id, first_seen_at
+             FROM source_records WHERE entity_type = ? AND entity_id = ?
+           ON CONFLICT(entity_type, entity_id, raw_payload_id) DO UPDATE SET
+             first_seen_at = MIN(source_records.first_seen_at, excluded.first_seen_at),
+             source_key = COALESCE(source_records.source_key, excluded.source_key),
+             json_pointer = COALESCE(source_records.json_pointer, excluded.json_pointer)""",
+        (survivor, entity_type, replaced),
+    )
+    conn.execute("DELETE FROM source_records WHERE entity_type = ? AND entity_id = ?", (entity_type, replaced))
+
+
+def _merge_user_placeholder(conn: sqlite3.Connection, survivor: int, replaced: int) -> None:
+    """Reconcile a certified same-provider placeholder inside the caller's transaction."""
+    conn.execute("UPDATE game_participants SET provider_user_id = ? WHERE provider_user_id = ?", (survivor, replaced))
+    for snapshot in conn.execute("SELECT * FROM user_snapshots WHERE provider_user_id = ?", (replaced,)).fetchall():
+        matching = conn.execute(
+            "SELECT id, captured_at FROM user_snapshots WHERE provider_user_id = ? AND content_hash = ?",
+            (survivor, snapshot["content_hash"]),
+        ).fetchone()
+        if matching is None:
+            conn.execute("UPDATE user_snapshots SET provider_user_id = ? WHERE id = ?", (survivor, snapshot["id"]))
+        else:
+            if snapshot["captured_at"] >= matching["captured_at"]:
+                fields = (
+                    "captured_at", "observed_username", "status", "title", "country", "followers", "patron",
+                    "count_all", "count_rated", "count_win", "count_loss", "count_draw", "perfs_or_stats", "raw_payload_id",
+                )
+                conn.execute(
+                    f"UPDATE user_snapshots SET {', '.join(f'{field} = ?' for field in fields)} WHERE id = ?",
+                    (*[snapshot[field] for field in fields], matching["id"]),
+                )
+            _merge_source_records(conn, "user_snapshot", int(matching["id"]), int(snapshot["id"]))
+            conn.execute("DELETE FROM user_snapshots WHERE id = ?", (snapshot["id"],))
+    _merge_source_records(conn, "user", survivor, replaced)
+    affected_runs = _merge_user_edges(conn, survivor, replaced)
+    conn.execute(
+        """UPDATE provider_users SET
+             first_seen_at = MIN(first_seen_at, (SELECT first_seen_at FROM provider_users WHERE id = ?)),
+             updated_at = MAX(updated_at, (SELECT updated_at FROM provider_users WHERE id = ?))
+           WHERE id = ?""",
+        (replaced, replaced, survivor),
+    )
+    conn.execute("DELETE FROM provider_users WHERE id = ?", (replaced,))
+    if affected_runs:
+        from chess_crawl.jobs.state import run_counters, update_crawl_run
+
+        for run_id in sorted(affected_runs):
+            # Reconciliation changes graph counts, not a run's lifecycle.
+            update_crawl_run(conn, run_id, counters=run_counters(conn, run_id))
+
+
+def _merge_user_edges(conn: sqlite3.Connection, survivor: int, replaced: int) -> set[int]:
+    affected_runs: set[int] = set()
+    edges = conn.execute(
+        "SELECT * FROM discovery_edges WHERE from_user_id = ? OR to_user_id = ? ORDER BY id", (replaced, replaced),
+    ).fetchall()
+    for edge in edges:
+        source = survivor if edge["from_user_id"] == replaced else edge["from_user_id"]
+        target = survivor if edge["to_user_id"] == replaced else edge["to_user_id"]
+        matching = conn.execute(
+            "SELECT * FROM discovery_edges WHERE provider = ? AND from_user_id = ? AND to_user_id = ? AND id <> ?",
+            (edge["provider"], source, target, edge["id"]),
+        ).fetchone()
+        if matching is None:
+            conn.execute("UPDATE discovery_edges SET from_user_id = ?, to_user_id = ? WHERE id = ?", (source, target, edge["id"]))
+            continue
+        affected_runs.update(int(row[0]) for row in conn.execute(
+            "SELECT crawl_run_id FROM run_edges WHERE discovery_edge_id IN (?, ?)", (edge["id"], matching["id"]),
+        ))
+        known_games = conn.execute(
+            """SELECT COUNT(DISTINCT a.game_id) FROM game_participants a
+                 JOIN game_participants b ON b.game_id = a.game_id AND b.color <> a.color
+                 JOIN games g ON g.id = a.game_id
+                WHERE a.provider_user_id = ? AND b.provider_user_id = ? AND g.provider = ?""",
+            (source, target, edge["provider"]),
+        ).fetchone()[0]
+        earlier, later = sorted((edge, matching), key=lambda row: (row["first_seen_at"], row["id"]))
+        conn.execute(
+            """UPDATE discovery_edges SET game_count = MAX(game_count, ?, ?), depth = MIN(depth, ?),
+                 first_seen_at = MIN(first_seen_at, ?),
+                 crawl_run_id = ?, via_game_id = ?
+               WHERE id = ?""",
+            (edge["game_count"], known_games, edge["depth"], edge["first_seen_at"],
+             earlier["crawl_run_id"] if earlier["crawl_run_id"] is not None else later["crawl_run_id"],
+             earlier["via_game_id"] if earlier["via_game_id"] is not None else later["via_game_id"], matching["id"]),
+        )
+        conn.execute(
+            """INSERT INTO run_edges(crawl_run_id, discovery_edge_id)
+               SELECT crawl_run_id, ? FROM run_edges WHERE discovery_edge_id = ? ON CONFLICT DO NOTHING""",
+            (matching["id"], edge["id"]),
+        )
+        conn.execute("DELETE FROM run_edges WHERE discovery_edge_id = ?", (edge["id"],))
+        conn.execute("DELETE FROM discovery_edges WHERE id = ?", (edge["id"],))
+    return affected_runs
+
+
+def _is_latest_profile(conn: sqlite3.Connection, user_id: int, raw_payload_id: int) -> bool:
+    # Full-profile recency is independent of later game/stats observations.
+    # Fetch IDs break second-resolution ties when an older body reappears.
     row = conn.execute(
         """
-        SELECT id FROM provider_users
-        WHERE provider = ? AND username_normalized = ?
+        SELECT r.id
+          FROM raw_payloads r
+          LEFT JOIN fetch_logs f ON f.raw_payload_id = r.id AND f.status_code IN (200, 304)
+         WHERE r.id = ? OR r.id IN (
+           SELECT raw_payload_id FROM source_records
+            WHERE entity_type = 'user' AND entity_id = ? AND endpoint_type = 'user_profile'
+         )
+         ORDER BY COALESCE(f.attempted_at, r.fetched_at) DESC, f.id DESC, r.id DESC
+         LIMIT 1
         """,
-        (provider, username_normalized),
+        (raw_payload_id, user_id),
     ).fetchone()
-    if row is None:
-        raise RuntimeError("provider user upsert did not return a row")
-    return int(row["id"])
+    return row is not None and int(row["id"]) == raw_payload_id
 
 
+@atomic
 def upsert_user_snapshot(
     conn: sqlite3.Connection,
     *,
@@ -138,7 +254,6 @@ def upsert_user_snapshot(
     count_loss: int | None = None,
     count_draw: int | None = None,
     perfs_or_stats: object | None = None,
-    commit: bool = True,
 ) -> int:
     perfs_text = (
         None
@@ -155,7 +270,20 @@ def upsert_user_snapshot(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(provider_user_id, content_hash) DO UPDATE SET
           captured_at = excluded.captured_at,
+          observed_username = excluded.observed_username,
+          status = excluded.status,
+          title = excluded.title,
+          country = excluded.country,
+          followers = excluded.followers,
+          patron = excluded.patron,
+          count_all = excluded.count_all,
+          count_rated = excluded.count_rated,
+          count_win = excluded.count_win,
+          count_loss = excluded.count_loss,
+          count_draw = excluded.count_draw,
+          perfs_or_stats = excluded.perfs_or_stats,
           raw_payload_id = excluded.raw_payload_id
+        WHERE excluded.captured_at >= user_snapshots.captured_at
         """,
         (
             provider_user_id,
@@ -176,8 +304,6 @@ def upsert_user_snapshot(
             raw_payload_id,
         ),
     )
-    if commit:
-        conn.commit()
     row = conn.execute(
         """
         SELECT id FROM user_snapshots
@@ -190,6 +316,7 @@ def upsert_user_snapshot(
     return int(row["id"])
 
 
+@atomic
 def get_or_create_variant(
     conn: sqlite3.Connection,
     *,
@@ -215,6 +342,7 @@ def get_or_create_variant(
     return int(row["id"])
 
 
+@atomic
 def get_or_create_time_control(
     conn: sqlite3.Connection,
     *,
@@ -251,6 +379,7 @@ def get_or_create_time_control(
     return int(row["id"])
 
 
+@atomic
 def upsert_game(
     conn: sqlite3.Connection,
     *,
@@ -274,7 +403,7 @@ def upsert_game(
     now: int | None = None,
 ) -> int:
     timestamp = now or int(time.time())
-    existing = _find_existing_game(conn, provider, provider_game_id, canonical_url, content_hash)
+    existing = find_existing_game(conn, provider, provider_game_id, canonical_url, content_hash)
     if existing is None:
         conn.execute(
             """
@@ -356,6 +485,7 @@ def upsert_game(
     return int(existing["id"])
 
 
+@atomic
 def upsert_game_participant(
     conn: sqlite3.Connection,
     *,
@@ -400,6 +530,7 @@ def upsert_game_participant(
     return int(row["id"])
 
 
+@atomic
 def upsert_rating_at_game(
     conn: sqlite3.Connection,
     *,
@@ -422,7 +553,7 @@ def upsert_rating_at_game(
     )
 
 
-def _find_existing_game(
+def find_existing_game(
     conn: sqlite3.Connection,
     provider: str,
     provider_game_id: str | None,
@@ -441,3 +572,32 @@ def _find_existing_game(
         if row is not None:
             return row
     return conn.execute("SELECT id FROM games WHERE content_hash = ?", (content_hash,)).fetchone()
+
+
+@atomic
+def insert_error(
+    conn: sqlite3.Connection,
+    *,
+    provider: str | None,
+    error_kind: str,
+    message: str,
+    status_code: int | None = None,
+    url: str | None = None,
+    endpoint_type: str | None = None,
+    retry_count: int = 0,
+    is_dead: bool = True,
+    occurred_at: int | None = None,
+) -> int:
+    """Record fetch and job failures through the same persistence operation."""
+    cursor = conn.execute(
+        """
+        INSERT INTO errors(provider, url, endpoint_type, error_kind, status_code,
+                           message, occurred_at, retry_count, is_dead)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (provider, url, endpoint_type, error_kind, status_code, message,
+         int(time.time()) if occurred_at is None else occurred_at, retry_count, int(is_dead)),
+    )
+    if cursor.lastrowid is None:
+        raise RuntimeError("error insert did not return a row id")
+    return int(cursor.lastrowid)

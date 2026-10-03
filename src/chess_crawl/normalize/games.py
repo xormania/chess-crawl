@@ -10,9 +10,11 @@ from chess_crawl.normalize.codes import map_variant
 from chess_crawl.providers.base import NormalizedGame, NormalizedParticipant
 from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
+from chess_crawl.storage.acquisition import associate_run_game, payload_game_ids, run_game_bounds, run_game_ids
 from chess_crawl.storage.db import transaction
 from chess_crawl.storage.raw import insert_source_record, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import (
+    find_existing_game,
     get_or_create_time_control,
     get_or_create_variant,
     upsert_game,
@@ -22,7 +24,7 @@ from chess_crawl.storage.repository import (
 )
 
 
-PARSER_VERSION = "games-normalizer-v1"
+PARSER_VERSION = "games-normalizer-v2"
 
 
 class TimeControlArgs(TypedDict):
@@ -34,7 +36,20 @@ class TimeControlArgs(TypedDict):
     raw_label: str
 
 
-def normalize_games_payload(conn: sqlite3.Connection, raw_payload_id: int) -> list[int]:
+def normalize_games_payload(
+    conn: sqlite3.Connection,
+    raw_payload_id: int,
+    *,
+    crawl_run_id: int | None = None,
+    max_games: int | None = None,
+) -> list[int]:
+    """Normalize a bounded selection, retaining the full raw payload for later work.
+
+    With a run, the allowance counts only new run/game associations. Existing
+    members can be refreshed by a changed parser without consuming capacity.
+    """
+    if max_games is not None and max_games < 0:
+        raise ValueError("max_games must be nonnegative")
     raw = read_raw_payload(conn, raw_payload_id)
     if raw.provider == "chess.com" and raw.endpoint_type == "monthly_archive":
         games = chesscom_parser.parse_monthly_games(raw.body)
@@ -46,12 +61,46 @@ def normalize_games_payload(conn: sqlite3.Connection, raw_payload_id: int) -> li
         return []
 
     with transaction(conn):
+        acquired = run_game_ids(conn, crawl_run_id) if crawl_run_id is not None else set()
+        bounds = (
+            run_game_bounds(conn, crawl_run_id, provider=raw.provider, requested=max_games)
+            if crawl_run_id is not None else None
+        )
+        remaining = bounds.remaining if bounds is not None else max_games
+        # Provenance proves that a row was processed, not which parser produced
+        # it. Reuse IDs only when the complete payload is current. A partial
+        # upgrade leaves the old version in place until every supported game
+        # has been processed by this parser; otherwise stale rows could be
+        # silently certified by a later bounded replay.
+        current_parser = (
+            raw.parser_version == PARSER_VERSION
+            and raw.normalization_status in {"parsed", "skipped"}
+        )
+        processed = payload_game_ids(conn, raw_payload_id) if current_parser else set()
         game_ids: list[int] = []
+        complete = True
+        supported = False
         for index, game in enumerate(games):
             if game.variant_key == "bughouse":
                 continue
-            game_ids.append(
-                _normalize_game(
+            supported = True
+            existing = find_existing_game(
+                conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash,
+            )
+            existing_id = int(existing["id"]) if existing is not None else None
+            if bounds is not None and not bounds.includes(game.end_time):
+                complete = complete and existing_id in processed
+                continue
+            already_acquired = existing_id in acquired
+            if already_acquired and existing_id in processed:
+                continue
+            if not already_acquired and remaining == 0:
+                complete = complete and existing_id in processed
+                continue
+            if crawl_run_id is not None and existing_id is not None and existing_id in processed:
+                game_id = existing_id
+            else:
+                game_id = _normalize_game(
                     conn,
                     game,
                     raw_payload_id=raw_payload_id,
@@ -60,17 +109,26 @@ def normalize_games_payload(conn: sqlite3.Connection, raw_payload_id: int) -> li
                     json_pointer=f"/games/{index}" if raw.endpoint_type == "monthly_archive" else f"/{index}",
                     fetched_at=raw.fetched_at,
                 )
-            )
+                processed.add(game_id)
+            if already_acquired:
+                continue
+            if crawl_run_id is not None:
+                associate_run_game(conn, crawl_run_id, game_id)
+                acquired.add(game_id)
+            game_ids.append(game_id)
+            if remaining is not None:
+                remaining -= 1
 
-        status = "parsed" if game_ids else "skipped"
-        update_raw_payload_status(
-            conn,
-            raw_payload_id,
-            status=status,
-            parser_version=PARSER_VERSION,
-            normalized_at=int(time.time()),
-            commit=False,
-        )
+        if complete:
+            update_raw_payload_status(
+                conn,
+                raw_payload_id,
+                status="parsed" if supported else "skipped",
+                parser_version=PARSER_VERSION,
+                normalized_at=int(time.time()),
+            )
+        elif raw.normalization_status != "pending":
+            update_raw_payload_status(conn, raw_payload_id, status="pending")
     return game_ids
 
 
@@ -123,7 +181,6 @@ def _normalize_game(
         json_pointer=json_pointer,
         raw_payload_id=raw_payload_id,
         first_seen_at=fetched_at,
-        commit=False,
     )
     _normalize_participant(conn, game_id, game.provider, game.white, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
     _normalize_participant(conn, game_id, game.provider, game.black, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
@@ -150,7 +207,6 @@ def _normalize_participant(
             provider_user_id=participant.provider_user_id,
             display_username=participant.display_username or participant.username_normalized,
             now=fetched_at,
-            commit=False,
         )
     participant_id = upsert_game_participant(
         conn,
@@ -171,7 +227,6 @@ def _normalize_participant(
         source_key=source_key,
         raw_payload_id=raw_payload_id,
         first_seen_at=fetched_at,
-        commit=False,
     )
     upsert_rating_at_game(
         conn,
