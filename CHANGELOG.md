@@ -25,10 +25,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Changed
 
-- Reduced agent guidance to links to README, CONTRIBUTING, and PROJECT;
-  consolidated branch, PR, and changelog rules in CONTRIBUTING and added a
-  basic top-level directory guide. Removed inherited product restrictions
-  and clarified cheating detection and analysis as intended project goals.
+- Reworked agent guidance into a short orientation with local documentation
+  links; consolidated branch, PR, and changelog rules in CONTRIBUTING and
+  added PROJECT as a basic top-level directory guide. Removed inherited product
+  restrictions and clarified cheating detection and analysis as intended goals.
 - Consolidated SQLite connections and transactions, durable job/run state,
   and report/export queries under explicit shared owners.
   ([#5](https://github.com/xormania/chess-crawl/pull/5))
