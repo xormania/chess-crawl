@@ -1,8 +1,7 @@
 # Changelog
 
 Notable changes are recorded here. Entries under `Unreleased` have not been
-assigned a release version. See the [PR guidelines](docs/pull-requests.md#changelog-requirement)
-for the required update policy; CI/test-only PRs are exempt.
+assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requirement) for the update policy.
 
 ## Unreleased
 
@@ -30,6 +29,10 @@ for the required update policy; CI/test-only PRs are exempt.
   marked provider/network tests; unmarked tests stay offline and isolated.
 - Promotion checks require this repository's `dev` branch, and CI reruns on PR
   edits so changing the target cannot reuse stale validation.
+- Reworked agent guidance into a short orientation with local documentation
+  links; consolidated branch, PR, and changelog rules in CONTRIBUTING and
+  added PROJECT as a basic top-level directory guide. Removed inherited product
+  restrictions and clarified cheating detection and analysis as intended goals.
 - Consolidated SQLite connections and transactions, durable job/run state,
   and report/export queries under explicit shared owners.
   ([#5](https://github.com/xormania/chess-crawl/pull/5))
@@ -60,6 +63,7 @@ for the required update policy; CI/test-only PRs are exempt.
 - Dormant internal provider iteration/protocol abstractions that bypassed the
   application's bounded acquisition path. Integrations use the documented CLI
   and HTTP services; active provider endpoint clients remain available.
+- Obsolete `proj/` planning and audit records.
 
 ## 0.1.0 — 2026-07-03
 
