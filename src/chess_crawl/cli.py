@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
@@ -24,7 +25,7 @@ from chess_crawl.ingest import (
 )
 from chess_crawl.jobs import state as job_state
 from chess_crawl.jobs.runner import JobRunner
-from chess_crawl.jobs.locking import ExecutorBusy, executor_lock
+from chess_crawl.jobs.locking import ExecutorBusy, archive_lock
 from chess_crawl.providers.registry import list_provider_infos
 from chess_crawl.storage.queries import (
     games_by_month,
@@ -35,7 +36,7 @@ from chess_crawl.storage.queries import (
     summary_report,
     user_game_summary,
 )
-from chess_crawl.storage.db import connection, database_exists, open_database
+from chess_crawl.storage.db import connection, database_exists, is_memory_database, open_database
 from chess_crawl.storage.migrations import initialize
 from chess_crawl.storage.repository import database_summary
 
@@ -269,28 +270,40 @@ def _require_provider_ready(conn, provider: str) -> None:
 
 
 def _cmd_fetch_user(args: argparse.Namespace) -> int:
-    with open_database(args.db, writable=True) as conn, executor_lock(conn):
+    with (
+        nullcontext() if is_memory_database(args.db) else archive_lock(args.db),
+        open_database(args.db, writable=True) as conn,
+    ):
         _require_provider_ready(conn, args.provider)
         result = fetch_user_profile(conn, args.provider, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_stats(args: argparse.Namespace) -> int:
-    with open_database(args.db, writable=True) as conn, executor_lock(conn):
+    with (
+        nullcontext() if is_memory_database(args.db) else archive_lock(args.db),
+        open_database(args.db, writable=True) as conn,
+    ):
         _require_provider_ready(conn, args.provider)
         result = fetch_chesscom_stats(conn, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_archives(args: argparse.Namespace) -> int:
-    with open_database(args.db, writable=True) as conn, executor_lock(conn):
+    with (
+        nullcontext() if is_memory_database(args.db) else archive_lock(args.db),
+        open_database(args.db, writable=True) as conn,
+    ):
         _require_provider_ready(conn, args.provider)
         result = fetch_chesscom_archives(conn, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_games(args: argparse.Namespace) -> int:
-    with open_database(args.db, writable=True) as conn, executor_lock(conn):
+    with (
+        nullcontext() if is_memory_database(args.db) else archive_lock(args.db),
+        open_database(args.db, writable=True) as conn,
+    ):
         _require_provider_ready(conn, args.provider)
         if args.provider == "chess.com":
             if not args.month:
@@ -400,13 +413,16 @@ def _cmd_crawl_opponents(args: argparse.Namespace) -> int:
         max_jobs=args.max_jobs,
     ), limits=limits)
     key = application.validate_idempotency_key(args.idempotency_key or uuid.uuid4().hex)
-    with open_database(args.db, writable=True) as conn:
+    with (
+        nullcontext() if args.enqueue_only or is_memory_database(args.db) else archive_lock(args.db) as lease,
+        open_database(args.db, writable=True) as conn,
+    ):
         submission = application.submit_crawl(conn, request, idempotency_key=key, limits=limits)
         if args.enqueue_only:
             print(json.dumps(submission, sort_keys=True))
             return 0
         run_id, root_job_id = submission["run_id"], submission["job_ids"][0]
-        result = JobRunner(conn).run(crawl_run_id=run_id)
+        result = JobRunner(conn, lease=lease).run(crawl_run_id=run_id)
     print(f"crawl_run #{run_id} started ({args.provider}, seed={args.username.strip().lower()}, depth={args.depth})")
     print(f"root job: {root_job_id}")
     print(
@@ -504,8 +520,11 @@ def _cmd_jobs_resume(args: argparse.Namespace) -> int:
     if args.max_jobs is not None and args.max_jobs <= 0:
         print("--max-jobs must be greater than zero.", file=sys.stderr)
         return 2
-    with open_database(args.db, writable=True) as conn:
-        result = JobRunner(conn).run(
+    with (
+        nullcontext() if is_memory_database(args.db) else archive_lock(args.db) as lease,
+        open_database(args.db, writable=True) as conn,
+    ):
+        result = JobRunner(conn, lease=lease).run(
             crawl_run_id=args.run,
             max_jobs=args.max_jobs,
             resume_stale=True,
