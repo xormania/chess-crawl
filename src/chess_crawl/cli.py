@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
+from time import time
 
 from chess_crawl import __version__
 from chess_crawl import application
@@ -23,6 +24,7 @@ from chess_crawl.ingest import (
 )
 from chess_crawl.jobs import state as job_state
 from chess_crawl.jobs.runner import JobRunner
+from chess_crawl.jobs.locking import ExecutorBusy, executor_lock
 from chess_crawl.providers.registry import list_provider_infos
 from chess_crawl.storage.queries import (
     games_by_month,
@@ -259,26 +261,37 @@ def _cmd_db_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_provider_ready(conn, provider: str) -> None:
+    deadline = job_state.provider_ready_at(conn, provider)
+    if deadline is not None and deadline > time():
+        ready_at = datetime.fromtimestamp(deadline, UTC).isoformat()
+        raise ValueError(f"{provider} is cooling down until {ready_at}; retry this fetch after that deadline.")
+
+
 def _cmd_fetch_user(args: argparse.Namespace) -> int:
-    with open_database(args.db, writable=True) as conn:
+    with open_database(args.db, writable=True) as conn, executor_lock(conn):
+        _require_provider_ready(conn, args.provider)
         result = fetch_user_profile(conn, args.provider, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_stats(args: argparse.Namespace) -> int:
-    with open_database(args.db, writable=True) as conn:
+    with open_database(args.db, writable=True) as conn, executor_lock(conn):
+        _require_provider_ready(conn, args.provider)
         result = fetch_chesscom_stats(conn, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_archives(args: argparse.Namespace) -> int:
-    with open_database(args.db, writable=True) as conn:
+    with open_database(args.db, writable=True) as conn, executor_lock(conn):
+        _require_provider_ready(conn, args.provider)
         result = fetch_chesscom_archives(conn, args.username)
     return _print_ingest_result(result)
 
 
 def _cmd_fetch_games(args: argparse.Namespace) -> int:
-    with open_database(args.db, writable=True) as conn:
+    with open_database(args.db, writable=True) as conn, executor_lock(conn):
+        _require_provider_ready(conn, args.provider)
         if args.provider == "chess.com":
             if not args.month:
                 print("Chess.com game fetch requires --month YYYY-MM.", file=sys.stderr)
@@ -674,7 +687,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     except application.ApplicationError as exc:
         print(exc.message, file=sys.stderr)
         return 1
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, ExecutorBusy) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 

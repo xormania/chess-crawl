@@ -10,6 +10,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from chess_crawl.jobs.models import DiscoveryJob, EnqueueResult, JOB_KINDS, JobKind, JobState
+from chess_crawl.jobs.locking import ExecutorLease, executor_lock
+from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.storage.db import atomic
 from chess_crawl.storage.discovery import discovery_edge_count
 
@@ -133,9 +135,9 @@ def claim_next_job(
     conn: sqlite3.Connection,
     *,
     crawl_run_id: int | None = None,
-    now: int | None = None,
+    now: float | None = None,
 ) -> DiscoveryJob | None:
-    timestamp = int(time.time()) if now is None else now
+    timestamp = time.time() if now is None else now
     row = conn.execute(
         f"""
         UPDATE discovery_jobs
@@ -143,11 +145,18 @@ def claim_next_job(
                started_at = ?,
                attempts = attempts + 1,
                reason = NULL,
-               done_at = NULL
+               done_at = NULL,
+               next_attempt_at = NULL
          WHERE id = (
            SELECT id
              FROM discovery_jobs
-            WHERE state = 'pending'
+            WHERE (state = 'pending' OR (state = 'blocked' AND next_attempt_at IS NOT NULL))
+              AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM provider_cooldowns
+                   WHERE provider_cooldowns.provider = discovery_jobs.provider
+                     AND provider_cooldowns.not_before > ?
+              )
               AND (? IS NULL OR crawl_run_id = ?)
               AND {_RUN_ALLOWS_WORK}
             ORDER BY priority ASC, depth ASC, enqueued_at ASC, id ASC
@@ -155,7 +164,7 @@ def claim_next_job(
          )
          RETURNING *
         """,
-        (timestamp, crawl_run_id, crawl_run_id),
+        (timestamp, timestamp, timestamp, crawl_run_id, crawl_run_id),
     ).fetchone()
     return None if row is None else row_to_job(row)
 
@@ -176,6 +185,7 @@ def mark_job(
         UPDATE discovery_jobs
            SET state = ?,
                done_at = ?,
+               next_attempt_at = NULL,
                reason = ?
          WHERE id = ?
         """,
@@ -211,13 +221,25 @@ def update_job_params(
     )
 
 
-@atomic
 def resume_stale_in_progress(
     conn: sqlite3.Connection,
     *,
     crawl_run_id: int | None = None,
     stale_seconds: int = 0,
     now: int | None = None,
+    lease: ExecutorLease | None = None,
+) -> int:
+    with executor_lock(conn, lease=lease):
+        return _resume_stale_in_progress(conn, crawl_run_id=crawl_run_id, stale_seconds=stale_seconds, now=now)
+
+
+@atomic
+def _resume_stale_in_progress(
+    conn: sqlite3.Connection,
+    *,
+    crawl_run_id: int | None,
+    stale_seconds: int,
+    now: int | None,
 ) -> int:
     timestamp = int(time.time()) if now is None else now
     cutoff = timestamp - stale_seconds
@@ -239,7 +261,8 @@ def resume_stale_in_progress(
 
 
 @atomic
-def unblock_jobs(conn: sqlite3.Connection, *, crawl_run_id: int | None = None) -> int:
+def unblock_jobs(conn: sqlite3.Connection, *, crawl_run_id: int | None = None, now: float | None = None) -> int:
+    timestamp = time.time() if now is None else now
     cursor = conn.execute(
         f"""
         UPDATE discovery_jobs
@@ -248,10 +271,11 @@ def unblock_jobs(conn: sqlite3.Connection, *, crawl_run_id: int | None = None) -
                done_at = NULL,
                reason = COALESCE(reason, 'unblocked by jobs resume')
          WHERE state = 'blocked'
+           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
            AND (? IS NULL OR crawl_run_id = ?)
            AND {_RUN_ALLOWS_WORK}
         """,
-        (crawl_run_id, crawl_run_id),
+        (timestamp, crawl_run_id, crawl_run_id),
     )
     return int(cursor.rowcount)
 
@@ -399,6 +423,139 @@ def refresh_crawl_runs(conn: sqlite3.Connection, *, crawl_run_id: int | None = N
             refresh_run_status(conn, int(row["id"]))
 
 
+@atomic
+def finish_attempt(
+    conn: sqlite3.Connection,
+    job_id: int,
+    outcome: JobState,
+    *,
+    reason: str,
+    transient: bool = False,
+    retry_after: float | None = None,
+    minimum_delay: float = 0,
+    settings: WorkerSettings | None = None,
+    now: float | None = None,
+) -> JobState:
+    """Finish an attempt and atomically publish its run's current snapshot."""
+    policy = settings or WorkerSettings()
+    timestamp = time.time() if now is None else now
+    row = conn.execute("SELECT crawl_run_id, retry_count, provider FROM discovery_jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"Job not found: {job_id}")
+    result = outcome
+    if transient:
+        retries = int(row["retry_count"])
+        delay = min(policy.job_retry_max_s, policy.job_retry_base_s * (2 ** min(retries, 30)))
+        # Persist provider-wide backoff even when this job exhausts its retries.
+        # Another job or a restarted executor must not evade the same deadline.
+        delay = max(delay, minimum_delay, retry_after or 0)
+        defer_provider(conn, row["provider"], not_before=timestamp + delay, reason=reason, now=timestamp)
+        if retries < policy.job_max_retries:
+            conn.execute(
+                """UPDATE discovery_jobs SET state = 'blocked', done_at = NULL,
+                          reason = ?, retry_count = retry_count + 1, next_attempt_at = ?
+                     WHERE id = ?""",
+                (reason, timestamp + delay, job_id),
+            )
+            result = "blocked"
+        else:
+            result = "error"
+            mark_job(conn, job_id, result, reason=f"Retry limit reached: {reason}", now=int(timestamp))
+    else:
+        mark_job(conn, job_id, result, reason=reason, now=int(timestamp))
+    if row["crawl_run_id"] is not None:
+        refresh_run_status(conn, int(row["crawl_run_id"]))
+    return result
+
+
+def provider_ready_at(conn: sqlite3.Connection, provider: str) -> float | None:
+    row = conn.execute("SELECT not_before FROM provider_cooldowns WHERE provider = ?", (provider,)).fetchone()
+    return None if row is None else float(row["not_before"])
+
+
+@atomic
+def defer_provider(
+    conn: sqlite3.Connection, provider: str, *, not_before: float,
+    reason: str, now: float | None = None,
+) -> None:
+    timestamp = time.time() if now is None else now
+    conn.execute(
+        """INSERT INTO provider_cooldowns(provider, not_before, reason, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(provider) DO UPDATE SET
+             not_before=MAX(provider_cooldowns.not_before, excluded.not_before),
+             reason=excluded.reason, updated_at=excluded.updated_at""",
+        (provider, not_before, reason, timestamp),
+    )
+
+
+def get_run(conn: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM crawl_runs WHERE id = ?", (run_id,)).fetchone()
+
+
+def job_ids_for_run(conn: sqlite3.Connection, run_id: int) -> list[int]:
+    return [int(row["id"]) for row in conn.execute("SELECT id FROM discovery_jobs WHERE crawl_run_id = ? ORDER BY id", (run_id,))]
+
+
+@atomic
+def start_worker(
+    conn: sqlite3.Connection, worker_id: str, *, lease: ExecutorLease,
+    max_age: float, now: float | None = None,
+) -> None:
+    lease.require(conn)
+    timestamp = time.time() if now is None else now
+    conn.execute(
+        """INSERT INTO worker_heartbeats(id, worker_id, started_at, heartbeat_at,
+                   heartbeat_expires_at, stopped_at, current_job_id, status)
+           VALUES (1, ?, ?, ?, ?, NULL, NULL, 'running')
+           ON CONFLICT(id) DO UPDATE SET worker_id=excluded.worker_id,
+               started_at=excluded.started_at, heartbeat_at=excluded.heartbeat_at,
+               heartbeat_expires_at=excluded.heartbeat_expires_at, stopped_at=NULL,
+               current_job_id=NULL, status='running'""",
+        (worker_id, timestamp, timestamp, timestamp + max_age),
+    )
+
+
+@atomic
+def heartbeat_worker(
+    conn: sqlite3.Connection, worker_id: str, *, max_age: float,
+    current_job_id: int | None = None, stopping: bool = False, now: float | None = None,
+) -> bool:
+    timestamp = time.time() if now is None else now
+    cursor = conn.execute(
+        """UPDATE worker_heartbeats SET heartbeat_at=?, heartbeat_expires_at=?,
+                   current_job_id=?, status=?
+             WHERE id=1 AND worker_id=? AND status IN ('running','stopping')""",
+        (timestamp, timestamp + max_age, current_job_id, 'stopping' if stopping else 'running', worker_id),
+    )
+    return cursor.rowcount == 1
+
+
+@atomic
+def stop_worker(conn: sqlite3.Connection, worker_id: str, *, failed: bool = False, now: float | None = None) -> None:
+    timestamp = time.time() if now is None else now
+    conn.execute(
+        """UPDATE worker_heartbeats SET status=?, heartbeat_at=?, heartbeat_expires_at=?,
+                   stopped_at=?, current_job_id=NULL WHERE id=1 AND worker_id=?""",
+        ('failed' if failed else 'stopped', timestamp, timestamp, timestamp, worker_id),
+    )
+
+
+def worker_status(conn: sqlite3.Connection, *, now: float | None = None, max_age: float | None = None) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM worker_heartbeats WHERE id=1").fetchone()
+    if row is None:
+        return {"alive": False, "status": "absent", "worker_id": None, "heartbeat_at": None, "age_seconds": None}
+    timestamp = time.time() if now is None else now
+    result = dict(row)
+    age = max(0.0, timestamp - float(row["heartbeat_at"]))
+    expires = float(row["heartbeat_expires_at"])
+    if max_age is not None:
+        expires = min(expires, float(row["heartbeat_at"]) + max_age)
+    result["age_seconds"] = age
+    result["alive"] = row["status"] in {"running", "stopping"} and timestamp < expires
+    return result
+
+
 def get_job(conn: sqlite3.Connection, job_id: int) -> DiscoveryJob | None:
     row = conn.execute("SELECT * FROM discovery_jobs WHERE id = ?", (job_id,)).fetchone()
     return None if row is None else row_to_job(row)
@@ -409,7 +566,7 @@ def list_jobs(conn: sqlite3.Connection, *, limit: int = 100) -> list[sqlite3.Row
         conn.execute(
             """
             SELECT id, crawl_run_id, parent_job_id, provider, kind, target, state,
-                   priority, depth, attempts, enqueued_at, started_at, done_at, reason
+                   priority, depth, attempts, retry_count, next_attempt_at, enqueued_at, started_at, done_at, reason
               FROM discovery_jobs
              ORDER BY id
              LIMIT ?
@@ -511,6 +668,8 @@ def row_to_job(row: sqlite3.Row) -> DiscoveryJob:
         priority=int(row["priority"]),
         depth=int(row["depth"]),
         attempts=int(row["attempts"]),
+        retry_count=int(row["retry_count"]),
+        next_attempt_at=row["next_attempt_at"],
         dedup_key=row["dedup_key"],
         enqueued_at=None if row["enqueued_at"] is None else int(row["enqueued_at"]),
         started_at=None if row["started_at"] is None else int(row["started_at"]),
@@ -524,11 +683,3 @@ def _normalize_target(kind: str, target: str) -> str:
     if kind in {"fetch_user_profile", "fetch_user_stats", "fetch_user_games", "crawl_opponents"}:
         return stripped.lower()
     return stripped
-
-
-def get_run(conn: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM crawl_runs WHERE id = ?", (run_id,)).fetchone()
-
-
-def job_ids_for_run(conn: sqlite3.Connection, run_id: int) -> list[int]:
-    return [int(row["id"]) for row in conn.execute("SELECT id FROM discovery_jobs WHERE crawl_run_id = ? ORDER BY id", (run_id,))]
