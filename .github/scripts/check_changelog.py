@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import os
-import subprocess
+import subprocess  # nosec B404 # Runs only Git diff with repository-controlled arguments.
 import sys
 
 from ci_scope import changed_paths
 
 
 def _git_diff(*args: str) -> bytes:
-    return subprocess.run(
+    return subprocess.run(  # nosec B603, B607 # Trusted runner Git; argv list, no shell.
         ["git", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--output-indicator-new=+", *args],
         check=True, capture_output=True, timeout=30,
     ).stdout

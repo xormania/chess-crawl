@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
-import subprocess
+import subprocess  # nosec B404 # Renders the checked-out Compose configuration.
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,7 +38,7 @@ def configuration(*files: str) -> dict[str, Any]:
     command = ["docker", "compose", "--env-file", os.devnull]
     for file in files:
         command.extend(("--file", file))
-    result = subprocess.run(
+    result = subprocess.run(  # nosec B603 # Fixed Docker command and repository file paths; no shell.
         [*command, "config", "--format", "json"], cwd=ROOT,
         capture_output=True, text=True, timeout=30,
     )

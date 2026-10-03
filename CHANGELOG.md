@@ -7,6 +7,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Pinned Bandit security checks for application, deployment, and CI Python,
+  with reviewed, rule-specific exceptions, complete-scan validation, and stage
+  timings in the existing required offline check. Compose smoke now rejects
+  optimized Python so its assertions cannot silently disappear.
 - Shared application services for bounded imports and opponent crawls, with
   idempotent submissions and consistent archive snapshots. ([#7](https://github.com/xormania/chess-crawl/pull/7))
 - An authenticated JSON API for asynchronous submissions, job/run state,

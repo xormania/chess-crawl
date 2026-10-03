@@ -146,7 +146,7 @@ def _merge_user_placeholder(conn: sqlite3.Connection, survivor: int, replaced: i
                     "count_all", "count_rated", "count_win", "count_loss", "count_draw", "perfs_or_stats", "raw_payload_id",
                 )
                 conn.execute(
-                    f"UPDATE user_snapshots SET {', '.join(f'{field} = ?' for field in fields)} WHERE id = ?",
+                    f"UPDATE user_snapshots SET {', '.join(f'{field} = ?' for field in fields)} WHERE id = ?",  # nosec B608 # Columns come only from the literal tuple above; values are bound.
                     (*[snapshot[field] for field in fields], matching["id"]),
                 )
             _merge_source_records(conn, "user_snapshot", int(matching["id"]), int(snapshot["id"]))

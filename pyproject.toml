@@ -36,9 +36,15 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "bandit[toml]==1.9.4",
     "fastapi>=0.115,<1",
     "mypy>=2.1.0",
     "pytest>=8,<10",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.20",
 ]
+
+[tool.bandit.assert_used]
+# This executable test uses assertions and rejects optimized Python in main().
+# All other rules still apply to it; application assertions remain findings.
+skips = ["scripts/compose_smoke.py"]
