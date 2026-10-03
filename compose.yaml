@@ -1,0 +1,147 @@
+name: chess-crawl
+
+x-python: &python
+  image: chess-crawl:local
+  build:
+    context: .
+  init: true
+  user: "10001:10001"
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  volumes:
+    # Mount the directory, including SQLite WAL/SHM files and executor locks.
+    - archive_data:/data
+
+x-archive-env: &archive-env
+  CHESS_CRAWL_DB: /data/archive.sqlite
+
+services:
+  init:
+    <<: *python
+    command: ["chess-crawl", "init", "--db", "/data/archive.sqlite"]
+    environment: *archive-env
+    restart: "no"
+
+  api:
+    <<: *python
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      <<: *archive-env
+      CHESS_CRAWL_API_TOKEN_FILE: /run/secrets/api_token
+      CHESS_CRAWL_MAX_GAMES: ${CHESS_CRAWL_MAX_GAMES:-1000}
+      CHESS_CRAWL_MAX_DEPTH: ${CHESS_CRAWL_MAX_DEPTH:-2}
+      CHESS_CRAWL_MAX_USERS: ${CHESS_CRAWL_MAX_USERS:-100}
+      CHESS_CRAWL_MAX_JOBS: ${CHESS_CRAWL_MAX_JOBS:-200}
+      CHESS_CRAWL_PAGE_SIZE: ${CHESS_CRAWL_PAGE_SIZE:-100}
+      CHESS_CRAWL_MAX_DATE_SPAN_DAYS: ${CHESS_CRAWL_MAX_DATE_SPAN_DAYS:-366}
+    secrets:
+      - api_token
+    ports:
+      - "${CHESS_CRAWL_BIND_ADDRESS:-127.0.0.1}:${CHESS_CRAWL_API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "/app/docker/healthcheck.py", "api"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    <<: *python
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - chess_crawl.jobs.worker
+      - --db
+      - /data/archive.sqlite
+      - --poll-interval
+      - "${CHESS_CRAWL_POLL_INTERVAL:-1}"
+      - --heartbeat-interval
+      - "${CHESS_CRAWL_HEARTBEAT_INTERVAL:-5}"
+      - --max-retries
+      - "${CHESS_CRAWL_JOB_MAX_RETRIES:-3}"
+      - --retry-base
+      - "${CHESS_CRAWL_RETRY_BASE:-30}"
+      - --retry-max
+      - "${CHESS_CRAWL_RETRY_MAX:-3600}"
+    environment:
+      <<: *archive-env
+      CHESS_CRAWL_CONTACT: ${CHESS_CRAWL_CONTACT:-set-me@example.invalid}
+      CHESS_CRAWL_LICHESS_TOKEN: ${CHESS_CRAWL_LICHESS_TOKEN:-}
+    stop_grace_period: 90s
+    healthcheck:
+      test: ["CMD", "python", "/app/docker/healthcheck.py", "worker"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  events:
+    <<: *python
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      mercure:
+        condition: service_healthy
+    command: ["python", "-m", "chess_crawl.events.publisher", "--db", "/data/archive.sqlite"]
+    environment:
+      <<: *archive-env
+      CHESS_CRAWL_MERCURE_URL: http://mercure/.well-known/mercure
+      CHESS_CRAWL_MERCURE_PUBLISHER_JWT_FILE: /run/secrets/mercure_publisher_jwt
+      CHESS_CRAWL_MERCURE_TOPIC_PREFIX: ${CHESS_CRAWL_MERCURE_TOPIC_PREFIX:-https://chess-crawl.local}
+    secrets:
+      - mercure_publisher_jwt
+    stop_grace_period: 30s
+
+  mercure:
+    image: dunglas/mercure:v0.24.2
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/etc/chess-crawl/mercure-entrypoint.sh"]
+    environment:
+      SERVER_NAME: ":80"
+      MERCURE_PUBLISHER_JWT_ALG: HS256
+      MERCURE_SUBSCRIBER_JWT_ALG: HS256
+      MERCURE_EXTRA_DIRECTIVES: |
+        transport bolt {
+          path /data/mercure.db
+          size ${CHESS_CRAWL_MERCURE_HISTORY_SIZE:-10000}
+        }
+    secrets:
+      - mercure_signing_key
+    volumes:
+      - mercure_data:/data
+      - mercure_config:/config
+      - ./docker/mercure-entrypoint.sh:/etc/chess-crawl/mercure-entrypoint.sh:ro
+    ports:
+      - "${CHESS_CRAWL_BIND_ADDRESS:-127.0.0.1}:${CHESS_CRAWL_MERCURE_PORT:-3000}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/mercure/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  archive_data:
+  mercure_data:
+  mercure_config:
+
+secrets:
+  api_token:
+    file: ${CHESS_CRAWL_SECRETS_DIR:-./data/dev-secrets}/api_token
+  mercure_signing_key:
+    file: ${CHESS_CRAWL_SECRETS_DIR:-./data/dev-secrets}/mercure_signing_key
+  mercure_publisher_jwt:
+    file: ${CHESS_CRAWL_SECRETS_DIR:-./data/dev-secrets}/mercure_publisher_jwt

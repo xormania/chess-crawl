@@ -43,6 +43,9 @@ class DiscoveryJob:
     started_at: int | None = None
     done_at: int | None = None
     reason: str | None = None
+    retry_count: int = 0
+    next_attempt_at: float | None = None
+    revision: int = 0
 
 
 @dataclass(frozen=True)

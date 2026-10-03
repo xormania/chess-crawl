@@ -104,7 +104,8 @@ def test_crawl_opponents_cli_requires_caps_and_passes_month_bounds(
         return {"run_id": 12, "job_ids": [34], "replayed": False}
 
     class FakeRunner:
-        def __init__(self, conn):
+        def __init__(self, conn, *, lease):
+            lease.require(conn)
             self.conn = conn
 
         def run(self, *, crawl_run_id=None):
@@ -203,15 +204,16 @@ def test_jobs_list_show_and_resume_paths(
     assert '"scope"' in show_out.out
 
     class FakeRunner:
-        def __init__(self, conn):
+        def __init__(self, conn, *, lease):
             self.conn = conn
+            self.lease = lease
 
         def run(self, *, crawl_run_id=None, max_jobs=None, resume_stale=False, unblock=False):
             assert crawl_run_id is None
             assert max_jobs == 1
             assert resume_stale is True
             assert unblock is True
-            stale = state.resume_stale_in_progress(self.conn, crawl_run_id=crawl_run_id)
+            stale = state.resume_stale_in_progress(self.conn, crawl_run_id=crawl_run_id, lease=self.lease)
             unblocked = state.unblock_jobs(self.conn, crawl_run_id=crawl_run_id)
             return SimpleNamespace(
                 stale_resumed=stale,

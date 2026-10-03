@@ -326,14 +326,19 @@ def test_runner_resume_retries_failed_month_before_advancing_checkpoint(
         target="SameName",
         params={"since": 1704067200, "until": 1709251200, "max_games": 100},
     ).job_id
-    result = JobRunner(conn).run(max_jobs=1)
+    now = [100.0]
+    runner = JobRunner(conn, clock=lambda: now[0])
+    result = runner.run(max_jobs=1)
     blocked = state.get_job(conn, job_id)
 
     assert result.blocked == 1
     assert blocked is not None
     assert state.load_params(blocked.params_json)["cursor_index"] == 1
 
-    result = JobRunner(conn).run(max_jobs=1, unblock=True)
+    assert blocked.next_attempt_at is not None
+    assert runner.run(max_jobs=1, unblock=True).claimed == 0
+    now[0] = blocked.next_attempt_at
+    result = runner.run(max_jobs=1, unblock=True)
     completed = state.get_job(conn, job_id)
     assert result.done == 1
     assert completed is not None

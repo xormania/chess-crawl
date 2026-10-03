@@ -10,6 +10,7 @@ from chess_crawl.ingest import IngestResult
 from chess_crawl.jobs import state
 from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
 from chess_crawl.jobs.runner import JobRunner
+from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.storage.acquisition import associate_run_game
 from chess_crawl.storage.discovery import opponents_of_user
 from support import seed_game
@@ -94,13 +95,29 @@ def test_exhausted_429_delays_the_next_job(initialized_conn, fixtures_dir, provi
         fixture = "chesscom/player.json" if provider == "chess.com" else "lichess/user.json"
         return httpx.Response(200, content=(fixtures_dir / fixture).read_bytes())
 
-    result = JobRunner(
-        initialized_conn, config=Config(chesscom_delay_s=3, lichess_delay_s=3, max_retries=0),
-        transport=httpx.MockTransport(handler), sleeper=clock.sleep, clock=clock,
-    ).run()
-    assert result.blocked == result.done == 1
+    config = Config(chesscom_delay_s=3, lichess_delay_s=3, max_retries=0)
+    settings = WorkerSettings(job_max_retries=0, job_retry_base_s=1, job_retry_max_s=1)
+
+    def run():
+        return JobRunner(
+            initialized_conn, config=config, settings=settings,
+            transport=httpx.MockTransport(handler), sleeper=clock.sleep, clock=clock,
+        ).run()
+
+    first = run()
+    assert first.errors == first.claimed == 1
+    assert first.done == 0
+    assert times == [100]
+    assert state.provider_ready_at(initialized_conn, provider) == 100 + delay
+    # Fresh runners also honor the persisted floor, independent of a session's
+    # in-memory pacing state; no claim or HTTP attempt occurs before the deadline.
+    clock.now = 100 + delay - 1
+    assert run().claimed == 0
+    assert times == [100]
+    clock.now = 100 + delay
+    assert run().done == 1
     assert times == [100, 100 + delay]
-    assert clock.sleeps == [delay]
+    assert clock.sleeps == []
 
 
 @pytest.mark.parametrize("has_selection", [True, False], ids=["selected-game", "empty-response"])

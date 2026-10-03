@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import httpx
 
 from chess_crawl.config import Config
+from chess_crawl.jobs.state import defer_provider
 from chess_crawl.normalize.games import PARSER_VERSION as GAMES_PARSER_VERSION
 from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.normalize.users import PARSER_VERSION as USERS_PARSER_VERSION
@@ -310,6 +311,16 @@ def _persist_response(
         if record.http_status == 304:
             raw_payload_id = latest_raw_payload_id(conn, record.canonical_source_key)
         _log_attempts(conn, record, raw_payload_id, job_id=job_id, crawl_run_id=crawl_run_id)
+        retry_after = _retry_after(record)
+        if record.http_status in {429, 503} and retry_after is not None:
+            response_at = float(record.fetched_at)
+            if record.fetch_attempts:
+                last_attempt = record.fetch_attempts[-1]
+                response_at = last_attempt.attempted_at + (last_attempt.duration_ms or 0) / 1000
+            defer_provider(
+                conn, record.provider, not_before=response_at + retry_after,
+                reason=f"HTTP {record.http_status}", now=response_at,
+            )
     if record.http_status == 304 and raw_payload_id is None:
         raise ValueError("provider returned HTTP 304 without a stored raw payload")
     return raw_payload_id

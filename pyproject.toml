@@ -36,7 +36,9 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.115,<1",
     "mypy>=2.1.0",
+    "pytest>=8,<10",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.20",
 ]
