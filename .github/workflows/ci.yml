@@ -44,6 +44,9 @@ jobs:
     # Keep required jobs observable even when a prerequisite fails.
     if: ${{ always() && !cancelled() }}
     timeout-minutes: 10
+    env:
+      CI_PERFORMANCE_DIR: ${{ github.workspace }}/.ci-performance
+      CI_VARIANT: python-${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
@@ -83,15 +86,14 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           version: "0.12.19"
-          enable-cache: true
-          cache-dependency-glob: |
-            uv.lock
-            pyproject.toml
-          cache-suffix: py${{ matrix.python-version }}
+          # These prebuilt dependencies showed no benefit from restoring
+          # and saving uv's pruned metadata cache on hosted runners.
+          enable-cache: false
 
       - name: Cache Mypy analysis
+        id: mypy-cache
         if: steps.scope.outputs.offline == 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .mypy_cache
           key: mypy-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
@@ -100,23 +102,46 @@ jobs:
 
       - name: Install dependencies
         if: steps.scope.outputs.offline == 'true'
-        run: uv sync --locked --group dev
+        run: python .github/scripts/ci_performance.py measure --label sync --output-dir "$CI_PERFORMANCE_DIR" -- uv sync --locked --group dev
 
       - name: Ruff
         if: steps.scope.outputs.offline == 'true' && matrix.python-version == '3.11'
-        run: uv run --no-sync ruff check .
+        run: python .github/scripts/ci_performance.py measure --label ruff --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync ruff check . .github/scripts
 
       - name: Mypy
         if: steps.scope.outputs.offline == 'true'
-        run: uv run --no-sync mypy .
+        env:
+          CI_CACHE_STATE: ${{ steps.mypy-cache.outputs.cache-hit == 'true' && 'exact' || (steps.mypy-cache.outputs.cache-matched-key != '' && 'prefix' || 'cold') }}
+        run: python .github/scripts/ci_performance.py measure --label mypy --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync mypy . .github/scripts
 
       - name: Offline tests
         if: steps.scope.outputs.offline == 'true'
-        run: uv run --no-sync python -m pytest -q -m "not live and not slow"
+        run: python .github/scripts/ci_performance.py measure --label offline-tests --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync python -m pytest -q -m "not live and not slow" --durations=15 --junitxml="$CI_PERFORMANCE_DIR/pytest.xml"
 
       - name: Packaged CLI help
         if: steps.scope.outputs.offline == 'true'
-        run: uv run --no-sync chess-crawl --help
+        run: python .github/scripts/ci_performance.py measure --label cli-help --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync chess-crawl --help
+
+      - name: Save Mypy analysis
+        if: steps.scope.outputs.offline == 'true' && steps.mypy-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .mypy_cache
+          key: ${{ steps.mypy-cache.outputs.cache-primary-key }}
+
+      - name: Summarize performance measurements
+        if: always() && steps.scope.outputs.offline == 'true'
+        run: python .github/scripts/ci_performance.py report --output-dir "$CI_PERFORMANCE_DIR"
+
+      - name: Upload performance evidence
+        if: always() && steps.scope.outputs.offline == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-performance-python-${{ matrix.python-version }}-attempt-${{ github.run_attempt }}
+          path: ${{ env.CI_PERFORMANCE_DIR }}
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 14
 
   compose-smoke:
     name: Compose API and Mercure smoke
@@ -124,6 +149,10 @@ jobs:
     needs: promotion-source
     if: ${{ always() && !cancelled() }}
     timeout-minutes: 12
+    env:
+      CI_PERFORMANCE_DIR: ${{ github.workspace }}/.ci-performance
+      CI_VARIANT: compose
+      COMPOSE_FILE: compose.yaml:.github/compose.ci.yaml
     steps:
       - name: Checkout merge result and its parents
         uses: actions/checkout@v4
@@ -160,19 +189,29 @@ jobs:
 
       - name: Validate Compose configuration
         if: steps.scope.outputs.compose == 'true'
-        run: docker compose config --quiet
+        run: |
+          docker version --format '{{.Server.Version}}'
+          docker compose version
+          python .github/scripts/ci_performance.py measure --label compose-config --output-dir "$CI_PERFORMANCE_DIR" -- python .github/scripts/check_compose_ci.py
 
-      - name: Build the shared application image
+      - name: Build application and pull Mercure concurrently
         if: steps.scope.outputs.compose == 'true'
-        run: docker compose build api
+        run: |
+          python .github/scripts/ci_performance.py measure --label mercure-pull --output-dir "$CI_PERFORMANCE_DIR" -- docker compose pull mercure &
+          pull_pid=$!
+          build_status=0
+          python .github/scripts/ci_performance.py measure --label image-build --output-dir "$CI_PERFORMANCE_DIR" -- docker compose build api || build_status=$?
+          pull_status=0
+          wait "$pull_pid" || pull_status=$?
+          test "$build_status" -eq 0 && test "$pull_status" -eq 0
 
       - name: Start the stack
         if: steps.scope.outputs.compose == 'true'
-        run: docker compose up --no-build --detach --wait --wait-timeout 120
+        run: python .github/scripts/ci_performance.py measure --label stack-ready --output-dir "$CI_PERFORMANCE_DIR" -- docker compose up --no-build --detach --wait --wait-timeout 120
 
       - name: Exercise API, worker, and durable private Mercure delivery
         if: steps.scope.outputs.compose == 'true'
-        run: python scripts/compose_smoke.py
+        run: python .github/scripts/ci_performance.py measure --label compose-smoke --output-dir "$CI_PERFORMANCE_DIR" -- python scripts/compose_smoke.py
 
       - name: Service diagnostics
         if: failure() && steps.scope.outputs.compose == 'true'
@@ -180,4 +219,18 @@ jobs:
 
       - name: Remove disposable containers and archive
         if: always() && steps.scope.outputs.compose == 'true'
-        run: docker compose down --volumes --remove-orphans
+        run: python .github/scripts/ci_performance.py measure --label cleanup --output-dir "$CI_PERFORMANCE_DIR" -- docker compose down --volumes --remove-orphans
+
+      - name: Summarize performance measurements
+        if: always() && steps.scope.outputs.compose == 'true'
+        run: python .github/scripts/ci_performance.py report --output-dir "$CI_PERFORMANCE_DIR"
+
+      - name: Upload performance evidence
+        if: always() && steps.scope.outputs.compose == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-performance-compose-attempt-${{ github.run_attempt }}
+          path: ${{ env.CI_PERFORMANCE_DIR }}
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 14

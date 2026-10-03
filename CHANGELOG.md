@@ -25,6 +25,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Changed
 
+- CI isolates deployment-only checks, overlaps image build/pull and polls
+  startup health sooner without weakening readiness. It records stage timings,
+  test durations and machine-readable performance evidence, with optional
+  repeatable regression comparisons. Changelog policy now inspects the pinned
+  merge diff and has executable behavior tests for rename and content rules.
 - CI scopes application checks to the PR merge diff while preserving required
   check names and full promotion validation. Documentation-only changes skip
   application work, test-only changes skip Compose, and unrecognized paths run
