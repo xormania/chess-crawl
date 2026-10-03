@@ -1,6 +1,6 @@
 # chess-crawl
 
-A command-line tool for building a local archive of public chess games and profiles from Chess.com and Lichess.
+A local-first backend and command-line tool for building an archive of public chess games and profiles from Chess.com and Lichess.
 
 All data stays on your machine in a SQLite database you control. Only public APIs are used.
 
@@ -122,6 +122,27 @@ chess-crawl export users --format jsonl --output users.jsonl
 chess-crawl export graph --format csv --output edges.csv
 ```
 
+## Standalone backend
+
+The Docker Compose deployment runs an authenticated JSON API, one serial
+worker, a durable event publisher, and a Mercure hub:
+
+```bash
+python3 scripts/bootstrap_dev.py
+docker compose up --build --detach --wait --wait-timeout 120
+```
+
+Bootstrap creates ignored development credentials in `data/dev-secrets/`.
+The API listens on `http://127.0.0.1:8000`; its OpenAPI documentation is at
+`/docs`. Mercure listens on `http://127.0.0.1:3000/.well-known/mercure`.
+`docker compose stop` or `docker compose down` preserves the archive volume.
+
+See [the backend guide](docs/backend.md) for authenticated submissions, bounded
+imports, worker health, private event delivery, and the integration contract.
+A future Symfony application can consume the JSON API and events from its own
+Symfony Docker environment and render Turbo updates in that application.
+SQLite is the current storage implementation; PostgreSQL remains undecided.
+
 ## Configuration
 
 Export environment variables before running the CLI; it does not load `.env`
@@ -163,7 +184,7 @@ Persistence has explicit owners:
 |--------|----------------|
 | `storage/db.py` | Open and close SQLite connections; enforce read/write access; commit and roll back transactions. |
 | `storage/migrations.py` | Initialize the schema using the caller's connection. |
-| `storage/raw.py`, `storage/repository.py`, `storage/discovery.py` | Persist raw responses, normalized records, and discovery edges. |
+| `storage/raw.py`, `storage/repository.py`, `storage/discovery.py`, `storage/acquisition.py` | Persist raw responses, normalized records, discovery edges, and bounded run/game attribution. |
 | `storage/queries.py` | Supply rows for queries, reports, and exports. |
 | `application/` | Validate bounded submissions, enforce idempotency, and return consistent read snapshots to adapters. |
 | `jobs/state.py` | Own job and crawl-run creation, claiming, checkpoints, recovery, status, and counters. |
