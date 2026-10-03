@@ -19,6 +19,10 @@ Outcome = Literal["white_win", "black_win", "draw"]
 Color = Literal["white", "black"]
 
 
+class ProviderRequestStopped(Exception):
+    """Shutdown was requested before any provider request was sent."""
+
+
 @dataclass(frozen=True)
 class FetchAttempt:
     provider: str
@@ -34,6 +38,7 @@ class FetchAttempt:
     bytes_count: int | None = None
     duration_ms: int | None = None
     from_cache: bool = False
+    error_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -141,7 +146,7 @@ class FetchPolicy:
 
     def next_delay(self, status: int, retry_after: float | None = None) -> float:
         if status == 429 and self.fixed_429_backoff_s is not None:
-            return self.fixed_429_backoff_s
+            return max(self.fixed_429_backoff_s, retry_after or 0)
         if status == 429 and self.honor_retry_after and retry_after is not None:
             return max(self.min_delay_s, retry_after)
         return self.min_delay_s

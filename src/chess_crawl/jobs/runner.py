@@ -21,6 +21,7 @@ from chess_crawl.ingest import (
 )
 from chess_crawl.jobs import discovery, state
 from chess_crawl.jobs.models import DiscoveryJob, JobState
+from chess_crawl.storage.acquisition import associate_run_game
 from chess_crawl.storage.db import transaction
 from chess_crawl.storage.discovery import opponents_of_user, record_discovery_edges
 from chess_crawl.storage.repository import insert_error
@@ -174,7 +175,12 @@ class JobRunner:
         if remaining == 0:
             return IngestResult(job.provider, "user_games_stream", 304, None, (), "max-games cap already reached")
         if self.game_fetcher is not None:
-            return self.game_fetcher(self.conn, job.provider, job.target, params, remaining)
+            result = self.game_fetcher(self.conn, job.provider, job.target, params, remaining)
+            if job.crawl_run_id is not None:
+                with transaction(self.conn):
+                    for game_id in result.normalized_ids:
+                        associate_run_game(self.conn, job.crawl_run_id, game_id)
+            return result
         if job.provider == "chess.com":
             return self._fetch_chesscom_bounded_months(job, params)
         limit = int(params.get("limit") or remaining or params.get("max_games") or 0)
@@ -217,6 +223,7 @@ class JobRunner:
                 job.target,
                 year,
                 month,
+                max_games=remaining,
                 config=self.config,
                 transport=self.transport,
                 sleeper=self.sleeper,

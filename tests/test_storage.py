@@ -6,7 +6,7 @@ import pytest
 
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage.db import connection
-from chess_crawl.storage.migrations import initialize
+from chess_crawl.storage.migrations import SCHEMA_VERSION, initialize, migration_resources
 from chess_crawl.storage.raw import compute_body_hash, insert_source_record, read_raw_payload, store_raw_payload
 from chess_crawl.storage.repository import list_providers, upsert_provider_user
 
@@ -43,7 +43,7 @@ def test_schema_creation_and_providers_seeded() -> None:
         }
 
         assert CANONICAL_TABLES <= tables
-        assert result.version == 1
+        assert result.version == SCHEMA_VERSION
         assert list_providers(conn) == ("chess.com", "lichess")
 
 
@@ -52,9 +52,9 @@ def test_init_is_idempotent() -> None:
         first = initialize(conn)
         second = initialize(conn)
 
-        assert first.applied == ("0001_init",)
+        assert first.applied == tuple(name for _, name, _ in migration_resources())
         assert second.applied == ()
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == len(migration_resources())
         assert conn.execute("SELECT COUNT(*) FROM providers").fetchone()[0] == 2
 
 

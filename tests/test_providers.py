@@ -55,7 +55,7 @@ def test_lichess_endpoint_construction() -> None:
         lichess_endpoints.user_games("SameName", since=1704067200000, until=1704153600000, max=1)
         == "https://lichess.org/api/games/user/samename?since=1704067200000&until=1704153600000&max=1"
     )
-    assert lichess_endpoints.game("abc123") == "https://lichess.org/api/game/abc123"
+    assert lichess_endpoints.game("abc123") == "https://lichess.org/game/export/abc123"
 
 
 def test_chesscom_archive_units_use_archive_index_fixture(fixtures_dir: Path) -> None:

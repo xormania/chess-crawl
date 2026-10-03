@@ -69,6 +69,25 @@ chess-crawl crawl opponents lichess SomePlayer \
 
 Use `jobs status` / `jobs resume` if you need to pause and continue.
 
+### Submit work through the shared application layer
+
+Queue a bounded import without making provider requests:
+
+```bash
+chess-crawl submit import chess.com Hikaru \
+  --since 2024-01-01 --until 2024-02-01 --max-games 100 \
+  --idempotency-key hikaru-january-2024
+chess-crawl jobs resume
+```
+
+Opponent crawls also accept `--enqueue-only` and `--idempotency-key`.
+Reusing a key with the same normalized request returns the original run, even
+after completion; changing the request with that key is an error. Date windows
+include `since` and exclude `until`. A month such as `2024-02` denotes its first
+day. Run game limits count games attributed to that run, including games already
+in the archive. Full provider responses are retained even when only some games
+fit the date window or limit.
+
 ### Inspect your archive
 
 ```bash
@@ -105,7 +124,8 @@ chess-crawl export graph --format csv --output edges.csv
 
 ## Configuration
 
-Create a `.env` file or export environment variables.
+Export environment variables before running the CLI; it does not load `.env`
+files automatically.
 
 | Variable                    | Purpose                                      |
 |-----------------------------|----------------------------------------------|
@@ -145,6 +165,7 @@ Persistence has explicit owners:
 | `storage/migrations.py` | Initialize the schema using the caller's connection. |
 | `storage/raw.py`, `storage/repository.py`, `storage/discovery.py` | Persist raw responses, normalized records, and discovery edges. |
 | `storage/queries.py` | Supply rows for queries, reports, and exports. |
+| `application/` | Validate bounded submissions, enforce idempotency, and return consistent read snapshots to adapters. |
 | `jobs/state.py` | Own job and crawl-run creation, claiming, checkpoints, recovery, status, and counters. |
 
 Use `open_database(path)` for a read-only archive and

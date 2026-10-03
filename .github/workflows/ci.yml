@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - dev
+      - 'work/**'
       - master
 
 permissions:
@@ -36,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: promotion-source
     # The promotion gate is intentionally skipped for development PRs.
-    if: ${{ always() && !cancelled() && (github.base_ref == 'dev' || needs.promotion-source.result == 'success') }}
+    if: ${{ always() && !cancelled() && (github.base_ref != 'master' || needs.promotion-source.result == 'success') }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -58,7 +59,7 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install dependencies
-        run: uv sync --locked --extra dev --group dev
+        run: uv sync --locked --all-extras --group dev
 
       - name: Ruff
         run: uv run ruff check .

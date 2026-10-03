@@ -83,11 +83,11 @@ def open_database(path: DbPath, *, writable: bool = False) -> Iterator[sqlite3.C
 
 
 @contextmanager
-def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+def transaction(conn: sqlite3.Connection, *, write: bool = True) -> Iterator[sqlite3.Connection]:
     """Commit one operation; nested operations use savepoints, never commit the owner."""
     nested = conn.in_transaction
     savepoint = f"chess_crawl_{next(_savepoints)}" if nested else None
-    conn.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE")
+    conn.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE" if write else "BEGIN")
     try:
         yield conn
         if nested:
@@ -105,9 +105,22 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
 def atomic(operation: Callable[Concatenate[sqlite3.Connection, _P], _T]) -> Callable[Concatenate[sqlite3.Connection, _P], _T]:
     """Make a storage mutation safe both alone and inside a larger operation."""
+    return _transactional(operation, write=True)
+
+
+def consistent_read(
+    operation: Callable[Concatenate[sqlite3.Connection, _P], _T],
+) -> Callable[Concatenate[sqlite3.Connection, _P], _T]:
+    """Read one coherent snapshot without reserving the writer lock."""
+    return _transactional(operation, write=False)
+
+
+def _transactional(
+    operation: Callable[Concatenate[sqlite3.Connection, _P], _T], *, write: bool,
+) -> Callable[Concatenate[sqlite3.Connection, _P], _T]:
     @wraps(operation)
     def wrapped(conn: sqlite3.Connection, /, *args: _P.args, **kwargs: _P.kwargs) -> _T:
-        with transaction(conn):
+        with transaction(conn, write=write):
             return operation(conn, *args, **kwargs)
 
     return wrapped
