@@ -17,6 +17,9 @@ x-python: &python
 x-database-env: &database-env
   CHESS_CRAWL_DATABASE_URL: ${CHESS_CRAWL_DATABASE_URL:-postgresql://chess_crawl@postgres:5432/chess_crawl}
   CHESS_CRAWL_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+  # This explicit policy trusts only the bundled Compose service hostname.
+  CHESS_CRAWL_DATABASE_TRANSPORT: local
+  CHESS_CRAWL_DATABASE_TRUSTED_HOST: postgres
 
 services:
   postgres:

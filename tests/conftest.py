@@ -89,6 +89,9 @@ def database_factory(
     postgres_admin: psycopg.Connection, monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[Callable[..., str]]:
     names: list[str] = []
+    # Disposable test clusters use a confined explicit local connection. The
+    # application's default remains verified TLS for external deployments.
+    monkeypatch.setenv("CHESS_CRAWL_DATABASE_TRANSPORT", "local")
     password = _TEST_DATABASE_PASSWORD
     if password is None:
         embedded_password = conninfo_to_dict(_TEST_DATABASE_URL or "").get("password")

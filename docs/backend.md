@@ -68,7 +68,8 @@ Compose supports these host settings, in addition to the request ceilings below:
 
 | Variable | Default or purpose |
 | --- | --- |
-| `CHESS_CRAWL_DATABASE_URL` | `postgresql://chess_crawl@postgres:5432/chess_crawl`; override for an external PostgreSQL server. |
+| `CHESS_CRAWL_DATABASE_URL` | `postgresql://chess_crawl@postgres:5432/chess_crawl` for bundled Compose; external mode requires its own URL. |
+| `CHESS_CRAWL_DATABASE_CA_FILE` | Host PEM CA file required by `compose.external.yaml`. |
 | `CHESS_CRAWL_BIND_ADDRESS` | `127.0.0.1` |
 | `CHESS_CRAWL_API_PORT` | `8000` |
 | `CHESS_CRAWL_MERCURE_PORT` | `3000` |
@@ -82,6 +83,54 @@ Compose reads this repository's `.env` for interpolation. The CLI and bootstrap
 script do not load `.env` themselves. Export matching secrets-directory and
 topic-prefix settings before running bootstrap and Compose; JWT topic scopes
 must match the publisher's prefix. No Symfony configuration is required.
+
+
+### External PostgreSQL
+
+Use Compose 2.24.4 or newer and the external overlay when the database is
+provisioned separately. Changing only the URL in the default stack retains its
+bundled PostgreSQL dependency and local transport policy. The external overlay
+removes that dependency, excludes the bundled server from the active services,
+and keeps API, worker and publisher startup gated on successful migrations.
+It requires both an explicit database URL and a CA certificate file:
+
+```bash
+export CHESS_CRAWL_DATABASE_URL="postgresql://chess_crawl@database.example:5432/chess_crawl"
+export CHESS_CRAWL_DATABASE_CA_FILE="./data/dev-secrets/postgres_ca.pem"
+docker compose -f compose.yaml -f compose.external.yaml up --build --detach --wait --wait-timeout 120
+```
+
+Create the database and login role on that server first, and supply its password
+in the `postgres_password` secret selected by `CHESS_CRAWL_SECRETS_DIR`. Bootstrap
+preserves an existing valid password file; it does not configure the external
+server's role. Obtain the CA PEM from that server's operator, place it at the
+configured host path, and make the file readable by container UID `10001`
+(for example, mode `0444` inside the protected secrets directory). The overlay
+mounts it read-only at `/run/secrets/postgres_ca` in all four Python services.
+A missing or unreadable certificate blocks connection instead of disabling TLS.
+
+Keep using both Compose files for subsequent `up`, `stop`, `start`, `logs` and
+`down` commands. For example:
+
+```bash
+docker compose -f compose.yaml -f compose.external.yaml ps
+docker compose -f compose.yaml -f compose.external.yaml logs --tail 100 init
+```
+
+The application defaults to `CHESS_CRAWL_DATABASE_TRANSPORT=verified`, enforcing
+TLS for TCP connections with certificate-chain and hostname verification
+(`sslmode=verify-full`). Unix sockets remain local and do not use TLS.
+`CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE` supplies the CA file for source-run
+clients; external Compose sets it to the mounted certificate. Connection URL
+options cannot downgrade the enforced verified policy.
+
+The default bundled stack explicitly sets transport `local` and trusts the
+exact `postgres` hostname through `CHESS_CRAWL_DATABASE_TRUSTED_HOST`. This
+exception is for that Compose service. Source-run local mode otherwise accepts
+Unix sockets and loopback addresses. An external hostname does not become local
+merely because its URL was substituted; routing overrides such as alternate
+host addresses or service definitions cannot bypass this boundary. The external
+overlay sets transport `verified` and clears the bundled trust marker.
 
 Stop and restart the services without removing the archive:
 

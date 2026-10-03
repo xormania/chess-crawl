@@ -22,6 +22,15 @@ create a PostgreSQL server or database. Configure a password-free URL with
 `CHESS_CRAWL_DATABASE_URL` and exactly one password source:
 `CHESS_CRAWL_DATABASE_PASSWORD_FILE` or `CHESS_CRAWL_DATABASE_PASSWORD`.
 
+Source-run TCP clients default to verified TLS. For a remote server, set
+`CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE` to its trusted PEM CA file. For a
+local loopback TCP server without TLS, explicitly export
+`CHESS_CRAWL_DATABASE_TRANSPORT=local`. Unix sockets remain local without TLS.
+The bundled Compose services already
+have their private connection policy. See the
+[external PostgreSQL guide](backend.md#external-postgresql) for the external
+Compose overlay and CA mount.
+
 To select a different database for one command, place `--database-url` after
 the specific command:
 

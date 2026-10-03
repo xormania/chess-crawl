@@ -29,6 +29,13 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Changed
 
+- External PostgreSQL connections require certificate-chain and hostname
+  verification by default. A separate Compose overlay omits the bundled
+  database and mounts its operator-supplied CA certificate, retaining migration
+  startup gates. Local plaintext connections require an explicit confined
+  transport policy; changing the bundled URL alone cannot weaken remote TLS.
+- Database password-file read and decoding failures return sanitized archive
+  unavailability responses (503 with retry guidance) instead of internal errors.
 - PostgreSQL 18 is now the only supported database. Compose provisions it with
   persistent storage, password-file secrets, readiness checks, and migrations
   before application startup. CLI and services use `CHESS_CRAWL_DATABASE_URL`

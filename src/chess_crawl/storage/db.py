@@ -9,6 +9,7 @@ import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import wraps
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Concatenate, Literal, ParamSpec, TypeVar, overload
 
@@ -104,10 +105,65 @@ def _password() -> str | None:
     if value is not None and password_file:
         raise ValueError("Set either CHESS_CRAWL_DATABASE_PASSWORD or CHESS_CRAWL_DATABASE_PASSWORD_FILE")
     if password_file:
-        value = Path(password_file).read_text(encoding="utf-8").rstrip("\r\n")
+        try:
+            value = Path(password_file).read_text(encoding="utf-8").rstrip("\r\n")
+        except (OSError, UnicodeError):
+            raise psycopg.OperationalError("The PostgreSQL password file could not be read") from None
         if not value:
             raise ValueError("The PostgreSQL password file is empty")
     return value
+
+
+def _transport_options(settings: Mapping[str, str | int | None]) -> dict[str, str]:
+    """Require verified TLS unless an operator selects a confined local route."""
+    transport = os.getenv("CHESS_CRAWL_DATABASE_TRANSPORT", "verified")
+    if transport not in {"verified", "local"}:
+        raise ValueError("CHESS_CRAWL_DATABASE_TRANSPORT must be verified or local")
+    options: dict[str, str] = {}
+    if transport == "verified":
+        # Nonempty keyword arguments override URL, service-file and environment
+        # options. GSS otherwise takes precedence over TLS in libpq.
+        options.update(sslmode="verify-full", gssencmode="disable")
+    else:
+        if settings.get("service") or os.getenv("PGSERVICE"):
+            raise ValueError("Local PostgreSQL transport cannot use a libpq service")
+        host = str(settings.get("host") or os.getenv("PGHOST") or "")
+        address = str(settings.get("hostaddr") or os.getenv("PGHOSTADDR") or "")
+        if "," in host or "," in address:
+            raise ValueError("Local PostgreSQL transport requires a single local host")
+        trusted = os.getenv("CHESS_CRAWL_DATABASE_TRUSTED_HOST", "")
+        if address:
+            allowed = _is_loopback(address)
+        else:
+            allowed = (
+                not host or host.startswith(("/", "@")) or _is_loopback(host)
+                or host.lower() == "localhost" or bool(trusted and host == trusted)
+            )
+        if not allowed:
+            raise ValueError("External PostgreSQL requires verified transport")
+        if host:
+            options["host"] = host
+        if address:
+            options["hostaddr"] = address
+        elif host.lower() == "localhost":
+            # Do not let DNS turn the loopback exception into a remote route.
+            options["hostaddr"] = "127.0.0.1"
+        elif not host and os.name == "nt":
+            # Native Windows defaults to localhost rather than a Unix socket.
+            options["hostaddr"] = "127.0.0.1"
+    root_cert = os.getenv("CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE")
+    if root_cert:
+        options["sslrootcert"] = root_cert
+    return options
+
+
+def _is_loopback(value: str) -> bool:
+    try:
+        address = ip_address(value)
+    except ValueError:
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return bool(address.is_loopback or (mapped is not None and mapped.is_loopback))
 
 
 def connect(target: str, *, mode: AccessMode = "rwc") -> Connection:
@@ -117,6 +173,7 @@ def connect(target: str, *, mode: AccessMode = "rwc") -> Connection:
     conninfo = database_url(target)
     password = _password()
     kwargs: dict[str, Any] = {"autocommit": True, "row_factory": _row_factory, "connect_timeout": 5}
+    kwargs.update(_transport_options(conninfo_to_dict(conninfo)))
     if password is not None:
         if "password" in conninfo_to_dict(conninfo):
             raise ValueError("Configure the PostgreSQL password in either the URL or a password setting")

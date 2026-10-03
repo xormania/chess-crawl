@@ -6,10 +6,12 @@ from chess_crawl.storage.db import require_row
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
+from chess_crawl import application
 from chess_crawl.api import create_app
 from chess_crawl.application import Limits
 from chess_crawl.jobs import state
@@ -239,3 +241,60 @@ def test_database_failure_diagnostics_never_expose_connection_secrets(monkeypatc
             assert response.status_code == 503
             assert secret not in response.text
             assert target not in response.text
+
+
+@pytest.mark.parametrize("failure", ["missing", "directory", "permission", "invalid_utf8"])
+def test_database_password_read_failure_returns_unavailable_after_authentication(
+    tmp_path: Path, monkeypatch, caplog, failure: str,
+) -> None:
+    secret = "database-secret-for-review"
+    password_path = tmp_path / "private-db-password-location"
+    if failure == "directory":
+        password_path.mkdir()
+    elif failure == "invalid_utf8":
+        password_path.write_bytes(secret.encode("utf-8") + b"\xff")
+    elif failure == "permission":
+        password_path.write_text(secret)
+        original = Path.read_text
+
+        def denied(path, *args, **kwargs):
+            if path == password_path:
+                raise PermissionError(f"Cannot read {password_path}: {secret}")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", denied)
+    monkeypatch.setenv("CHESS_CRAWL_DATABASE_PASSWORD_FILE", str(password_path))
+    target = "postgresql://test@127.0.0.1:1/unavailable"
+    requests: tuple[tuple[str, str, dict[str, Any]], ...] = (
+        ("GET", "/health/ready", {}),
+        ("GET", "/v1/summary", {}),
+        ("POST", "/v1/imports", {"json": IMPORT, "headers": {"Idempotency-Key": "credential-read"}}),
+    )
+    with TestClient(create_app(target, TOKEN), raise_server_exceptions=False) as client:
+        for method, path, kwargs in requests:
+            unauthorized = client.request(method, path, **kwargs)
+            assert unauthorized.status_code == 401
+            headers = {**AUTH, **kwargs.get("headers", {})}
+            response = client.request(method, path, **{**kwargs, "headers": headers})
+            assert response.status_code == 503
+            assert response.json() == {"error": {"code": "archive_unavailable", "message": "The archive is unavailable"}}
+            assert response.headers["Retry-After"] == "5"
+            assert secret not in response.text
+            assert str(password_path) not in response.text
+            assert target not in response.text
+    assert secret not in caplog.text
+    assert str(password_path) not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_unrelated_filesystem_failure_remains_an_internal_error(monkeypatch) -> None:
+    def failed_summary(*args, **kwargs):
+        raise OSError("An unrelated application file could not be read")
+
+    monkeypatch.setattr(application, "list_providers", failed_summary)
+    target = "postgresql://test@127.0.0.1:1/unavailable"
+    with TestClient(create_app(target, TOKEN), headers=AUTH, raise_server_exceptions=False) as client:
+        response = client.get("/v1/providers")
+    assert response.status_code == 500
+    assert response.json() == {"error": {"code": "internal_error", "message": "The request could not be completed"}}
+    assert "Retry-After" not in response.headers

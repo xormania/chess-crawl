@@ -72,6 +72,10 @@ Use `docker compose exec api chess-crawl <command>` to run CLI commands against
 the same database. PostgreSQL is available only inside the Compose network by
 default; its port is not published on the host.
 
+For a separately managed database, use the
+[external PostgreSQL overlay](docs/backend.md#external-postgresql). It omits the
+bundled server and mounts a CA certificate for verified TLS.
+
 ### Run from source
 
 Requires Python 3.11+, `uv`, and an accessible PostgreSQL 18 database created
@@ -81,11 +85,15 @@ For a separately provisioned server, export its connection settings:
 ```bash
 export CHESS_CRAWL_DATABASE_URL="postgresql://chess_crawl@localhost:5432/chess_crawl"
 export CHESS_CRAWL_DATABASE_PASSWORD_FILE="/path/to/database-password"
+export CHESS_CRAWL_DATABASE_TRANSPORT="local" # This example uses loopback.
 uv sync --locked
 uv run chess-crawl init
 uv run chess-crawl provider list
 uv run chess-crawl report summary
 ```
+
+For a remote server, keep the default `verified` transport and supply its trusted
+PEM CA using `CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE`.
 
 These commands initialize and inspect the selected PostgreSQL database without
 contacting a chess provider. The database must already exist; `init` applies the
@@ -136,6 +144,8 @@ are retained even when only part of that response fits the run's bounds.
 | `CHESS_CRAWL_DATABASE_URL` | Password-free PostgreSQL connection URL; Compose supplies its private server by default. |
 | `CHESS_CRAWL_DATABASE_PASSWORD_FILE` | Database password file for source-run commands; Compose mounts its generated secret. |
 | `CHESS_CRAWL_DATABASE_PASSWORD` | Alternative database password; configure only one password source. |
+| `CHESS_CRAWL_DATABASE_TRANSPORT` | `verified` by default; `local` explicitly permits Unix sockets or loopback connections. Bundled Compose additionally trusts its exact `postgres` hostname. |
+| `CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE` | PEM CA file for verified source-run connections; external Compose mounts it from `CHESS_CRAWL_DATABASE_CA_FILE`. |
 | `CHESS_CRAWL_CONTACT` | Contact included in the provider User-Agent; set before live acquisition. |
 | `CHESS_CRAWL_USER_AGENT` | Optional full User-Agent override for source-run clients. |
 | `CHESS_CRAWL_LICHESS_TOKEN` | Optional Lichess account token. |
