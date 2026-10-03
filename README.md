@@ -19,9 +19,9 @@ usernames on different providers do not imply the same person.
 - Submit idempotent jobs through an authenticated JSON API and observe committed
   state changes through private Mercure events.
 
-Collection uses public provider APIs and one serial acquisition executor per
-archive. The project does not scrape pages, infer identities across providers,
-or assign misconduct labels.
+Cheating detection and analysis are intended project goals. The current
+implementation provides data collection and archive infrastructure, using
+provider APIs and one serial acquisition executor per archive.
 
 ## Choose how to run it
 
@@ -139,13 +139,8 @@ request ceilings.
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, architecture ownership,
-validation, and branch workflow. [Pull request guidelines](docs/pull-requests.md)
-require evidence for both the problem and the proposed solution.
-
-Update [CHANGELOG.md](CHANGELOG.md) for changes beyond CI and tests, including
-documentation changes. Keep the changelog entry focused on the resulting
-behavior or contributor-facing change.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution
+guidance, and [PROJECT.md](PROJECT.md) for the top-level directory organization.
 
 ## License
 

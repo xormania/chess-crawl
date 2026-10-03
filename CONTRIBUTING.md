@@ -1,11 +1,7 @@
 # Contributing to chess-crawl
 
-Start with the [README](README.md) for what the application does, the
-[CLI guide](docs/cli.md) for archive operations, and the
-[backend guide](docs/backend.md) for the API, worker, Compose, and Mercure
-contracts. The [PR guidelines](docs/pull-requests.md) define the required
-problem evidence, explanation of the change, proof of the result, and changelog
-policy. Automated contributors must also follow [AGENTS.md](AGENTS.md).
+Start with the [README](README.md) for the project overview and
+[PROJECT.md](PROJECT.md) for the top-level directory organization.
 
 ## Development setup
 
@@ -33,41 +29,15 @@ The development group includes the dependencies needed by the offline API
 tests. The API extra also installs the server runtime. CLI commands do not
 automatically load `.env`; export settings as described in the guides.
 
-## Keep implementation ownership clear
+## Shared implementation
 
-All paths below are relative to `src/chess_crawl/`.
+Database connections and transactions are consolidated in
+`src/chess_crawl/storage/db.py`; durable job and crawl-run state is managed in
+`src/chess_crawl/jobs/state.py`. Report and export reads use
+`src/chess_crawl/storage/queries.py`. Extend these shared implementations when
+working in those areas.
 
-| Area | Owner and responsibility |
-| --- | --- |
-| CLI and HTTP adapters | `cli.py` and `api/` translate input/output and call shared application services. |
-| Shared operations | `application/` validates submissions, applies bounds and idempotency, and returns read snapshots. |
-| SQLite access | `storage/db.py` owns connections, read/write access, transactions, and savepoints. |
-| Archive storage | `storage/` owns SQL for raw payloads, normalized records, provenance, acquisition, and events. `storage/queries.py` supplies report/export reads. |
-| Durable job/run state | `jobs/state.py` owns creation, claims, transitions, checkpoints, recovery, and counters. |
-| Acquisition execution | `jobs/runner.py` executes jobs; `jobs/discovery.py` applies crawl bounds; `jobs/worker.py` manages the serial worker. |
-| Provider behavior | `providers/` contains provider-specific endpoints, parsing, capabilities, and request policies. |
-| Event delivery | `events/` publishes committed outbox events to Mercure. |
-
-Use `open_database(path)` for read-only access and
-`open_database(path, writable=True)` for writes. Use the shared `transaction`
-context manager and `atomic` decorator; nested mutations use savepoints. Keep
-SQL inside `storage/` or `jobs/state.py`, and keep network requests outside
-database transactions.
-
-Preserve raw responses and fetch logs before normalization. Keep users and
-games provider-scoped, and keep acquisition bounded and serial. Use documented
-public APIs; respect provider cooldowns. Account-status data remains a neutral
-provider observation, not an accusation. Do not infer that matching usernames
-across providers identify the same person.
-
-## Validate the reason for the change
-
-Choose a check that directly exercises the problem or requested capability.
-For a bug fix, show the failing behavior before the fix and the corrected
-behavior afterward when reproducible. For a feature, demonstrate the requested
-acceptance behavior. For documentation, verify the changed commands, links,
-and claims against the implementation. Record commands, results, and any
-limits in the PR; passing unrelated tests is not proof of the stated fix.
+## Validate changes
 
 Run these checks for code changes:
 
@@ -99,19 +69,111 @@ which were skipped. Follow the [backend smoke-check instructions](docs/backend.m
 for container, worker, or event integration changes; the smoke check writes
 synthetic data and belongs on a disposable archive.
 
-## Submit a pull request
+## Branches and pull requests
 
-Work branches target `dev`. `master` receives promotion PRs from `dev`.
-Keep changes focused; if work is split into internal PRs, integrate it before
-presenting the final draft PR into `dev`. The maintainer decides when delivery
-and promotion PRs are ready to merge. Do not push directly to `dev` or `master`,
-or rewrite published history.
+Work branches target `dev`. Promotion PRs use this repository's `dev` branch
+as their source and `master` as their target when the maintainer requests a
+promotion. If work is split into internal PRs, integrate it before presenting
+the final draft PR into `dev`. Leave delivery and promotion PRs unmerged until
+the maintainer requests the merge. Publish through work branches rather than
+pushing directly to `dev` or `master`.
 
-Use the [PR template](.github/pull_request_template.md) and follow the
-[PR guidelines](docs/pull-requests.md). Every PR must explain why it is needed,
-what it changes, and how the evidence demonstrates that the change addresses
-the reason. Update [CHANGELOG.md](CHANGELOG.md) unless the entire PR is confined
-to CI and/or tests. Documentation changes and mixed PRs require an entry.
+Use the [PR template](.github/pull_request_template.md) to explain the reason,
+the change, and the evidence described below.
+
+## Why is this PR needed?
+
+Describe the concrete problem, missing capability, or documentation gap and
+who or what it affects. State the desired behavior. Support the reason with
+reviewable evidence: a minimal reproduction, failing test output, an issue or
+requirement, a measured result, a log excerpt, or a precise source/document
+reference. Identify the baseline commit or version when behavior depends on it.
+
+A feature request can establish a need without pretending an existing feature
+is broken. A cleanup should identify the duplication, inconsistency, or
+maintenance cost it removes. A documentation PR should identify the inaccurate
+or missing guidance. An issue link needs a short explanation of the relevant
+claim; it is not a substitute for one.
+
+## What does the PR change?
+
+Explain the mechanism and resulting behavior in terms a reviewer can compare
+with the problem. Describe affected interfaces, configuration, storage, or
+operator steps when applicable. Call out migrations, compatibility changes,
+and material limitations. Keep unrelated cleanup in a separate PR.
+
+## What proves it addresses the reason?
+
+Tie each material claim to a result that exercises it. Include the commands or
+reproduction steps, relevant output, and links to CI runs or artifacts where
+available. Identify the tested revision and distinguish local checks from CI.
+Summarize long logs and link to the complete evidence; redact secrets.
+
+| Change | Evidence of the need | Evidence of the result |
+| --- | --- | --- |
+| Bug fix | Failing regression or reproducible incorrect behavior on the baseline. | The same scenario passes with the fix; relevant regression checks pass. |
+| Feature | Requested capability and explicit acceptance conditions. | An example, integration check, or test demonstrates those conditions. |
+| Refactor | Precise examples of duplication, inconsistent ownership, or another concrete maintenance problem. | Inspection shows the new ownership; relevant behavior checks demonstrate preservation. |
+| Documentation | Missing/inaccurate instructions with source references. | Commands, links, and changed claims checked against the implementation. |
+| CI or tests | A gap, failure, unreliable check, or missing coverage. | A representative run or scenario shows that the changed check detects or resolves it. |
+| Promotion | Included work and its readiness for `master`. | Linked delivery PR evidence and checks of the promotion merge result. |
+
+Before/after results are preferred where the baseline can be reproduced.
+When it cannot, say why and provide the strongest available evidence without
+claiming an unobserved result. State untested areas or environment limitations.
+Do not claim a performance gain without measurements or a fixed failure based
+only on an unrelated green suite. Reviewers must be able to trace the chain
+from reason, through change, to demonstrated result.
+
+## Changelog requirement
+
+Every PR that changes anything beyond CI and/or tests must add or update a
+substantive entry in [CHANGELOG.md](CHANGELOG.md). This includes application
+code, dependency/packaging changes, configuration, deployment, documentation,
+and contribution policy. A PR mixing those changes with CI/tests still needs
+an entry. CI/test-only PRs may omit the entry, but must explain the exemption
+in the PR's Changelog section.
+
+Add the entry under `Unreleased`, using `Added`, `Changed`, `Fixed`, `Removed`,
+or `Security` as appropriate. Describe the observable behavior or contributor
+impact, not a list of commits. Include compatibility or migration instructions
+when needed, and link a PR or issue when available. Do not invent release
+versions or dates. When a release is actually prepared, move its entries under
+the chosen version and date and retain an `Unreleased` section for later work.
+
+The `Changelog policy` CI check classifies a PR as CI/test-only only when
+**every changed path** is in one of these locations:
+
+- `tests/`
+- `.github/workflows/`
+- `.github/actions/`
+- `scripts/compose_smoke.py`
+
+Both the old and new path must qualify for a rename. Shared files such as
+`pyproject.toml` and `uv.lock` are not exempt just because a change helps tests.
+New CI/test support paths need a reviewed policy/check update or a changelog
+entry. A removed changelog or a rename without added content does not satisfy
+the check. The check verifies the presence of a content update; reviewers
+verify that the entry accurately describes the change.
+
+A `dev` to `master` promotion carries the changelog entries already accumulated
+on `dev`; do not add a duplicate entry merely to promote them. Review the full
+PR diff against its target. If the promotion has no changes outside CI/tests,
+the same exemption applies.
+
+## Review and merge
+
+Before accepting a PR, verify that the reason is supported, the change follows
+from that reason, the result is demonstrated, relevant checks pass, and the
+changelog requirement is satisfied. Evidence quality is a review requirement;
+a template heading or green CI badge alone cannot establish it.
+
+The changelog workflow reports its result on PRs. Making a failure block
+merging requires selecting `Changelog policy` as a required status check in
+the applicable GitHub branch rules; adding the workflow does not change those
+settings. Resolve review findings with supporting evidence.
+
+## Commit content
 
 Keep credentials, local archives, provider dumps, generated exports, and
 temporary validation output out of commits. Use concise, project-focused

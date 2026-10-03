@@ -1,8 +1,7 @@
 # Changelog
 
 Notable changes are recorded here. Entries under `Unreleased` have not been
-assigned a release version. See the [PR guidelines](docs/pull-requests.md#changelog-requirement)
-for the required update policy; CI/test-only PRs are exempt.
+assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requirement) for the update policy.
 
 ## Unreleased
 
@@ -26,6 +25,10 @@ for the required update policy; CI/test-only PRs are exempt.
 
 ### Changed
 
+- Reduced agent guidance to links to README, CONTRIBUTING, and PROJECT;
+  consolidated branch, PR, and changelog rules in CONTRIBUTING and added a
+  basic top-level directory guide. Removed inherited product restrictions
+  and clarified cheating detection and analysis as intended project goals.
 - Consolidated SQLite connections and transactions, durable job/run state,
   and report/export queries under explicit shared owners.
   ([#5](https://github.com/xormania/chess-crawl/pull/5))
@@ -42,6 +45,10 @@ for the required update policy; CI/test-only PRs are exempt.
   ([#8](https://github.com/xormania/chess-crawl/pull/8))
 - Claimed job snapshots include the persisted revision after state-change
   triggers, matching API and event reads. ([#10](https://github.com/xormania/chess-crawl/pull/10))
+
+### Removed
+
+- Obsolete `proj/` planning and audit records.
 
 ## 0.1.0 — 2026-07-03
 
