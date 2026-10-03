@@ -25,20 +25,46 @@ FETCHES = [
     ),
 ]
 
+CRAWL = [
+    "crawl", "opponents", "lichess", "test", "--depth", "1", "--max-users", "3",
+    "--max-games", "4", "--max-jobs", "5", "--since", "2024-01", "--until", "2024-02",
+]
+
 
 @pytest.mark.parametrize(("arguments", "service", "provider"), FETCHES)
-def test_direct_fetch_refuses_active_executor_before_provider_acquisition(
+def test_direct_fetch_refuses_active_executor_before_database_initialization(
     archive_path: Path, monkeypatch, capsys, arguments: list[str], service: str, provider: str,
 ) -> None:
     def forbidden(*args, **kwargs):
         pytest.fail("A direct fetch must not run beside an active archive executor")
 
     monkeypatch.setattr(cli, service, forbidden)
+    monkeypatch.setattr(cli, "open_database", forbidden)
     with archive_lock(archive_path):
         assert cli.run([*arguments, "--db", str(archive_path)]) == 1
     error = capsys.readouterr().err
     assert "active worker" in error
     assert "Traceback" not in error
+
+
+@pytest.mark.parametrize(("arguments", "service", "provider"), FETCHES)
+def test_direct_fetch_keeps_isolated_memory_database_support(
+    monkeypatch, arguments: list[str], service: str, provider: str,
+) -> None:
+    calls: list[bool] = []
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("An isolated in-memory database needs no archive file lock")
+
+    def fetch(conn, *args, **kwargs):
+        assert state.provider_ready_at(conn, provider) is None
+        calls.append(True)
+        return IngestResult(provider, "fixture", 200, None, (), "ok")
+
+    monkeypatch.setattr(cli, "archive_lock", forbidden)
+    monkeypatch.setattr(cli, service, fetch)
+    assert cli.run([*arguments, "--db", ":memory:"]) == 0
+    assert calls == [True]
 
 
 @pytest.mark.parametrize(("arguments", "service", "provider"), FETCHES)
@@ -76,13 +102,41 @@ def test_direct_fetch_releases_lock_after_provider_failure(archive_path: Path, m
         pass
 
 
-def test_resume_cli_reports_busy_without_reclaiming_a_live_job(archive_path: Path, capsys) -> None:
+@pytest.mark.parametrize("arguments", [["jobs", "resume"], CRAWL], ids=["resume", "synchronous-crawl"])
+def test_execution_cli_reports_busy_before_opening_database(
+    archive_path: Path, monkeypatch, capsys, arguments: list[str],
+) -> None:
     with open_database(archive_path, writable=True) as conn:
         job_id = state.enqueue_job(conn, provider="lichess", kind="fetch_user_profile", target="test").job_id
         state.claim_next_job(conn)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A losing executor must not open or initialize SQLite")
+
+    monkeypatch.setattr(cli, "open_database", forbidden)
     with archive_lock(archive_path):
-        assert cli.run(["jobs", "resume", "--db", str(archive_path)]) == 1
+        assert cli.run([*arguments, "--db", str(archive_path)]) == 1
     assert "active worker" in capsys.readouterr().err
     with open_database(archive_path) as conn:
         job = state.get_job(conn, job_id)
         assert job is not None and job.state == "in_progress" and job.attempts == 1
+
+
+def test_enqueue_only_crawl_is_allowed_while_executor_owns_archive(archive_path: Path) -> None:
+    with archive_lock(archive_path):
+        assert cli.run([*CRAWL, "--enqueue-only", "--db", str(archive_path)]) == 0
+    with open_database(archive_path) as conn:
+        assert len(state.crawl_runs(conn)) == 1
+
+
+@pytest.mark.parametrize("arguments", [["jobs", "resume"], CRAWL], ids=["resume", "synchronous-crawl"])
+@pytest.mark.parametrize("memory", [False, True], ids=["file", "memory"])
+def test_execution_cli_reuses_acquired_lease(
+    archive_path: Path, monkeypatch, arguments: list[str], memory: bool,
+) -> None:
+    from chess_crawl.jobs.runner import ExecutionOutcome, JobRunner
+
+    monkeypatch.setattr(JobRunner, "_execute", lambda self, job: ExecutionOutcome("done", "fixture"))
+    assert cli.run([*arguments, "--db", ":memory:" if memory else str(archive_path)]) == 0
+    with archive_lock(archive_path):
+        pass

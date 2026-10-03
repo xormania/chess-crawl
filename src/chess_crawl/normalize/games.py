@@ -46,7 +46,7 @@ def normalize_games_payload(
     """Normalize a bounded selection, retaining the full raw payload for later work.
 
     With a run, the allowance counts only new run/game associations. Existing
-    members are skipped, making replay safe after an interrupted job checkpoint.
+    members can be refreshed by a changed parser without consuming capacity.
     """
     if max_games is not None and max_games < 0:
         raise ValueError("max_games must be nonnegative")
@@ -67,7 +67,16 @@ def normalize_games_payload(
             if crawl_run_id is not None else None
         )
         remaining = bounds.remaining if bounds is not None else max_games
-        processed = payload_game_ids(conn, raw_payload_id)
+        # Provenance proves that a row was processed, not which parser produced
+        # it. Reuse IDs only when the complete payload is current. A partial
+        # upgrade leaves the old version in place until every supported game
+        # has been processed by this parser; otherwise stale rows could be
+        # silently certified by a later bounded replay.
+        current_parser = (
+            raw.parser_version == PARSER_VERSION
+            and raw.normalization_status in {"parsed", "skipped"}
+        )
+        processed = payload_game_ids(conn, raw_payload_id) if current_parser else set()
         game_ids: list[int] = []
         complete = True
         supported = False
@@ -82,13 +91,13 @@ def normalize_games_payload(
             if bounds is not None and not bounds.includes(game.end_time):
                 complete = complete and existing_id in processed
                 continue
-            if existing_id in acquired:
+            already_acquired = existing_id in acquired
+            if already_acquired and existing_id in processed:
+                continue
+            if not already_acquired and remaining == 0:
                 complete = complete and existing_id in processed
                 continue
-            if remaining == 0:
-                complete = complete and existing_id in processed
-                continue
-            if existing_id is not None and existing_id in processed:
+            if crawl_run_id is not None and existing_id is not None and existing_id in processed:
                 game_id = existing_id
             else:
                 game_id = _normalize_game(
@@ -101,6 +110,8 @@ def normalize_games_payload(
                     fetched_at=raw.fetched_at,
                 )
                 processed.add(game_id)
+            if already_acquired:
+                continue
             if crawl_run_id is not None:
                 associate_run_game(conn, crawl_run_id, game_id)
                 acquired.add(game_id)
