@@ -29,11 +29,14 @@ Agents may:
 * Run local commands and tests.
 * Create local git commits.
 
+When the user requests delivery through pull requests, agents may also push
+work branches, open and merge internal work PRs, and open a final draft PR into
+`dev`.
+
 Agents may not:
 
-* Push to any remote.
-* Open pull requests.
-* Merge branches.
+* Push directly to `dev` or `master`.
+* Merge a delivery PR into `dev` or `master` without explicit user instruction.
 * Change remotes.
 * Change Git configuration.
 * Rewrite published history.
@@ -66,9 +69,11 @@ test: cover raw payload idempotency
 docs: add bounded crawl notes
 ```
 
-Do not push.
-
-Do not open pull requests.
+Every PR presented to the user for merging must target `dev`. Work may be split
+into internal PRs, but the agent owns their integration and merges them before
+handing over a consolidated draft PR into `dev`. Do not ask the user to merge
+or retarget internal PRs. Leave the final delivery PR unmerged unless the user
+explicitly requests its merge.
 
 ## Attribution Rules
 
@@ -253,4 +258,5 @@ git commit -m "<type>: <summary>"
 git status --short --branch
 ```
 
-Do not push.
+Publish work branches only when PR delivery is authorized. Never push directly
+to `dev` or `master`.
