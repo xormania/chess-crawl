@@ -45,6 +45,25 @@ def test_job_and_run_snapshots_match_their_latest_event_revisions(initialized_co
     assert job["state"] == run["status"] == "done"
 
 
+def test_claimed_job_matches_persisted_snapshot_and_event_revision(initialized_conn) -> None:
+    conn = initialized_conn
+    _, job_id = create_run(conn)
+
+    claimed = state.claim_next_job(conn, now=100)
+    assert claimed is not None
+    snapshot = application.get_job(conn, job_id)
+    event = conn.execute(
+        "SELECT revision, payload FROM event_outbox WHERE event_type = 'job.updated' AND resource_id = ? ORDER BY id DESC LIMIT 1",
+        (job_id,),
+    ).fetchone()
+
+    assert claimed == state.get_job(conn, job_id)
+    assert claimed.revision == snapshot["revision"] == event["revision"] == 2
+    assert claimed.state == snapshot["state"] == json.loads(event["payload"])["status"] == "in_progress"
+    assert claimed.attempts == snapshot["attempts"] == 1
+    assert state.claim_next_job(conn, now=100) is None
+
+
 def test_archive_identity_disambiguates_matching_local_resource_ids() -> None:
     snapshots = []
     for _ in range(2):

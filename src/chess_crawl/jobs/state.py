@@ -162,11 +162,13 @@ def claim_next_job(
             ORDER BY priority ASC, depth ASC, enqueued_at ASC, id ASC
             LIMIT 1
          )
-         RETURNING *
+         RETURNING id
         """,
         (timestamp, timestamp, timestamp, crawl_run_id, crawl_run_id),
     ).fetchone()
-    return None if row is None else row_to_job(row)
+    # RETURNING precedes AFTER triggers. Read their persisted revision while
+    # this atomic operation still owns the transaction and its write lock.
+    return None if row is None else get_job(conn, int(row["id"]))
 
 
 @atomic
