@@ -71,12 +71,13 @@ result against its base parent, including both sides of renames:
 | Changed files | Offline checks | Compose smoke |
 | --- | --- | --- |
 | Only Markdown under `docs/`, `AGENTS.md`, `PROJECT.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, or the PR template | Omitted | Omitted |
-| Only `tests/` and the documentation above | Run | Omitted |
-| Application, dependencies, deployment, CI, `README.md`, `LICENSE`, or any unrecognized path | Run | Run |
+| Only tests, the changelog workflow/checker, and the documentation above | Run | Omitted |
+| Only `Dockerfile`, `compose.yaml`, `.dockerignore`, `.env.example`, `docker/mercure-entrypoint.sh`, or the CI Compose overlay | Omitted | Run |
+| Application, dependencies, Python deployment helpers, shared CI, `README.md`, `LICENSE`, or any unrecognized path | Run | Run |
 | Any promotion to `master`, or an empty merge diff | Run | Run |
 
-Required checks retain their names and report their scope even when no
-application work is needed. A scope-classification error fails those required
+Mixed changes take the union of the applicable checks. Required checks retain
+their names and report their scope even when no application work is needed. A scope-classification error fails those required
 checks. `README.md` and `LICENSE` are packaging inputs, so they need full checks.
 Tests remain the full offline suite; CI does not guess which individual tests
 are affected by a source edit.
@@ -84,13 +85,50 @@ are affected by a source edit.
 CI revalidates PR edits as well as new commits so retargeting cannot reuse an
 obsolete promotion check. Title and description edits also rerun scoped checks;
 skipping the required jobs on those events could hide a previous failure.
-Dependency and Mypy caches are separated by Python version; Mypy still executes
-and validates its incremental data. These caches primarily help subsequent
-commits and reruns within a PR because GitHub isolates PR cache entries. Docker
-keeps dependency layers separate from application sources and builds the shared
-Compose image once. Remote Docker cache export is deliberately omitted: measured
-setup and transfer overhead exceeded the benefit for this small image. Caches
-accelerate work; they never stand in for a successful check.
+Mypy caches are separated by Python version; Mypy still executes and validates
+its incremental data. These caches primarily help subsequent commits and reruns
+within a PR because GitHub isolates PR cache entries. uv's remote dependency
+cache is disabled: its pruned cache retained metadata while the prebuilt wheels
+were downloaded again, with no measured install benefit. The pinned, locked
+install still runs each time.
+
+Docker keeps dependency layers separate from application sources and builds the
+shared Compose image once, while pulling Mercure concurrently. CI's Compose
+overlay checks startup readiness every second, preserving the normal health
+interval, probes, failure budgets and service dependencies. The smoke job
+compares the complete rendered base/CI configurations and rejects any other
+change introduced by that overlay. Remote Docker cache export is deliberately
+omitted: measured setup and transfer overhead exceeded the benefit for this
+small image. Caches accelerate work; they never stand in for a successful check.
+
+### Behavior and performance evidence
+
+Normal CI exercises real temporary Git merges for scope and changelog policy,
+executes the workflow's shell guards (including both failures in concurrent
+build/pull), and tests the Compose overlay contract. It also retains the full
+application suite and real API/worker/private-Mercure smoke whenever selected.
+
+Each selected job writes stage timings to its job summary and uploads a
+`ci-performance-*` artifact retained for 14 days. JSON samples include the
+revision, run attempt, Python version, runner and check variant. Offline jobs
+also retain JUnit results and print the 15 slowest test durations. Failures keep
+the command's exit status and are recorded as failures, never faster successes.
+
+Use `.github/scripts/ci_performance.py` to repeat the same command into separate
+baseline/candidate directories, then compare their medians. For example:
+
+```bash
+python .github/scripts/ci_performance.py measure --label mypy --output-dir /tmp/ci-baseline -- uv run --no-sync mypy . .github/scripts
+python .github/scripts/ci_performance.py measure --label mypy --output-dir /tmp/ci-candidate -- uv run --no-sync mypy . .github/scripts
+python .github/scripts/ci_performance.py compare --baseline /tmp/ci-baseline --candidate /tmp/ci-candidate
+```
+
+Collect several samples with the same interpreter/runner and cache condition.
+Hosted wall times are informational by default because shared-runner variance
+is material. An explicit `--fail-on-regression` comparison can enforce a budget
+using both `--max-regression-percent` and `--min-regression-seconds`; keep generous
+limits and separate cold and warm measurements. Missing or incompatible samples
+must not be treated as proof of a speedup.
 
 A focused CLI workflow run and a coverage run are available when useful:
 
@@ -189,8 +227,9 @@ Both the old and new path must qualify for a rename. Shared files such as
 `pyproject.toml` and `uv.lock` are not exempt just because a change helps tests.
 New CI/test support paths need a reviewed policy/check update or a changelog
 entry. A removed changelog or a rename without added content does not satisfy
-the check. The check verifies the presence of a content update; reviewers
-verify that the entry accurately describes the change.
+the check. The check inspects the pinned PR merge and its base parent, without
+paginated or mutable GitHub file-list reads. It verifies the presence of a content update;
+reviewers verify that the entry accurately describes the change.
 
 A `dev` to `master` promotion carries the changelog entries already accumulated
 on `dev`; do not add a duplicate entry merely to promote them. Review the full

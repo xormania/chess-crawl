@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,24 @@ def _job(job_id: str) -> str:
     return re.split(r"\n  [\w-]+:\n", job, maxsplit=1)[0]
 
 
+def _step(job_id: str, step_name: str) -> str:
+    return _job(job_id).split(f"      - name: {step_name}\n", 1)[1].split(
+        "\n      - ", 1,
+    )[0]
+
+
+def _shell_script(step: str) -> str:
+    script_block = step.split("        run: |\n", 1)[1]
+    script_lines = []
+    for line in script_block.splitlines():
+        if line and not line.startswith("          "):
+            break
+        script_lines.append(line[10:])
+    script = "\n".join(script_lines)
+    assert script.strip()
+    return script
+
+
 def _run_guard(
     job_id: str,
     step_name: str,
@@ -29,8 +50,8 @@ def _run_guard(
     # Extract the existing scalar blocks, not a second implementation of the
     # policy. Resolving its environment bindings also catches workflow wiring
     # errors (such as comparing the base repository with itself).
-    step = _job(job_id).split(f"      - name: {step_name}\n", 1)[1]
-    environment, script_block = step.split("        run: |\n", 1)
+    step = _step(job_id, step_name)
+    environment = step.split("        run: |\n", 1)[0]
     env = os.environ.copy()
     for line in environment.splitlines():
         if not line.startswith("          "):
@@ -46,15 +67,8 @@ def _run_guard(
         env[name] = str(value)
     if summary is not None:
         env["GITHUB_STEP_SUMMARY"] = str(summary)
-    script_lines = []
-    for line in script_block.splitlines():
-        if line and not line.startswith("          "):
-            break
-        script_lines.append(line[10:])
-    script = "\n".join(script_lines)
-    assert script.strip()
     return subprocess.run(
-        ["bash", "--noprofile", "--norc", "-e", "-c", script],
+        ["bash", "--noprofile", "--norc", "-e", "-c", _shell_script(step)],
         env=env, capture_output=True, text=True, timeout=5,
     )
 
@@ -234,3 +248,104 @@ def test_required_checks_reject_unsuccessful_master_promotion(
         promotion_result=promotion_result,
     )
     assert result.returncode != 0, result.stdout + result.stderr
+
+
+def _compose_files() -> str:
+    header = _job("compose-smoke").split("    steps:\n", 1)[0]
+    values = re.findall(r"^      COMPOSE_FILE: (.+)$", header, flags=re.MULTILINE)
+    assert values == ["compose.yaml:.github/compose.ci.yaml"]
+    return values[0]
+
+
+def test_compose_overlay_applies_to_the_whole_job() -> None:
+    assert _compose_files() == "compose.yaml:.github/compose.ci.yaml"
+    # A step override could make validation, startup or cleanup operate on a
+    # different stack than the measured build.
+    assert len(re.findall(r"^\s+COMPOSE_FILE:", _job("compose-smoke"), re.MULTILINE)) == 1
+    assert "COMPOSE_FILE=" not in _job("compose-smoke")
+
+
+@pytest.mark.parametrize(
+    ("build_status", "pull_status"),
+    [(0, 0), (7, 0), (0, 9), (7, 9)],
+    ids=["both-succeed", "build-fails", "pull-fails", "both-fail"],
+)
+def test_parallel_image_preparation_waits_for_both_and_preserves_failure(
+    build_status: int, pull_status: int, tmp_path: Path,
+) -> None:
+    fake_python = tmp_path / "python"
+    fake_python.write_text(f"#!{sys.executable}\n" + '''
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+directory = Path(os.environ["TEST_PARALLEL_DIR"])
+arguments = sys.argv[1:]
+assert arguments[:2] == [".github/scripts/ci_performance.py", "measure"]
+label = arguments[arguments.index("--label") + 1]
+commands = {
+    "image-build": ("build", ["docker", "compose", "build", "api"]),
+    "mercure-pull": ("pull", ["docker", "compose", "pull", "mercure"]),
+}
+role, expected = commands[label]
+command = arguments[arguments.index("--") + 1:]
+assert command == expected, command
+assert arguments[arguments.index("--output-dir") + 1] == os.environ["CI_PERFORMANCE_DIR"]
+record = {"command": command, "compose_files": os.environ.get("COMPOSE_FILE")}
+(directory / f"{role}-started.json").write_text(json.dumps(record))
+
+def wait_for(name):
+    deadline = time.monotonic() + 5
+    while not (directory / name).exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Timed out waiting for {name}")
+        time.sleep(0.01)
+
+# Serial execution cannot satisfy this handshake: both commands must start
+# before either completes.
+wait_for("pull-started.json" if role == "build" else "build-started.json")
+if role == "pull":
+    wait_for("release-pull")
+status = int(os.environ[f"TEST_{role.upper()}_STATUS"])
+(directory / f"{role}-finished.json").write_text(json.dumps({"status": status}))
+raise SystemExit(status)
+''')
+    fake_python.chmod(0o755)
+    environment = os.environ | {
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
+        "TEST_PARALLEL_DIR": str(tmp_path),
+        "TEST_BUILD_STATUS": str(build_status),
+        "TEST_PULL_STATUS": str(pull_status),
+        "CI_PERFORMANCE_DIR": str(tmp_path / "measurements"),
+        "COMPOSE_FILE": _compose_files(),
+    }
+    script = _shell_script(_step(
+        "compose-smoke", "Build application and pull Mercure concurrently",
+    ))
+    log = tmp_path / "shell.log"
+    with log.open("w") as output:
+        process = subprocess.Popen(
+            ["bash", "--noprofile", "--norc", "-e", "-c", script],
+            env=environment, stdout=output, stderr=subprocess.STDOUT, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not (tmp_path / "build-finished.json").exists():
+                assert process.poll() is None, log.read_text()
+                assert time.monotonic() < deadline, log.read_text()
+                time.sleep(0.01)
+            # Build has exited, including in its failure cases. The shell must
+            # remain waiting for the still-blocked pull. This is a bounded
+            # synchronization check, not a runner-speed performance assertion.
+            with pytest.raises(subprocess.TimeoutExpired):
+                process.wait(timeout=0.1)
+        finally:
+            (tmp_path / "release-pull").touch()
+            process.wait(timeout=5)
+    assert (process.returncode == 0) is (build_status == pull_status == 0), log.read_text()
+    for role, status in (("build", build_status), ("pull", pull_status)):
+        started = json.loads((tmp_path / f"{role}-started.json").read_text())
+        assert started["compose_files"] == "compose.yaml:.github/compose.ci.yaml"
+        assert json.loads((tmp_path / f"{role}-finished.json").read_text()) == {"status": status}

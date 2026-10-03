@@ -1,0 +1,13 @@
+# CI needs Docker Engine >=25 and Compose >=2.20.2 for start_interval.
+# Probe more often only during startup; retain the real readiness commands,
+# normal intervals, retry counts, and startup grace periods from compose.yaml.
+services:
+  api:
+    healthcheck:
+      start_interval: 1s
+  worker:
+    healthcheck:
+      start_interval: 1s
+  mercure:
+    healthcheck:
+      start_interval: 1s
