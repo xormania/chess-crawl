@@ -40,7 +40,7 @@ def _run_guard(
         assert expression.startswith("${{ ") and expression.endswith(" }}")
         value: Any = context
         for part in expression[4:-3].split("."):
-            # GitHub resolves a missing property, including an absent job
+            # GitHub resolves a missing property, including an absent step
             # output, to an empty string.
             value = value.get(part, "") if isinstance(value, dict) else ""
         env[name] = str(value)
@@ -80,8 +80,8 @@ def _ci_guard(
         outputs[selected_scope] = output
     return _run_guard(job_id, "Validate CI prerequisites", {
         "github": {"base_ref": base_ref},
+        "steps": {"scope": {"outcome": scope_result, "outputs": outputs}},
         "needs": {
-            "changes": {"result": scope_result, "outputs": outputs},
             "promotion-source": {"result": promotion_result},
         },
     }, summary)
@@ -118,7 +118,7 @@ def test_ci_revalidates_retargeted_pull_requests() -> None:
 
 
 @pytest.mark.parametrize("job_id", ["offline-checks", "compose-smoke"])
-def test_required_checks_run_prerequisite_guards_even_when_scope_is_unavailable(
+def test_required_checks_run_even_when_promotion_dependency_is_skipped(
     job_id: str,
 ) -> None:
     header = _job(job_id).split("    steps:\n", 1)[0]
@@ -130,9 +130,9 @@ def test_required_checks_run_prerequisite_guards_even_when_scope_is_unavailable(
     )
     assert {
         need.strip() for need in properties["needs"].strip().strip("[]").split(",")
-    } == {"promotion-source", "changes"}
-    # A scope condition at job level would skip the required check on a broken
-    # classifier; only the expensive steps may be scoped.
+    } == {"promotion-source"}
+    # Classify within the required jobs; a scope condition at job level could
+    # skip the check before its classifier runs.
     assert properties["if"].strip() == "${{ always() && !cancelled() }}"
     expected_names = {
         "offline-checks": "Offline checks (Python ${{ matrix.python-version }})",
@@ -144,6 +144,47 @@ def test_required_checks_run_prerequisite_guards_even_when_scope_is_unavailable(
         assert {version.strip().strip('\"') for version in versions.split(",")} == {
             "3.11", "3.13",
         }
+
+
+@pytest.mark.parametrize("job_id", ["offline-checks", "compose-smoke"])
+def test_required_checks_classify_before_scoping_expensive_steps(job_id: str) -> None:
+    steps = _job(job_id).split("    steps:\n", 1)[1].split("      - ")[1:]
+    properties = [
+        dict(
+            line.strip().split(":", 1)
+            for line in step.splitlines()
+            if line.startswith("name:") or (
+                line.startswith("        ") and not line.startswith("         ")
+                and not line.lstrip().startswith("#")
+            )
+        )
+        for step in steps
+    ]
+    assert [step["name"].strip() for step in properties[:3]] == [
+        "Checkout merge result and its parents",
+        "Determine affected checks",
+        "Validate CI prerequisites",
+    ]
+    checkout, classifier, guard = properties[:3]
+    assert checkout["uses"].strip().startswith("actions/checkout@")
+    assert "\n          fetch-depth: 2\n" in steps[0]
+    assert classifier["id"].strip() == "scope"
+    assert classifier["run"].strip() == (
+        'python .github/scripts/ci_scope.py --base-ref "$BASE_REF"'
+    )
+    assert "\n          BASE_REF: ${{ github.base_ref }}\n" in steps[1]
+    for prerequisite in (checkout, classifier, guard):
+        assert "if" not in prerequisite
+        assert "continue-on-error" not in prerequisite
+    scope = "offline" if job_id == "offline-checks" else "compose"
+    for step in properties[3:]:
+        condition = step["if"].strip()
+        # Every subsequent step must require this job's scope. Disjunctions
+        # could otherwise let expensive work run for a documentation-only PR.
+        assert "||" not in condition, step["name"]
+        assert f"steps.scope.outputs.{scope} == 'true'" in {
+            predicate.strip() for predicate in condition.split("&&")
+        }, step["name"]
 
 
 @pytest.mark.parametrize("job_id", ["offline-checks", "compose-smoke"])

@@ -85,8 +85,11 @@ CI revalidates PR edits as well as new commits so retargeting cannot reuse an
 obsolete promotion check. Title and description edits also rerun scoped checks;
 skipping the required jobs on those events could hide a previous failure.
 Dependency and Mypy caches are separated by Python version; Mypy still executes
-and validates its incremental data. Docker caches dependency layers separately
-from application sources and builds the shared Compose image once. Caches
+and validates its incremental data. These caches primarily help subsequent
+commits and reruns within a PR because GitHub isolates PR cache entries. Docker
+keeps dependency layers separate from application sources and builds the shared
+Compose image once. Remote Docker cache export is deliberately omitted: measured
+setup and transfer overhead exceeded the benefit for this small image. Caches
 accelerate work; they never stand in for a successful check.
 
 A focused CLI workflow run and a coverage run are available when useful:
