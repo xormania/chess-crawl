@@ -2,7 +2,8 @@
 
 ## Project
 
-`chess-crawl` is a local-first Python CLI for building a chess data archive.
+`chess-crawl` is a local-first Python chess archive with a CLI, an authenticated
+JSON API, a serial worker, and a durable Mercure event publisher.
 
 The project is intended to retrieve public chess data from providers such as Chess.com and Lichess, preserve retrieved raw data locally, and normalize selected records into SQLite for querying, reporting, and bounded discovery.
 
@@ -31,7 +32,8 @@ Agents may:
 
 When the user requests delivery through pull requests, agents may also push
 work branches, open and merge internal work PRs, and open a final draft PR into
-`dev`.
+`dev`. A user-requested promotion PR uses `dev` as its source and `master`
+as its target.
 
 Agents may not:
 
@@ -69,11 +71,31 @@ test: cover raw payload idempotency
 docs: add bounded crawl notes
 ```
 
-Every PR presented to the user for merging must target `dev`. Work may be split
+Every work PR presented to the user for merging must target `dev`. Work may be split
 into internal PRs, but the agent owns their integration and merges them before
 handing over a consolidated draft PR into `dev`. Do not ask the user to merge
 or retarget internal PRs. Leave the final delivery PR unmerged unless the user
 explicitly requests its merge.
+
+Promotion PRs are the exception: open `dev` to `master` only when the user
+requests promotion. Do not merge either kind of delivery PR without explicit
+user instruction.
+
+## Contribution and PR Requirements
+
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) and the canonical
+[PR guidelines](docs/pull-requests.md). Use the
+[PR template](.github/pull_request_template.md): explain why the PR is needed,
+support that reason with evidence, explain the change, and provide direct
+verification that it addresses the reason. A list of edits or unrelated passing
+tests is insufficient. Distinguish observed results from assumptions and state
+validation limits.
+
+Update [CHANGELOG.md](CHANGELOG.md) for every PR containing changes beyond
+CI/tests, including documentation and mixed changes. Only entirely CI/test
+PRs may omit an entry, with the exemption explained in the PR. Promotion PRs
+carry accumulated entries without duplicating them. The PR guide defines the
+exact CI/test path classification and the reviewer requirements.
 
 ## Attribution Rules
 
