@@ -64,10 +64,32 @@ isolated even when that option is present. To run intentionally selected live
 cases, use `uv run python -m pytest --run-live -m live` with appropriate provider
 credentials and acquisition bounds.
 
-CI runs the offline suite with `-m "not live and not slow"`. It revalidates
-PR edits as well as new commits so retargeting cannot reuse an obsolete
-promotion check; title and description edits also rerun CI. A focused CLI
-workflow run and a coverage run are available when useful:
+CI runs the offline suite with `-m "not live and not slow"` on Python 3.11 and
+3.13. Both versions run Mypy; Ruff runs once. It classifies the actual PR merge
+result against its base parent, including both sides of renames:
+
+| Changed files | Offline checks | Compose smoke |
+| --- | --- | --- |
+| Only Markdown under `docs/`, `AGENTS.md`, `PROJECT.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, or the PR template | Omitted | Omitted |
+| Only `tests/` and the documentation above | Run | Omitted |
+| Application, dependencies, deployment, CI, `README.md`, `LICENSE`, or any unrecognized path | Run | Run |
+| Any promotion to `master`, or an empty merge diff | Run | Run |
+
+Required checks retain their names and report their scope even when no
+application work is needed. A scope-classification error fails those required
+checks. `README.md` and `LICENSE` are packaging inputs, so they need full checks.
+Tests remain the full offline suite; CI does not guess which individual tests
+are affected by a source edit.
+
+CI revalidates PR edits as well as new commits so retargeting cannot reuse an
+obsolete promotion check. Title and description edits also rerun scoped checks;
+skipping the required jobs on those events could hide a previous failure.
+Dependency and Mypy caches are separated by Python version; Mypy still executes
+and validates its incremental data. Docker caches dependency layers separately
+from application sources and builds the shared Compose image once. Caches
+accelerate work; they never stand in for a successful check.
+
+A focused CLI workflow run and a coverage run are available when useful:
 
 ```bash
 uv run python -m pytest -q -m "workflow and not live and not slow"

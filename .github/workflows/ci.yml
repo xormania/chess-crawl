@@ -21,6 +21,7 @@ jobs:
     name: Require dev -> master
     if: github.base_ref == 'master'
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
       - name: Check promotion source
         env:
@@ -36,78 +37,165 @@ jobs:
             exit 1
           fi
 
+  changes:
+    name: Classify CI scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      offline: ${{ steps.scope.outputs.offline }}
+      compose: ${{ steps.scope.outputs.compose }}
+    steps:
+      - name: Checkout merge result and its parents
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Determine affected checks
+        id: scope
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python .github/scripts/ci_scope.py --base-ref "$BASE_REF"
+
   offline-checks:
     name: Offline checks (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    needs: promotion-source
-    # The promotion gate is intentionally skipped for development PRs.
-    if: ${{ always() && !cancelled() && (github.base_ref != 'master' || needs.promotion-source.result == 'success') }}
+    needs: [promotion-source, changes]
+    # Required jobs must fail if classification fails, rather than report a
+    # successful skip while the non-required classifier is red.
+    if: ${{ always() && !cancelled() }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.13"]
     steps:
+      - name: Validate CI prerequisites
+        env:
+          SCOPE_RESULT: ${{ needs.changes.result }}
+          RUN_CHECK: ${{ needs.changes.outputs.offline }}
+          BASE_REF: ${{ github.base_ref }}
+          PROMOTION_RESULT: ${{ needs.promotion-source.result }}
+        run: |
+          test "$SCOPE_RESULT" = success
+          test "$RUN_CHECK" = true || test "$RUN_CHECK" = false
+          test "$BASE_REF" != master || test "$PROMOTION_RESULT" = success
+          echo "Offline checks selected: $RUN_CHECK" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
+        if: needs.changes.outputs.offline == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: needs.changes.outputs.offline == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Set up uv
+        if: needs.changes.outputs.offline == 'true'
         uses: astral-sh/setup-uv@v5
         with:
+          version: "0.12.19"
           enable-cache: true
-          cache-dependency-glob: uv.lock
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+          cache-suffix: py${{ matrix.python-version }}
+
+      - name: Cache Mypy analysis
+        if: needs.changes.outputs.offline == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
+          restore-keys: |
+            mypy-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-
 
       - name: Install dependencies
+        if: needs.changes.outputs.offline == 'true'
         run: uv sync --locked --group dev
 
       - name: Ruff
-        run: uv run ruff check .
+        if: needs.changes.outputs.offline == 'true' && matrix.python-version == '3.11'
+        run: uv run --no-sync ruff check .
 
       - name: Mypy
-        run: uv run mypy .
+        if: needs.changes.outputs.offline == 'true'
+        run: uv run --no-sync mypy .
 
       - name: Offline tests
-        run: uv run python -m pytest -q -m "not live and not slow"
+        if: needs.changes.outputs.offline == 'true'
+        run: uv run --no-sync python -m pytest -q -m "not live and not slow"
 
       - name: Packaged CLI help
-        run: uv run chess-crawl --help
+        if: needs.changes.outputs.offline == 'true'
+        run: uv run --no-sync chess-crawl --help
 
   compose-smoke:
     name: Compose API and Mercure smoke
     runs-on: ubuntu-latest
-    needs: promotion-source
-    if: ${{ always() && !cancelled() && (github.base_ref != 'master' || needs.promotion-source.result == 'success') }}
+    needs: [promotion-source, changes]
+    if: ${{ always() && !cancelled() }}
     timeout-minutes: 12
     steps:
+      - name: Validate CI prerequisites
+        env:
+          SCOPE_RESULT: ${{ needs.changes.result }}
+          RUN_CHECK: ${{ needs.changes.outputs.compose }}
+          BASE_REF: ${{ github.base_ref }}
+          PROMOTION_RESULT: ${{ needs.promotion-source.result }}
+        run: |
+          test "$SCOPE_RESULT" = success
+          test "$RUN_CHECK" = true || test "$RUN_CHECK" = false
+          test "$BASE_REF" != master || test "$PROMOTION_RESULT" = success
+          echo "Compose smoke selected: $RUN_CHECK" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
+        if: needs.changes.outputs.compose == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: needs.changes.outputs.compose == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
       - name: Create disposable development secrets
+        if: needs.changes.outputs.compose == 'true'
         run: python scripts/bootstrap_dev.py
 
       - name: Validate Compose configuration
+        if: needs.changes.outputs.compose == 'true'
         run: docker compose config --quiet
 
-      - name: Build and start the stack
-        run: docker compose up --build --detach --wait --wait-timeout 120
+      - name: Set up Docker Buildx
+        if: needs.changes.outputs.compose == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build the shared application image
+        if: needs.changes.outputs.compose == 'true'
+        uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7
+        with:
+          source: .
+          files: compose.yaml
+          targets: api
+          load: true
+          set: |
+            api.cache-from=type=gha,scope=compose
+            api.cache-to=type=gha,scope=compose,mode=max
+
+      - name: Start the stack
+        if: needs.changes.outputs.compose == 'true'
+        run: docker compose up --no-build --detach --wait --wait-timeout 120
 
       - name: Exercise API, worker, and durable private Mercure delivery
+        if: needs.changes.outputs.compose == 'true'
         run: python scripts/compose_smoke.py
 
       - name: Service diagnostics
-        if: failure()
+        if: failure() && needs.changes.outputs.compose == 'true'
         run: docker compose logs --no-color --tail 100
 
       - name: Remove disposable containers and archive
-        if: always()
+        if: always() && needs.changes.outputs.compose == 'true'
         run: docker compose down --volumes --remove-orphans
