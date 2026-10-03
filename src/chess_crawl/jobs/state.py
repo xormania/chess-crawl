@@ -670,6 +670,7 @@ def row_to_job(row: sqlite3.Row) -> DiscoveryJob:
         attempts=int(row["attempts"]),
         retry_count=int(row["retry_count"]),
         next_attempt_at=row["next_attempt_at"],
+        revision=int(row["revision"]) if "revision" in row.keys() else 0,
         dedup_key=row["dedup_key"],
         enqueued_at=None if row["enqueued_at"] is None else int(row["enqueued_at"]),
         started_at=None if row["started_at"] is None else int(row["started_at"]),

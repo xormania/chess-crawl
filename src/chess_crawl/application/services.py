@@ -25,6 +25,7 @@ from chess_crawl.providers.registry import list_provider_infos
 from chess_crawl.storage import application as submissions
 from chess_crawl.storage import queries
 from chess_crawl.storage.db import consistent_read, transaction
+from chess_crawl.storage.events import archive_id
 
 
 def submit_import(
@@ -114,6 +115,8 @@ def get_run(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     if row is None:
         raise NotFound("Crawl run not found", code="run_not_found")
     result = dict(row)
+    result["archive_id"] = archive_id(conn)
+    result["revision"] = int(result["revision"])
     result["params"] = state.load_params(result.pop("params_json"))
     result.pop("counters_json", None)
     result["counters"] = state.run_counters(conn, run_id)
@@ -129,6 +132,7 @@ def get_job(conn: sqlite3.Connection, job_id: int) -> dict[str, Any]:
     if job is None:
         raise NotFound("Job not found", code="job_not_found")
     result = asdict(job)
+    result["archive_id"] = archive_id(conn)
     result["params"] = state.load_params(result.pop("params_json"))
     return result
 
