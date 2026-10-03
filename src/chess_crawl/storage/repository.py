@@ -50,70 +50,74 @@ def upsert_provider_user(
     account_status: str | None = None,
     title: str | None = None,
     now: int | None = None,
+    profile_raw_payload_id: int | None = None,
 ) -> int:
-    timestamp = now or int(time.time())
+    """Merge sparse observations; full profiles replace metadata in observation order."""
+    timestamp = int(time.time()) if now is None else now
     username_normalized = username.strip().lower()
     display = display_username or username
-
-    if provider_user_id is not None:
-        existing = conn.execute(
+    existing = conn.execute(
+        """
+        SELECT id FROM provider_users
+         WHERE provider = ? AND (
+           (? IS NOT NULL AND provider_user_id = ?) OR username_normalized = ?
+         )
+         ORDER BY (provider_user_id = ?) DESC LIMIT 1
+        """,
+        (provider, provider_user_id, provider_user_id, username_normalized, provider_user_id),
+    ).fetchone()
+    if existing is not None:
+        user_id = int(existing["id"])
+        if profile_raw_payload_id is not None and not _is_latest_profile(conn, user_id, profile_raw_payload_id):
+            return user_id
+        conn.execute(
             """
-            SELECT id FROM provider_users
-            WHERE provider = ? AND provider_user_id = ?
+            UPDATE provider_users
+               SET provider_user_id = COALESCE(?, provider_user_id),
+                   username_normalized = ?, display_username = ?,
+                   account_status = CASE WHEN ? THEN ? ELSE COALESCE(?, account_status) END,
+                   title = CASE WHEN ? THEN ? ELSE COALESCE(?, title) END,
+                   updated_at = MAX(updated_at, ?)
+             WHERE id = ?
             """,
-            (provider, provider_user_id),
-        ).fetchone()
-        if existing is not None:
-            conn.execute(
-                """
-                UPDATE provider_users
-                   SET username_normalized = ?,
-                       display_username = ?,
-                       account_status = COALESCE(?, account_status),
-                       title = COALESCE(?, title),
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (username_normalized, display, account_status, title, timestamp, int(existing["id"])),
-            )
-            return int(existing["id"])
+            (provider_user_id, username_normalized, display,
+             profile_raw_payload_id is not None, account_status, account_status,
+             profile_raw_payload_id is not None, title, title, timestamp, user_id),
+        )
+        return user_id
 
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT INTO provider_users(
           provider, provider_user_id, username_normalized, display_username,
           account_status, title, first_seen_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(provider, username_normalized) DO UPDATE SET
-          provider_user_id = COALESCE(excluded.provider_user_id, provider_users.provider_user_id),
-          display_username = excluded.display_username,
-          account_status = COALESCE(excluded.account_status, provider_users.account_status),
-          title = COALESCE(excluded.title, provider_users.title),
-          updated_at = excluded.updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (
-            provider,
-            provider_user_id,
-            username_normalized,
-            display,
-            account_status,
-            title,
-            timestamp,
-            timestamp,
-        ),
+        (provider, provider_user_id, username_normalized, display, account_status, title, timestamp, timestamp),
     )
+    if cursor.lastrowid is None:
+        raise RuntimeError("provider user insert did not return a row id")
+    return int(cursor.lastrowid)
 
+
+def _is_latest_profile(conn: sqlite3.Connection, user_id: int, raw_payload_id: int) -> bool:
+    # Full-profile recency is independent of later game/stats observations.
+    # Fetch IDs break second-resolution ties when an older body reappears.
     row = conn.execute(
         """
-        SELECT id FROM provider_users
-        WHERE provider = ? AND username_normalized = ?
+        SELECT r.id
+          FROM raw_payloads r
+          LEFT JOIN fetch_logs f ON f.raw_payload_id = r.id AND f.status_code IN (200, 304)
+         WHERE r.id = ? OR r.id IN (
+           SELECT raw_payload_id FROM source_records
+            WHERE entity_type = 'user' AND entity_id = ? AND endpoint_type = 'user_profile'
+         )
+         ORDER BY COALESCE(f.attempted_at, r.fetched_at) DESC, f.id DESC, r.id DESC
+         LIMIT 1
         """,
-        (provider, username_normalized),
+        (raw_payload_id, user_id),
     ).fetchone()
-    if row is None:
-        raise RuntimeError("provider user upsert did not return a row")
-    return int(row["id"])
+    return row is not None and int(row["id"]) == raw_payload_id
 
 
 @atomic
@@ -151,8 +155,9 @@ def upsert_user_snapshot(
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(provider_user_id, content_hash) DO UPDATE SET
-          captured_at = excluded.captured_at,
-          raw_payload_id = excluded.raw_payload_id
+          captured_at = MAX(user_snapshots.captured_at, excluded.captured_at),
+          raw_payload_id = CASE WHEN excluded.captured_at >= user_snapshots.captured_at
+                            THEN excluded.raw_payload_id ELSE user_snapshots.raw_payload_id END
         """,
         (
             provider_user_id,

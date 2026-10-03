@@ -8,7 +8,7 @@ from typing import Mapping
 import httpx
 
 from chess_crawl.config import ProviderSettings
-from chess_crawl.providers.base import ArchiveUnit, FetchPolicy, GameFilters, RawRecord
+from chess_crawl.providers.base import FetchPolicy, RawRecord
 from chess_crawl.providers.http import HttpClient, HttpFetchResult
 from chess_crawl.providers.lichess import endpoints
 
@@ -80,36 +80,6 @@ class LichessClient:
 
     def get_user_stats(self, username: str) -> RawRecord:
         return self.get_user_profile(username)
-
-    def list_archive_units(
-        self,
-        username: str,
-        since: int | None,
-        until: int | None,
-    ) -> list[ArchiveUnit]:
-        unit_id = _range_unit_id(since, until)
-        return [
-            ArchiveUnit(
-                provider=PROVIDER,
-                username=_username(username),
-                unit_id=unit_id,
-                url=None,
-                since=since,
-                until=until,
-                immutable=False,
-            )
-        ]
-
-    def iter_user_games(
-        self,
-        username: str,
-        since: int | None,
-        until: int | None,
-        filters: GameFilters,
-    ):
-        if filters.max_games is None or filters.max_games <= 0:
-            raise ValueError("Lichess game iteration requires a positive max_games bound")
-        yield self.get_user_games(username, since=since, until=until, limit=filters.max_games)
 
     def get_user_games(
         self,

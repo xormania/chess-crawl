@@ -18,7 +18,6 @@ class ProviderSettings:
     user_agent: str
     oauth_token: str | None = None
     max_retries: int = 3
-    default_page_max: int | None = None
 
 
 @dataclass(frozen=True)

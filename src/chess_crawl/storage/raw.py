@@ -300,6 +300,22 @@ def latest_raw_payload_id(conn: sqlite3.Connection, canonical_source_key: str) -
     return int(row["id"]) if row is not None else None
 
 
+def payload_observed_at(conn: sqlite3.Connection, raw_payload_id: int) -> int:
+    """Latest successful observation of a body, without rewriting its first capture."""
+    row = conn.execute(
+        """
+        SELECT MAX(r.fetched_at, COALESCE(MAX(f.attempted_at), r.fetched_at)) AS observed_at
+          FROM raw_payloads r
+          LEFT JOIN fetch_logs f ON f.raw_payload_id = r.id AND f.status_code IN (200, 304)
+         WHERE r.id = ?
+        """,
+        (raw_payload_id,),
+    ).fetchone()
+    if row["observed_at"] is None:
+        raise KeyError(f"raw payload not found: {raw_payload_id}")
+    return int(row["observed_at"])
+
+
 def latest_validators(conn: sqlite3.Connection, canonical_source_key: str) -> tuple[str | None, str | None]:
     raw_payload_id = latest_raw_payload_id(conn, canonical_source_key)
     if raw_payload_id is None:

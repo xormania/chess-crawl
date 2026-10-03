@@ -88,7 +88,10 @@ the same exemption applies.
 
 ## Review and merge
 
-Work PRs target `dev`; promotion PRs target `master` from `dev`. Internal work
+Work PRs target `dev`; promotion PRs target `master` from this repository's `dev`
+branch. A fork's branch named `dev` is not a valid promotion source. CI reruns
+when a PR is retargeted or otherwise edited, as well as when commits change.
+Internal work
 PRs must be integrated before handing the maintainer a final draft into `dev`.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for setup and validation commands.
 

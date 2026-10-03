@@ -96,7 +96,7 @@ def record_discovery_edges(
     now = int(time.time())
     inserted_or_updated = 0
     for edge in edges:
-        conn.execute(
+        row = conn.execute(
             """
             INSERT INTO discovery_edges(
               crawl_run_id, provider, from_user_id, to_user_id, via_game_id,
@@ -108,6 +108,7 @@ def record_discovery_edges(
               game_count = MAX(discovery_edges.game_count, excluded.game_count),
               depth = MIN(discovery_edges.depth, excluded.depth),
               via_game_id = COALESCE(discovery_edges.via_game_id, excluded.via_game_id)
+            RETURNING id
             """,
             (
                 crawl_run_id,
@@ -119,7 +120,12 @@ def record_discovery_edges(
                 depth,
                 now,
             ),
-        )
+        ).fetchone()
+        if crawl_run_id is not None:
+            conn.execute(
+                "INSERT INTO run_edges(crawl_run_id, discovery_edge_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                (crawl_run_id, row["id"]),
+            )
         inserted_or_updated += 1
     return inserted_or_updated
 
@@ -128,7 +134,7 @@ def record_discovery_edges(
 def discovery_edge_count(conn: sqlite3.Connection, crawl_run_id: int) -> int:
     return int(
         conn.execute(
-            "SELECT COUNT(*) FROM discovery_edges WHERE crawl_run_id = ?",
+            "SELECT COUNT(*) FROM run_edges WHERE crawl_run_id = ?",
             (crawl_run_id,),
         ).fetchone()[0]
     )

@@ -20,19 +20,7 @@ from chess_crawl.storage.raw import (
     read_raw_payload,
     store_raw_payload,
 )
-
-
-class Clock:
-    def __init__(self, now: float = 1_700_000_000) -> None:
-        self.now = now
-        self.sleeps: list[float] = []
-
-    def __call__(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-        self.now += seconds
+from support import Clock
 
 
 def config(**kwargs) -> Config:

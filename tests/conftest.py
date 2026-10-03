@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import sqlite3
 from collections.abc import Iterator
@@ -12,12 +13,44 @@ from support import seed_game
 from chess_crawl.storage.discovery import OpponentEdge, record_discovery_edges
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-live", action="store_true", default=False,
+        help="Allow explicitly marked live tests to use configured provider APIs",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("--run-live"):
+        return
+    skip_live = pytest.mark.skip(reason="Live tests require explicit --run-live opt-in")
+    for item in items:
+        if item.get_closest_marker("live") is not None:
+            item.add_marker(skip_live)
+
+
+def _live_enabled(request: pytest.FixtureRequest) -> bool:
+    return bool(request.config.getoption("--run-live") and request.node.get_closest_marker("live"))
+
+
 @pytest.fixture(autouse=True)
-def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+def isolated_environment(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not _live_enabled(request):
+        for name in tuple(os.environ):
+            if name.startswith("CHESS_CRAWL_"):
+                monkeypatch.delenv(name)
+
+
+@pytest.fixture(autouse=True)
+def no_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if _live_enabled(request):
+        return
+
     def guard(*args: object, **kwargs: object) -> None:
         raise AssertionError("tests must not open network sockets")
 
     monkeypatch.setattr(socket.socket, "connect", guard)
+    monkeypatch.setattr(socket.socket, "connect_ex", guard)
 
 
 @pytest.fixture

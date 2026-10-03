@@ -12,11 +12,11 @@ from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
 from chess_crawl.providers.base import NormalizedUser
 from chess_crawl.storage.db import transaction
-from chess_crawl.storage.raw import insert_source_record, read_raw_payload, update_raw_payload_status
+from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
 
 
-PARSER_VERSION = "users-normalizer-v1"
+PARSER_VERSION = "users-normalizer-v2"
 
 
 def normalize_user_payload(conn: sqlite3.Connection, raw_payload_id: int) -> int | None:
@@ -37,6 +37,7 @@ def normalize_user_payload(conn: sqlite3.Connection, raw_payload_id: int) -> int
         return None
 
     with transaction(conn):
+        observed_at = payload_observed_at(conn, raw_payload_id)
         provider_user_id = upsert_provider_user(
             conn,
             provider=user.provider,
@@ -45,12 +46,13 @@ def normalize_user_payload(conn: sqlite3.Connection, raw_payload_id: int) -> int
             display_username=user.display_username,
             account_status=user.account_status_raw,
             title=user.title,
-            now=raw.fetched_at,
+            now=observed_at,
+            profile_raw_payload_id=raw_payload_id if raw.endpoint_type == "user_profile" else None,
         )
         snapshot_id = upsert_user_snapshot(
             conn,
             provider_user_id=provider_user_id,
-            captured_at=raw.fetched_at,
+            captured_at=observed_at,
             observed_username=user.display_username,
             status=user.account_status_raw,
             title=user.title,

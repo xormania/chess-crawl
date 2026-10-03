@@ -221,6 +221,11 @@ the exponential component; a provider delay can require a longer wait.
 Stop the existing worker before intentionally using a separate CLI executor for
 the same archive.
 
+The game limit stops further game acquisition, but retained run games still
+drive local opponent discovery after a restart. Each run counts the edges it
+actually processes, even when another run already discovered the same edge.
+The archive-wide graph remains deduplicated.
+
 ## Mercure events and client synchronization
 
 Committed job and run changes enter an SQLite outbox in the same transaction
@@ -294,6 +299,14 @@ executor may operate on it. Run separate archives for separate deployments.
 Execution locks require POSIX `flock`; use Linux/WSL or the supplied Linux
 containers. The CLI's default `./chess-crawl.db` is a separate archive from
 Compose's volume unless you explicitly arrange shared storage.
+
+Schema migration 5 adds per-run discovery-edge membership. Compose's `init`
+service applies it at startup; for a CLI archive, run `uv run chess-crawl init`
+with that archive's `--db` path before using the upgraded backend. Existing
+edges retain their original recorded run. Earlier schemas did not preserve
+later runs' shared-edge membership, so the migration does not reconstruct
+unrecorded historical counts. New and resumed discovery records membership
+for each run explicitly.
 
 PostgreSQL remains a future storage implementation decision. There is no
 `DATABASE_URL` switch that makes the SQLite schema, transaction behavior,

@@ -26,6 +26,10 @@ for the required update policy; CI/test-only PRs are exempt.
 
 ### Changed
 
+- Tests ignore inherited runtime configuration and require `--run-live` for
+  marked provider/network tests; unmarked tests stay offline and isolated.
+- Promotion checks require this repository's `dev` branch, and CI reruns on PR
+  edits so changing the target cannot reuse stale validation.
 - Consolidated SQLite connections and transactions, durable job/run state,
   and report/export queries under explicit shared owners.
   ([#5](https://github.com/xormania/chess-crawl/pull/5))
@@ -34,6 +38,14 @@ for the required update policy; CI/test-only PRs are exempt.
 
 ### Fixed
 
+- Count shared discovery edges independently for each crawl. Schema migration 5
+  preserves original recorded edge provenance; historical memberships that
+  were never stored cannot be reconstructed.
+- Resume local opponent discovery when a crash occurs after acquisition fills
+  the run's game budget, without fetching additional games.
+- Clear removed profile status/title fields on authoritative profile refreshes
+  while preserving them during partial game/stat observations; replaying older
+  profiles does not replace newer profile metadata.
 - Parser upgrades refresh previously normalized games without double-counting
   run attribution; opponent discovery uses the selected run's games, and
   provider pacing persists across acquisition calls. ([#7](https://github.com/xormania/chess-crawl/pull/7))
@@ -42,6 +54,12 @@ for the required update policy; CI/test-only PRs are exempt.
   ([#8](https://github.com/xormania/chess-crawl/pull/8))
 - Claimed job snapshots include the persisted revision after state-change
   triggers, matching API and event reads. ([#10](https://github.com/xormania/chess-crawl/pull/10))
+
+### Removed
+
+- Dormant internal provider iteration/protocol abstractions that bypassed the
+  application's bounded acquisition path. Integrations use the documented CLI
+  and HTTP services; active provider endpoint clients remain available.
 
 ## 0.1.0 — 2026-07-03
 

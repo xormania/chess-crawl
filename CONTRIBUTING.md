@@ -78,14 +78,22 @@ uv run python -m pytest -q
 uv run chess-crawl --help
 ```
 
-Tests are offline by default and block outbound sockets. Shared database
+Tests are offline by default, block outbound connections, and ignore inherited
+`CHESS_CRAWL_*` settings. Tests that exercise configuration set their own values
+with `monkeypatch`. Shared database
 fixtures live in `tests/conftest.py`; reusable builders live in
 `tests/support.py`. Organize new cases by behavior, reuse these helpers, and
 use fake clocks for retry and pacing tests. Do not make the default suite
-depend on live providers. Live tests must be explicitly marked and skipped by
-default.
+depend on live providers. Live tests must use `@pytest.mark.live` and are skipped
+unless explicitly enabled with `--run-live`. Only opted-in live tests may use
+the caller's provider configuration and network access; unmarked tests remain
+isolated even when that option is present. To run intentionally selected live
+cases, use `uv run python -m pytest --run-live -m live` with appropriate provider
+credentials and acquisition bounds.
 
-CI runs the offline suite with `-m "not live and not slow"`. A focused CLI
+CI runs the offline suite with `-m "not live and not slow"`. It revalidates
+PR edits as well as new commits so retargeting cannot reuse an obsolete
+promotion check; title and description edits also rerun CI. A focused CLI
 workflow run and a coverage run are available when useful:
 
 ```bash

@@ -190,7 +190,9 @@ If tests are skipped because the change is documentation-only, say so explicitly
 
 Do not add default tests that require internet access.
 
-Live API tests, if added, must be explicitly marked and skipped by default.
+Live API tests, if added, must be marked `live` and skipped unless the user
+explicitly authorizes a live run using `--run-live`. Ordinary tests remain
+offline and independent of inherited `CHESS_CRAWL_*` settings.
 
 Do not make tests sleep in real time for rate-limit behavior. Use fake clocks, monkeypatching, or fixtures.
 
