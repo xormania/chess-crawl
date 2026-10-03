@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from chess_crawl.storage.db import Connection, open_database, require_row
+
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from pathlib import Path
 from threading import Barrier
+from typing import cast
+
 
 import pytest
 
@@ -34,7 +37,6 @@ from chess_crawl.application import (
 from chess_crawl.jobs import state
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage import application as submission_storage
-from chess_crawl.storage.db import connection, open_database
 from chess_crawl.storage.raw import store_raw_payload, update_raw_payload_status
 
 
@@ -66,7 +68,7 @@ def test_import_queues_profile_then_bounded_games_and_replays_after_completion(i
     assert run["status"] == "done"
     assert run["counters"]["jobs_total"] == 2
     assert run["job_ids"] == first["job_ids"]
-    assert conn.execute("SELECT COUNT(*) FROM crawl_runs").fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM crawl_runs"))[0] == 1
     json.dumps({"run": run, "jobs": jobs})
 
 
@@ -105,11 +107,11 @@ def test_submission_identity_and_created_work_roll_back_together(initialized_con
     assert submit_import(initialized_conn, IMPORT, idempotency_key="retry-me")["replayed"] is False
 
 
-def test_concurrent_submissions_return_one_durable_identity(archive_path: Path) -> None:
+def test_concurrent_submissions_return_one_durable_identity(database_url: str) -> None:
     ready = Barrier(2)
 
     def submit() -> dict:
-        with open_database(archive_path, writable=True) as conn:
+        with open_database(database_url, writable=True) as conn:
             ready.wait(timeout=5)
             return submit_import(conn, IMPORT, idempotency_key="shared-request")
 
@@ -119,9 +121,32 @@ def test_concurrent_submissions_return_one_durable_identity(archive_path: Path) 
     assert results[0]["run_id"] == results[1]["run_id"]
     assert results[0]["job_ids"] == results[1]["job_ids"]
     assert sorted(result["replayed"] for result in results) == [False, True]
-    with open_database(archive_path) as conn:
+    with open_database(database_url) as conn:
         assert len(state.crawl_runs(conn)) == 1
         assert len(state.list_jobs(conn)) == 2
+
+
+def test_conflicting_concurrent_submissions_create_only_the_winning_work(database_url: str) -> None:
+    ready = Barrier(2)
+
+    def submit(maximum: int):
+        with open_database(database_url, writable=True) as conn:
+            ready.wait(timeout=5)
+            try:
+                return submit_import(conn, replace(IMPORT, max_games=maximum), idempotency_key="conflicting-race")
+            except Conflict:
+                return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(submit, maximum) for maximum in (5, 10)]
+        results = [future.result(timeout=10) for future in futures]
+    winners = [result for result in results if result is not None]
+    assert len(winners) == 1
+    assert winners[0]["replayed"] is False
+    with open_database(database_url) as conn:
+        assert len(state.crawl_runs(conn)) == 1
+        assert len(state.list_jobs(conn)) == 2
+        assert require_row(conn.execute("SELECT COUNT(*) FROM application_submissions"))[0] == 1
 
 
 @pytest.mark.parametrize(
@@ -139,8 +164,10 @@ def test_concurrent_submissions_return_one_durable_identity(archive_path: Path) 
     ],
 )
 def test_invalid_submissions_fail_before_using_database(changes, code) -> None:
-    with connection(":memory:", mode="rwc") as closed_conn:
-        pass
+    class UnavailableConnection:
+        def __getattr__(self, name):
+            raise AssertionError("Invalid request must fail before database access")
+    closed_conn = cast(Connection, UnavailableConnection())
     with pytest.raises(ValidationError) as error:
         submit_import(closed_conn, replace(IMPORT, **changes), idempotency_key="invalid")
     assert error.value.code == code

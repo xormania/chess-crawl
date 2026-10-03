@@ -1,8 +1,8 @@
 -- Global edges retain their original discovery provenance; membership records
 -- each run that actually processed the edge without duplicating the graph.
 CREATE TABLE run_edges (
-  crawl_run_id INTEGER NOT NULL REFERENCES crawl_runs(id),
-  discovery_edge_id INTEGER NOT NULL REFERENCES discovery_edges(id),
+  crawl_run_id BIGINT NOT NULL REFERENCES crawl_runs(id),
+  discovery_edge_id BIGINT NOT NULL REFERENCES discovery_edges(id),
   PRIMARY KEY (crawl_run_id, discovery_edge_id)
 );
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-import sqlite3
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -19,7 +18,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from chess_crawl import __version__
 from chess_crawl import application
 from chess_crawl.jobs import state
-from chess_crawl.storage.db import connection, is_memory_database
+from chess_crawl.storage.db import DatabaseError, connection
+from chess_crawl.storage.db import database_url as resolve_database_url
 from chess_crawl.storage.migrations import SCHEMA_VERSION, current_version
 
 
@@ -85,20 +85,18 @@ def _error(status: int, code: str, message: str, **kwargs: Any) -> JSONResponse:
 
 
 def create_app(
-    db_path: str | Path | None = None,
+    database_url: str | None = None,
     api_token: str | None = None,
     *,
     limits: application.Limits | None = None,
 ) -> FastAPI:
-    """Build an API without opening or creating an archive at startup.
+    """Build an API without opening or migrating an archive at startup.
 
-    Initialize the configured file through the CLI before serving requests.
+    Initialize the configured PostgreSQL schema through the CLI before serving requests.
     Connections are opened and closed within each synchronous handler so they
     never move across the request thread pool.
     """
-    archive = Path(db_path if db_path is not None else os.getenv("CHESS_CRAWL_DB", "chess-crawl.db"))
-    if is_memory_database(archive):
-        raise ValueError("The HTTP API requires a file-backed archive")
+    archive = resolve_database_url(database_url)
     token = api_token if api_token is not None else os.getenv("CHESS_CRAWL_API_TOKEN", "")
     token_file = os.getenv("CHESS_CRAWL_API_TOKEN_FILE")
     if token and token_file:
@@ -151,8 +149,7 @@ def create_app(
             headers["WWW-Authenticate"] = "Bearer"
         return _error(exc.status_code, codes.get(exc.status_code, "http_error"), str(exc.detail), headers=headers)
 
-    @app.exception_handler(FileNotFoundError)
-    @app.exception_handler(sqlite3.Error)
+    @app.exception_handler(DatabaseError)
     async def database_error(request: Request, exc: Exception) -> JSONResponse:
         _logger.warning("Archive request failed: %s", type(exc).__name__)
         return _error(503, "archive_unavailable", "The archive is unavailable", headers={"Retry-After": "5"})

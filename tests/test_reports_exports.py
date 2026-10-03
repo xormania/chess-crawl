@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from chess_crawl.storage.db import open_database, require_row
+
 import csv
 import json
 from pathlib import Path
@@ -9,7 +11,6 @@ import pytest
 from support import seed_game
 from chess_crawl.export.writers import export_games_jsonl, export_graph_csv, export_users_jsonl
 from chess_crawl.storage.queries import games_by_month, opponent_report, summary_report, user_game_summary
-from chess_crawl.storage.db import open_database
 
 
 def test_reports_are_null_outcome_aware_and_provider_scoped(initialized_conn) -> None:
@@ -40,12 +41,12 @@ def test_reports_are_null_outcome_aware_and_provider_scoped(initialized_conn) ->
     assert summary_report(conn)["raw_payloads"] == 0
 
 
-def test_exports_preserve_provider_and_omit_raw_payloads(tmp_path: Path, seeded_archive: Path) -> None:
+def test_exports_preserve_provider_and_omit_raw_payloads(tmp_path: Path, seeded_database_url: str) -> None:
     games_path = tmp_path / "games.jsonl"
     users_path = tmp_path / "users.jsonl"
     graph_path = tmp_path / "graph.csv"
 
-    with open_database(seeded_archive) as conn:
+    with open_database(seeded_database_url) as conn:
         assert export_games_jsonl(conn, output=games_path) == 2
         assert export_users_jsonl(conn, output=users_path) == 4
         assert export_graph_csv(conn, output=graph_path) == 1
@@ -70,39 +71,36 @@ def test_exports_preserve_provider_and_omit_raw_payloads(tmp_path: Path, seeded_
     assert graph_rows[0]["to_username"] == "opponent"
 
 
+@pytest.mark.parametrize("exporter", [export_games_jsonl, export_users_jsonl, export_graph_csv])
+def test_export_output_failure_preserves_database(seeded_database_url: str, tmp_path: Path, exporter) -> None:
+    # A directory is an invalid output file; failure must not mutate stored data.
+    with open_database(seeded_database_url) as conn:
+        before = require_row(conn.execute("SELECT COUNT(*) FROM games"))[0]
+        with pytest.raises(OSError):
+            exporter(conn, output=tmp_path)
+        assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == before
+    with open_database(seeded_database_url) as conn:
+        assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == before
 
-@pytest.mark.parametrize(
-    ("exporter", "alias"),
-    [
-        pytest.param(export_games_jsonl, "direct", id="games"),
-        pytest.param(export_users_jsonl, "direct", id="users"),
-        pytest.param(export_graph_csv, "direct", id="graph"),
-        pytest.param(export_games_jsonl, "symlink", id="symlink"),
-        pytest.param(export_games_jsonl, "hardlink", id="hardlink"),
-        pytest.param(export_games_jsonl, "wal", id="wal-sidecar"),
-        pytest.param(export_games_jsonl, "shm", id="shm-sidecar"),
-        pytest.param(export_games_jsonl, "journal", id="journal-sidecar"),
-    ],
-)
-def test_exports_reject_database_destination_without_damaging_archive(
-    seeded_archive: Path, tmp_path: Path, exporter, alias: str,
-) -> None:
-    output = seeded_archive
-    if alias in {"wal", "shm", "journal"}:
-        output = seeded_archive.with_name(f"{seeded_archive.name}-{alias}")
-    elif alias != "direct":
-        output = tmp_path / "archive-alias"
-        if alias == "symlink":
-            output.symlink_to(seeded_archive)
-        else:
-            output.hardlink_to(seeded_archive)
 
-    with open_database(seeded_archive) as conn:
-        before = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
-        with pytest.raises(ValueError, match="database|archive"):
-            exporter(conn, output=output)
-        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == before
+@pytest.mark.parametrize("exporter", [export_games_jsonl, export_users_jsonl, export_graph_csv])
+def test_output_interruption_releases_stream_and_snapshot(seeded_database_url: str, monkeypatch, exporter) -> None:
+    import io
+    from chess_crawl.export import writers
 
-    with open_database(seeded_archive) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == before
+    class FailingOutput(io.StringIO):
+        writes = 0
+        def write(self, text):
+            self.writes += 1
+            # CSV writes the header first; interrupt after a row is fetched.
+            if self.writes >= 2:
+                raise OSError("output interrupted")
+            return super().write(text)
+
+    output = FailingOutput()
+    monkeypatch.setattr(writers.sys, "stdout", output)
+    with open_database(seeded_database_url) as conn:
+        with pytest.raises(OSError, match="interrupted"):
+            exporter(conn)
+        assert not conn.in_transaction
+        assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 2

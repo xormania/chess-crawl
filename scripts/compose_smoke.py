@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise the Compose API, worker, SQLite outbox, and real Mercure hub offline.
+"""Exercise the Compose API, worker, PostgreSQL outbox, and real Mercure hub offline.
 
 Run after scripts/bootstrap_dev.py and `docker compose up --build -d --wait`.
 The worker is stopped before submissions; synthetic completions never contact a
-chess provider. Use this only with the disposable development/CI archive.
+chess provider. Use this only with the disposable development/CI database.
 """
 
 from __future__ import annotations
@@ -165,12 +165,12 @@ def main() -> int:
 import os
 from chess_crawl.jobs import state
 from chess_crawl.storage.db import connection, transaction
-with connection(os.environ['CHESS_CRAWL_DB'], mode='rw') as conn:
+with connection(os.environ['CHESS_CRAWL_DATABASE_URL'], mode='rw') as conn:
     with transaction(conn):
         for job_id in {submission['job_ids']!r}:
             state.mark_done(conn, job_id, reason='offline Compose smoke check')
         state.refresh_run_status(conn, {submission['run_id']!r})
-    assert conn.execute('SELECT COUNT(*) FROM fetch_logs').fetchone()[0] == 0
+    assert conn.execute('SELECT COUNT(*) FROM fetch_logs').fetchone()['count'] == 0
 print('No provider requests were performed')
 """  # nosec B608 # This is Python fixture code; its SQL is literal, and IDs use repr.
         compose("exec", "-T", "api", "python", "-", code=completion_code)
@@ -187,7 +187,28 @@ print('No provider requests were performed')
     assert status == 200 and run["status"] == "done"
     compose("start", "worker")
     wait_until(lambda: api.request("/v1/worker")[1].get("alive") is True, "restarted idle worker")
-    print("Compose smoke passed: authenticated API, idempotent queue, worker liveness, durable private Mercure events")
+    ownership_code = """
+import json
+import os
+from chess_crawl.jobs.locking import ExecutorBusy, executor_lock
+from chess_crawl.storage.db import connection
+held = {}
+with connection(os.environ['CHESS_CRAWL_DATABASE_URL'], mode='rw') as conn:
+    for purpose in ('worker', 'events'):
+        try:
+            with executor_lock(conn, purpose=purpose):
+                held[purpose] = False
+        except ExecutorBusy:
+            held[purpose] = True
+print(json.dumps(held))
+"""
+    wait_until(
+        lambda: json.loads(compose("exec", "-T", "api", "python", "-", code=ownership_code))
+        == {"worker": True, "events": True},
+        "exclusive PostgreSQL worker and publisher ownership",
+    )
+    print("Compose smoke passed: authenticated API, idempotent queue, worker liveness, "
+          "exclusive PostgreSQL ownership, durable private Mercure events")
     return 0
 
 

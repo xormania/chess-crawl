@@ -5,7 +5,7 @@ command line for collection and analysis, or run the standalone backend to
 submit asynchronous work over HTTP and receive job updates through Mercure.
 
 The archive stores original provider responses, normalized profiles and games,
-and durable job state in SQLite. Accounts remain provider-scoped: matching
+and durable job state in PostgreSQL. Accounts remain provider-scoped: matching
 usernames on different providers do not imply the same person.
 
 ## Capabilities
@@ -52,7 +52,7 @@ docker compose ps
 ```
 
 This starts the API, worker, event publisher, and this project's own Mercure hub
-after archive initialization. With a new, empty archive, the worker waits for
+after PostgreSQL readiness and archive initialization. With a new, empty archive, the worker waits for
 submitted jobs without fetching chess data.
 
 | Endpoint | Purpose |
@@ -68,22 +68,28 @@ examples, provider contact configuration, and application integration.
 
 The archive persists in a Docker named volume. `docker compose stop` and
 `docker compose down` retain it; `docker compose down --volumes` deletes it.
-The Compose archive is separate from a CLI archive in your checkout.
+Use `docker compose exec api chess-crawl <command>` to run CLI commands against
+the same database. PostgreSQL is available only inside the Compose network by
+default; its port is not published on the host.
 
 ### Run from source
 
-Requires Python 3.11+ and `uv`. Acquisition and background processes use POSIX
-file locks; run them on Linux/WSL or in the supplied Linux containers.
+Requires Python 3.11+, `uv`, and an accessible PostgreSQL 18 database created
+for chess-crawl. The recommended local environment is the Compose stack above.
+For a separately provisioned server, export its connection settings:
 
 ```bash
+export CHESS_CRAWL_DATABASE_URL="postgresql://chess_crawl@localhost:5432/chess_crawl"
+export CHESS_CRAWL_DATABASE_PASSWORD_FILE="/path/to/database-password"
 uv sync --locked
 uv run chess-crawl init
 uv run chess-crawl provider list
 uv run chess-crawl report summary
 ```
 
-These commands create and inspect `./chess-crawl.db` without contacting a chess
-provider. Set your contact before live collection, then queue a bounded import:
+These commands initialize and inspect the selected PostgreSQL database without
+contacting a chess provider. The database must already exist; `init` applies the
+application schema. Set your contact before live collection, then queue a bounded import:
 
 ```bash
 export CHESS_CRAWL_CONTACT="you@example.com"
@@ -102,21 +108,21 @@ uv run chess-crawl report summary
 uv run chess-crawl export games --format jsonl --output games.jsonl
 ```
 
-The [CLI guide](docs/cli.md) covers other providers, custom archive paths,
+The [CLI guide](docs/cli.md) covers other providers, database selection,
 opponent discovery, and a persistent worker. Use
 `uv run chess-crawl <command> --help` for command options.
 
 ## Integration and storage boundaries
 
-SQLite is the only implemented database. The Compose services share one local
-archive directory, including SQLite's journal files and process lock files.
-Only one acquisition executor may run against an archive; API reads, queued
-submissions, and event publishing use their own connections.
+PostgreSQL is the only supported database. Compose provides PostgreSQL 18 with
+persistent storage, and application services connect over its private network.
+PostgreSQL advisory locks retain one acquisition executor and one event publisher
+per archive; API reads and queued submissions use their own connections.
 
 An external application connects through the HTTP API and Mercure. A Symfony
 application can keep its own Symfony Docker deployment, authentication, and
 Turbo rendering. This repository provides the backend and its own hub; it does
-not contain a Symfony application. PostgreSQL support has not been implemented.
+not contain a Symfony application.
 
 API submissions and CLI queued imports use an inclusive `since` and exclusive
 `until` window. Game budgets count distinct games attributed to a run, including
@@ -127,6 +133,9 @@ are retained even when only part of that response fits the run's bounds.
 
 | Variable | Purpose |
 | --- | --- |
+| `CHESS_CRAWL_DATABASE_URL` | Password-free PostgreSQL connection URL; Compose supplies its private server by default. |
+| `CHESS_CRAWL_DATABASE_PASSWORD_FILE` | Database password file for source-run commands; Compose mounts its generated secret. |
+| `CHESS_CRAWL_DATABASE_PASSWORD` | Alternative database password; configure only one password source. |
 | `CHESS_CRAWL_CONTACT` | Contact included in the provider User-Agent; set before live acquisition. |
 | `CHESS_CRAWL_USER_AGENT` | Optional full User-Agent override for source-run clients. |
 | `CHESS_CRAWL_LICHESS_TOKEN` | Optional Lichess account token. |

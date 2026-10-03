@@ -12,7 +12,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[2]
-STARTUP_PROBES = ("api", "worker", "mercure")
+STARTUP_PROBES = ("api", "worker", "mercure", "postgres")
 
 
 def validate_overlay(base: dict[str, Any], ci: dict[str, Any]) -> None:
@@ -29,7 +29,7 @@ def validate_overlay(base: dict[str, Any], ci: dict[str, Any]) -> None:
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError("CI startup healthchecks are missing or malformed") from exc
     if actual != expected:
-        raise ValueError("CI may only override the three startup healthcheck intervals")
+        raise ValueError("CI may only override the four startup healthcheck intervals")
 
 
 def configuration(*files: str) -> dict[str, Any]:

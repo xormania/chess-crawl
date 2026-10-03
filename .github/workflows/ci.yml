@@ -47,6 +47,8 @@ jobs:
     env:
       CI_PERFORMANCE_DIR: ${{ github.workspace }}/.ci-performance
       CI_VARIANT: python-${{ matrix.python-version }}
+      CHESS_CRAWL_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/postgres
+      CHESS_CRAWL_TEST_DATABASE_PASSWORD: ci-disposable-password
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +82,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Start disposable PostgreSQL
+        if: steps.scope.outputs.offline == 'true'
+        env:
+          POSTGRES_PASSWORD: ${{ env.CHESS_CRAWL_TEST_DATABASE_PASSWORD }}
+        run: python .github/scripts/ci_performance.py measure --label postgres-ready --output-dir "$CI_PERFORMANCE_DIR" -- python .github/scripts/test_postgres.py start
 
       - name: Set up uv
         if: steps.scope.outputs.offline == 'true'
@@ -125,6 +133,10 @@ jobs:
       - name: Packaged CLI help
         if: steps.scope.outputs.offline == 'true'
         run: python .github/scripts/ci_performance.py measure --label cli-help --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync chess-crawl --help
+
+      - name: Remove disposable PostgreSQL
+        if: always() && steps.scope.outputs.offline == 'true'
+        run: python .github/scripts/ci_performance.py measure --label postgres-cleanup --output-dir "$CI_PERFORMANCE_DIR" -- python .github/scripts/test_postgres.py stop
 
       - name: Save Mypy analysis
         if: steps.scope.outputs.offline == 'true' && steps.mypy-cache.outputs.cache-hit != 'true'
@@ -198,10 +210,10 @@ jobs:
           docker compose version
           python .github/scripts/ci_performance.py measure --label compose-config --output-dir "$CI_PERFORMANCE_DIR" -- python .github/scripts/check_compose_ci.py
 
-      - name: Build application and pull Mercure concurrently
+      - name: Build application and pull infrastructure concurrently
         if: steps.scope.outputs.compose == 'true'
         run: |
-          python .github/scripts/ci_performance.py measure --label mercure-pull --output-dir "$CI_PERFORMANCE_DIR" -- docker compose pull mercure &
+          python .github/scripts/ci_performance.py measure --label mercure-pull --output-dir "$CI_PERFORMANCE_DIR" -- docker compose pull mercure postgres &
           pull_pid=$!
           build_status=0
           python .github/scripts/ci_performance.py measure --label image-build --output-dir "$CI_PERFORMANCE_DIR" -- docker compose build api || build_status=$?
@@ -221,7 +233,7 @@ jobs:
         if: failure() && steps.scope.outputs.compose == 'true'
         run: docker compose logs --no-color --tail 100
 
-      - name: Remove disposable containers and archive
+      - name: Remove disposable containers and database
         if: always() && steps.scope.outputs.compose == 'true'
         run: python .github/scripts/ci_performance.py measure --label cleanup --output-dir "$CI_PERFORMANCE_DIR" -- docker compose down --volumes --remove-orphans
 

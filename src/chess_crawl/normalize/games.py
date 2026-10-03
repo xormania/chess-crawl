@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from typing import TypedDict
 
@@ -11,7 +10,7 @@ from chess_crawl.providers.base import NormalizedGame, NormalizedParticipant
 from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
 from chess_crawl.storage.acquisition import associate_run_game, payload_game_ids, run_game_bounds, run_game_ids
-from chess_crawl.storage.db import transaction
+from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.raw import insert_source_record, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import (
     find_existing_game,
@@ -37,7 +36,7 @@ class TimeControlArgs(TypedDict):
 
 
 def normalize_games_payload(
-    conn: sqlite3.Connection,
+    conn: Connection,
     raw_payload_id: int,
     *,
     crawl_run_id: int | None = None,
@@ -133,7 +132,7 @@ def normalize_games_payload(
 
 
 def _normalize_game(
-    conn: sqlite3.Connection,
+    conn: Connection,
     game: NormalizedGame,
     *,
     raw_payload_id: int,
@@ -188,7 +187,7 @@ def _normalize_game(
 
 
 def _normalize_participant(
-    conn: sqlite3.Connection,
+    conn: Connection,
     game_id: int,
     provider: str,
     participant: NormalizedParticipant,

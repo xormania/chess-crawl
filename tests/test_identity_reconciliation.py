@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from chess_crawl.storage.db import Connection, require_row
+
 import json
-import sqlite3
+from psycopg import sql
 
 import pytest
 
@@ -16,7 +18,20 @@ from chess_crawl.storage.raw import insert_source_record, store_raw_payload
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
 
 
-def profile(conn: sqlite3.Connection, username: str, player_id: int | None, *, at: int) -> int:
+def database_snapshot(conn: Connection) -> dict[str, list[str]]:
+    """Compare durable rows; PostgreSQL sequence advances are not rolled back."""
+    names = conn.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name"
+    ).fetchall()
+    return {
+        row[0]: sorted(repr(tuple(record.values())) for record in conn.execute(
+            sql.SQL("SELECT * FROM {}").format(sql.Identifier(row[0])),
+        ))
+        for row in names
+    }
+
+
+def profile(conn: Connection, username: str, player_id: int | None, *, at: int) -> int:
     body: dict[str, object] = {"username": username, "status": "closed:fair_play_violations", "title": "GM"}
     if player_id is not None:
         body["player_id"] = player_id
@@ -68,11 +83,11 @@ def test_rename_reconciles_sparse_user_and_every_dependent_record(initialized_co
     for run in runs:
         state.update_crawl_run(conn, run, counters=state.run_counters(conn, run), status="cancelled", finished=True)
         assert state.run_counters(conn, run)["edges"] == 4
-    participants_before = [tuple(row) for row in conn.execute("SELECT id, username_normalized FROM game_participants")]
-    raw_count = conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0]
+    participants_before = [tuple(row.values()) for row in conn.execute("SELECT id, username_normalized FROM game_participants ORDER BY id")]
+    raw_count = require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0]
 
     renamed_raw = profile(conn, "NewName", 123, at=300)
-    before = list(conn.iterdump())
+    before = database_snapshot(conn)
     update_run = state.update_crawl_run
 
     def fail_after_run_update(*args, **kwargs):
@@ -83,33 +98,32 @@ def test_rename_reconciles_sparse_user_and_every_dependent_record(initialized_co
         failure.setattr(state, "update_crawl_run", fail_after_run_update)
         with pytest.raises(RuntimeError, match="interrupted reconciliation"):
             normalize_user_payload(conn, renamed_raw)
-    assert list(conn.iterdump()) == before
+    assert database_snapshot(conn) == before
     assert normalize_user_payload(conn, renamed_raw) == user
 
-    assert conn.execute("SELECT 1 FROM provider_users WHERE id=?", (placeholder,)).fetchone() is None
-    current = conn.execute("SELECT username_normalized, provider_user_id, account_status, title FROM provider_users WHERE id=?", (user,)).fetchone()
-    assert tuple(current) == ("newname", "123", "closed:fair_play_violations", "GM")
-    assert conn.execute("SELECT provider FROM provider_users WHERE id=?", (foreign_user,)).fetchone()[0] == "lichess"
-    assert [tuple(row) for row in conn.execute("SELECT id, username_normalized FROM game_participants")] == participants_before
-    assert conn.execute("SELECT provider_user_id FROM game_participants WHERE game_id=? AND color='white'", (new_game,)).fetchone()[0] == user
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == raw_count + 1
-    assert conn.execute("SELECT COUNT(*) FROM source_records WHERE entity_type='user' AND entity_id=?", (user,)).fetchone()[0] == 3
-    assert conn.execute("SELECT COUNT(*) FROM source_records WHERE entity_type='user' AND entity_id=?", (placeholder,)).fetchone()[0] == 0
-    snapshot = conn.execute("SELECT captured_at, raw_payload_id, count_win FROM user_snapshots WHERE id=?", (survivor,)).fetchone()
-    assert tuple(snapshot) == (200, sparse_raw, 2)
-    assert conn.execute("SELECT 1 FROM user_snapshots WHERE id=?", (duplicate,)).fetchone() is None
-    assert conn.execute("SELECT COUNT(*) FROM source_records WHERE entity_type='user_snapshot' AND entity_id=?", (survivor,)).fetchone()[0] == 2
-    assert conn.execute("SELECT COUNT(*) FROM discovery_edges").fetchone()[0] == 2
+    assert conn.execute("SELECT 1 FROM provider_users WHERE id=%s", (placeholder,)).fetchone() is None
+    current = conn.execute("SELECT username_normalized, provider_user_id, account_status, title FROM provider_users WHERE id=%s", (user,)).fetchone()
+    assert tuple(current.values()) == ("newname", "123", "closed:fair_play_violations", "GM")
+    assert require_row(conn.execute("SELECT provider FROM provider_users WHERE id=%s", (foreign_user,)))[0] == "lichess"
+    assert [tuple(row.values()) for row in conn.execute("SELECT id, username_normalized FROM game_participants ORDER BY id")] == participants_before
+    assert require_row(conn.execute("SELECT provider_user_id FROM game_participants WHERE game_id=%s AND color='white'", (new_game,)))[0] == user
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == raw_count + 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM source_records WHERE entity_type='user' AND entity_id=%s", (user,)))[0] == 3
+    assert require_row(conn.execute("SELECT COUNT(*) FROM source_records WHERE entity_type='user' AND entity_id=%s", (placeholder,)))[0] == 0
+    snapshot = conn.execute("SELECT captured_at, raw_payload_id, count_win FROM user_snapshots WHERE id=%s", (survivor,)).fetchone()
+    assert tuple(snapshot.values()) == (200, sparse_raw, 2)
+    assert conn.execute("SELECT 1 FROM user_snapshots WHERE id=%s", (duplicate,)).fetchone() is None
+    assert require_row(conn.execute("SELECT COUNT(*) FROM source_records WHERE entity_type='user_snapshot' AND entity_id=%s", (survivor,)))[0] == 2
+    assert require_row(conn.execute("SELECT COUNT(*) FROM discovery_edges"))[0] == 2
     assert {row[0] for row in conn.execute("SELECT game_count FROM discovery_edges")} == {2}
-    assert {tuple(row) for row in conn.execute("SELECT crawl_run_id, via_game_id FROM discovery_edges")} == {
+    assert {tuple(row.values()) for row in conn.execute("SELECT crawl_run_id, via_game_id FROM discovery_edges")} == {
         (runs[0], new_game if placeholder_first else old_game),
     }
-    assert conn.execute("SELECT COUNT(*) FROM run_edges").fetchone()[0] == 4
+    assert require_row(conn.execute("SELECT COUNT(*) FROM run_edges"))[0] == 4
     for run in runs:
         updated = state.get_run(conn, run)
         assert updated is not None and updated["status"] == "cancelled"
         assert json.loads(updated["counters"])["edges"] == 2
-    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 @pytest.mark.parametrize("known_identity", [False, True])
@@ -121,21 +135,21 @@ def test_distinct_stable_ids_do_not_overwrite_or_merge(initialized_conn, known_i
     if known_identity:
         normalize_user_payload(conn, profile(conn, "OtherName", 222, at=100))
     conflicting = profile(conn, "TakenName", 222, at=conflict_at)
-    before = list(conn.iterdump())
+    before = database_snapshot(conn)
     if known_identity and conflict_at < 100:
         # The stable ID identifies a known historical account independently
         # of who currently holds the observed username.
         assert normalize_user_payload(conn, conflicting) == 2
-        assert conn.execute("SELECT username_normalized FROM provider_users WHERE provider_user_id='222'").fetchone()[0] == "othername"
+        assert require_row(conn.execute("SELECT username_normalized FROM provider_users WHERE provider_user_id='222'"))[0] == "othername"
         return
     with pytest.raises(ValueError, match="conflicting provider user IDs"):
         normalize_user_payload(conn, conflicting)
-    assert [tuple(row) for row in conn.execute("SELECT provider_user_id, username_normalized FROM provider_users ORDER BY id")] == (
+    assert [tuple(row.values()) for row in conn.execute("SELECT provider_user_id, username_normalized FROM provider_users ORDER BY id")] == (
         [("111", "takenname"), ("222", "othername")] if known_identity else [("111", "takenname")]
     )
-    assert conn.execute("SELECT normalization_status FROM raw_payloads WHERE id=?", (conflicting,)).fetchone()[0] == "pending"
+    assert require_row(conn.execute("SELECT normalization_status FROM raw_payloads WHERE id=%s", (conflicting,)))[0] == "pending"
     assert not conn.in_transaction
-    assert list(conn.iterdump()) == before
+    assert database_snapshot(conn) == before
 
 
 def test_old_profile_replay_does_not_rename_current_identity_or_merge_reused_name(initialized_conn) -> None:
@@ -145,7 +159,7 @@ def test_old_profile_replay_does_not_rename_current_identity_or_merge_reused_nam
     assert normalize_user_payload(conn, profile(conn, "NewName", 123, at=200)) == user
     other = normalize_user_payload(conn, profile(conn, "OldName", 456, at=300))
     assert normalize_user_payload(conn, old_raw) == user
-    assert [tuple(row) for row in conn.execute("SELECT id, provider_user_id, username_normalized FROM provider_users ORDER BY id")] == [
+    assert [tuple(row.values()) for row in conn.execute("SELECT id, provider_user_id, username_normalized FROM provider_users ORDER BY id")] == [
         (user, "123", "newname"), (other, "456", "oldname"),
     ]
 
@@ -154,11 +168,11 @@ def test_stale_sparse_observation_cannot_rename_stable_identity(initialized_conn
     conn = initialized_conn
     user = upsert_provider_user(conn, provider="lichess", username="NewName", provider_user_id="stable", now=200)
     assert upsert_provider_user(conn, provider="lichess", username="OldName", provider_user_id="stable", now=100) == user
-    assert conn.execute("SELECT username_normalized FROM provider_users WHERE id=?", (user,)).fetchone()[0] == "newname"
+    assert require_row(conn.execute("SELECT username_normalized FROM provider_users WHERE id=%s", (user,)))[0] == "newname"
 
 
 def test_sparse_observation_can_supply_missing_stable_id_to_existing_placeholder(initialized_conn) -> None:
     conn = initialized_conn
     user = upsert_provider_user(conn, provider="lichess", username="Alice", now=200)
     assert upsert_provider_user(conn, provider="lichess", username="Alice", provider_user_id="alice", now=100) == user
-    assert tuple(conn.execute("SELECT provider_user_id, updated_at FROM provider_users WHERE id=?", (user,)).fetchone()) == ("alice", 200)
+    assert tuple(require_row(conn.execute("SELECT provider_user_id, updated_at FROM provider_users WHERE id=%s", (user,))).values()) == ("alice", 200)

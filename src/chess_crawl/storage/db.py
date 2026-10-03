@@ -1,60 +1,132 @@
-"""The single SQLite connection, lifetime, and transaction boundary."""
+"""The single PostgreSQL connection, lifetime, and transaction boundary.
 
+Mutations retain the serial archive write contract through transaction advisory
+locks. Read views use repeatable-read snapshots without reserving that lock.
+"""
 from __future__ import annotations
 
-import sqlite3
-from collections.abc import Callable, Iterator
+import os
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import wraps
-from itertools import count
 from pathlib import Path
-from typing import Concatenate, Literal, ParamSpec, TypeVar
+from typing import Any, Concatenate, Literal, ParamSpec, TypeVar, overload
 
+import psycopg
+from psycopg.conninfo import conninfo_to_dict
+from psycopg.pq import TransactionStatus
 
-DbPath = str | Path
+DatabaseError = psycopg.Error
+DbTarget = str
 AccessMode = Literal["ro", "rw", "rwc"]
-_savepoints = count()
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
+_WRITE_LOCK = 0x43435241574C0001
+_SESSION_LOCKS = {"worker": 0x43435241574C1001, "events": 0x43435241574C1002}
 
 
-def is_memory_database(path: DbPath) -> bool:
-    return str(path) == ":memory:"
+class ExecutorLeaseLost(RuntimeError):
+    """An executor must stop after losing its session's ownership."""
 
 
-def database_exists(path: DbPath) -> bool:
-    return is_memory_database(path) or Path(path).is_file()
+class Row(Mapping[str, Any]):
+    """Named values with positional access for aggregate and repository reads."""
+
+    def __init__(self, names: tuple[str, ...], values: Sequence[Any]) -> None:
+        self._names = names
+        self._values = tuple(values)
+        self._positions = {name: index for index, name in enumerate(names)}
+
+    @overload
+    def __getitem__(self, key: str) -> Any: ...
+
+    @overload
+    def __getitem__(self, key: int) -> Any: ...
+
+    def __getitem__(self, key: str | int) -> Any:
+        return self._values[key if isinstance(key, int) else self._positions[key]]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._names)
+
+    def __len__(self) -> int:
+        return len(self._values)
 
 
-def connect(path: DbPath, *, mode: AccessMode = "rwc") -> sqlite3.Connection:
-    """Open SQLite with explicit access; the caller owns the returned handle."""
+def _row_factory(cursor: psycopg.Cursor[Any]) -> Callable[[Sequence[Any]], Row]:
+    names = tuple(column.name for column in cursor.description or ())
+    return lambda values: Row(names, values)
+
+
+class Connection(psycopg.Connection[Row]):
+    _ownership_purposes: tuple[str, ...] = ()
+
+    @property
+    def in_transaction(self) -> bool:
+        return self.info.transaction_status in {
+            TransactionStatus.INTRANS, TransactionStatus.INERROR, TransactionStatus.ACTIVE,
+        }
+
+
+def require_row(cursor: psycopg.Cursor[Row]) -> Row:
+    """Fetch a required result; missing invariant rows fail explicitly."""
+    row = cursor.fetchone()
+    if row is None:
+        raise RuntimeError("A required database result was missing")
+    return row
+
+
+def database_url(value: str | None = None) -> str:
+    """Resolve and validate PostgreSQL settings without including credentials."""
+    target = value if value is not None else os.getenv("CHESS_CRAWL_DATABASE_URL")
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError("Set CHESS_CRAWL_DATABASE_URL or --database-url to a PostgreSQL connection string")
+    if "://" in target and not target.startswith(("postgresql://", "postgres://")):
+        raise ValueError("Only PostgreSQL connection strings are supported")
+    try:
+        settings = conninfo_to_dict(target)
+    except psycopg.ProgrammingError:
+        raise ValueError("Invalid PostgreSQL connection string") from None
+    if not settings.get("dbname"):
+        raise ValueError("The PostgreSQL connection string must specify a database name")
+    return target
+
+
+def database_label(target: str) -> str:
+    """A human label excluding passwords and arbitrary connection options."""
+    settings = conninfo_to_dict(database_url(target))
+    return f"PostgreSQL {settings.get('host', 'local socket')}:{settings.get('port', '5432')}/{settings['dbname']}"
+
+
+def _password() -> str | None:
+    value = os.getenv("CHESS_CRAWL_DATABASE_PASSWORD")
+    password_file = os.getenv("CHESS_CRAWL_DATABASE_PASSWORD_FILE")
+    if value is not None and password_file:
+        raise ValueError("Set either CHESS_CRAWL_DATABASE_PASSWORD or CHESS_CRAWL_DATABASE_PASSWORD_FILE")
+    if password_file:
+        value = Path(password_file).read_text(encoding="utf-8").rstrip("\r\n")
+        if not value:
+            raise ValueError("The PostgreSQL password file is empty")
+    return value
+
+
+def connect(target: str, *, mode: AccessMode = "rwc") -> Connection:
+    """Open an existing database; provisioning belongs to the operator."""
     if mode not in {"ro", "rw", "rwc"}:
         raise ValueError(f"Unknown database access mode: {mode}")
-    memory = is_memory_database(path)
-    if not memory:
-        db_path = Path(path).resolve()
-        if mode == "rwc":
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-        elif not db_path.is_file():
-            raise FileNotFoundError(f"Database not found: {path}\nRun `chess-crawl init --db PATH` first.")
-        target = db_path.as_uri() + f"?mode={mode}"
-    else:
-        if mode != "rwc":
-            raise ValueError("An in-memory database must be explicitly created with mode='rwc'")
-        target = ":memory:"
-    conn = sqlite3.connect(target, uri=not memory)
+    conninfo = database_url(target)
+    password = _password()
+    kwargs: dict[str, Any] = {"autocommit": True, "row_factory": _row_factory, "connect_timeout": 5}
+    if password is not None:
+        if "password" in conninfo_to_dict(conninfo):
+            raise ValueError("Configure the PostgreSQL password in either the URL or a password setting")
+        kwargs["password"] = password
+    conn = Connection.connect(conninfo, **kwargs)
     try:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("SET TIME ZONE 'UTC'")
+        conn.execute("SET lock_timeout = '5s'")
         if mode == "ro":
-            conn.execute("PRAGMA query_only = ON")
-        else:
-            if not memory:
-                conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA synchronous = NORMAL")
-        if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
-            raise RuntimeError("SQLite foreign_keys pragma could not be enabled")
+            conn.execute("SET default_transaction_read_only = on")
         return conn
     except BaseException:
         conn.close()
@@ -62,9 +134,8 @@ def connect(path: DbPath, *, mode: AccessMode = "rwc") -> sqlite3.Connection:
 
 
 @contextmanager
-def connection(path: DbPath, *, mode: AccessMode = "ro") -> Iterator[sqlite3.Connection]:
-    """Own one configured connection and close it on success or interruption."""
-    conn = connect(path, mode=mode)
+def connection(target: str, *, mode: AccessMode = "ro") -> Iterator[Connection]:
+    conn = connect(target, mode=mode)
     try:
         yield conn
     finally:
@@ -72,60 +143,77 @@ def connection(path: DbPath, *, mode: AccessMode = "ro") -> Iterator[sqlite3.Con
 
 
 @contextmanager
-def open_database(path: DbPath, *, writable: bool = False) -> Iterator[sqlite3.Connection]:
-    """Open one archive; only explicit writers may create or initialize it."""
-    with connection(path, mode="rwc" if writable else "ro") as conn:
+def open_database(target: str, *, writable: bool = False) -> Iterator[Connection]:
+    with connection(target, mode="rwc" if writable else "ro") as conn:
         if writable:
             from chess_crawl.storage.migrations import initialize
-
             initialize(conn)
         yield conn
 
 
 @contextmanager
-def transaction(conn: sqlite3.Connection, *, write: bool = True) -> Iterator[sqlite3.Connection]:
-    """Commit one operation; nested operations use savepoints, never commit the owner."""
+def transaction(conn: Connection, *, write: bool = True) -> Iterator[Connection]:
+    """Own one atomic operation; nested mutations use native savepoints."""
     nested = conn.in_transaction
-    savepoint = f"chess_crawl_{next(_savepoints)}" if nested else None
-    conn.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE" if write else "BEGIN")
-    try:
+    with conn.transaction():
+        if not nested:
+            conn.execute(
+                "SET TRANSACTION ISOLATION LEVEL READ COMMITTED" if write else
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+            )
+        if write:
+            if nested:
+                isolation = require_row(conn.execute("SHOW transaction_isolation"))[0]
+                readonly = require_row(conn.execute("SHOW transaction_read_only"))[0]
+                if isolation != "read committed" and readonly != "on":
+                    raise ValueError(
+                        "Archive mutations require a READ COMMITTED outer transaction; use storage.db.transaction"
+                    )
+            for purpose in set(conn._ownership_purposes):
+                if not owns_session_lock(conn, purpose):
+                    raise ExecutorLeaseLost("Database executor ownership was lost")
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_WRITE_LOCK,))
         yield conn
-        if nested:
-            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-        else:
-            conn.commit()
-    except BaseException:
-        if nested:
-            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-        else:
-            conn.rollback()
-        raise
 
 
-def atomic(operation: Callable[Concatenate[sqlite3.Connection, _P], _T]) -> Callable[Concatenate[sqlite3.Connection, _P], _T]:
-    """Make a storage mutation safe both alone and inside a larger operation."""
+def atomic(operation: Callable[Concatenate[Connection, _P], _T]) -> Callable[Concatenate[Connection, _P], _T]:
     return _transactional(operation, write=True)
 
 
-def consistent_read(
-    operation: Callable[Concatenate[sqlite3.Connection, _P], _T],
-) -> Callable[Concatenate[sqlite3.Connection, _P], _T]:
-    """Read one coherent snapshot without reserving the writer lock."""
+def consistent_read(operation: Callable[Concatenate[Connection, _P], _T]) -> Callable[Concatenate[Connection, _P], _T]:
     return _transactional(operation, write=False)
 
 
 def _transactional(
-    operation: Callable[Concatenate[sqlite3.Connection, _P], _T], *, write: bool,
-) -> Callable[Concatenate[sqlite3.Connection, _P], _T]:
+    operation: Callable[Concatenate[Connection, _P], _T], *, write: bool,
+) -> Callable[Concatenate[Connection, _P], _T]:
     @wraps(operation)
-    def wrapped(conn: sqlite3.Connection, /, *args: _P.args, **kwargs: _P.kwargs) -> _T:
+    def wrapped(conn: Connection, /, *args: _P.args, **kwargs: _P.kwargs) -> _T:
         with transaction(conn, write=write):
             return operation(conn, *args, **kwargs)
-
     return wrapped
 
 
-def database_paths(conn: sqlite3.Connection) -> tuple[Path, ...]:
-    """File-backed databases attached to this handle, for output collision checks."""
-    return tuple(Path(row["file"]) for row in conn.execute("PRAGMA database_list") if row["file"])
+def _session_key(purpose: str) -> int:
+    try:
+        return _SESSION_LOCKS[purpose]
+    except KeyError:
+        raise ValueError("Unknown database ownership purpose") from None
+
+
+def acquire_session_lock(conn: Connection, purpose: str) -> bool:
+    return bool(require_row(conn.execute("SELECT pg_try_advisory_lock(%s)", (_session_key(purpose),)))[0])
+
+
+def owns_session_lock(conn: Connection, purpose: str) -> bool:
+    key = _session_key(purpose)
+    return bool(require_row(conn.execute(
+        """SELECT EXISTS (SELECT 1 FROM pg_locks
+             WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted
+               AND classid = %s AND objid = %s AND objsubid = 1)""",
+        (key >> 32, key & 0xFFFFFFFF),
+    ))[0])
+
+
+def release_session_lock(conn: Connection, purpose: str) -> None:
+    conn.execute("SELECT pg_advisory_unlock(%s)", (_session_key(purpose),))

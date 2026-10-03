@@ -5,12 +5,11 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from chess_crawl.storage.db import atomic
+from chess_crawl.storage.db import Connection, atomic
 from chess_crawl.providers.base import RawRecord
 
 
@@ -41,7 +40,7 @@ def compute_body_hash(body: bytes) -> str:
 
 @atomic
 def store_raw_payload(
-    conn: sqlite3.Connection,
+    conn: Connection,
     record: RawRecord,
     *,
     parser_version: str | None = None,
@@ -54,7 +53,7 @@ def store_raw_payload(
     existing = conn.execute(
         """
         SELECT id FROM raw_payloads
-        WHERE provider = ? AND endpoint_type = ? AND canonical_source_key = ? AND body_hash = ?
+        WHERE provider = %s AND endpoint_type = %s AND canonical_source_key = %s AND body_hash = %s
         ORDER BY id LIMIT 1
         """,
         (record.provider, record.endpoint_type, record.canonical_source_key, body_hash),
@@ -77,7 +76,8 @@ def store_raw_payload(
           fetched_at, body_hash, body_compression, raw_body, body_bytes,
           parser_version, normalization_status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
         """,
         (
             record.provider,
@@ -97,15 +97,16 @@ def store_raw_payload(
             normalization_status,
         ),
     )
-    if cursor.lastrowid is None:
+    row = cursor.fetchone()
+    if row is None:
         raise RuntimeError("raw payload insert did not return a row id")
-    raw_payload_id = int(cursor.lastrowid)
+    raw_payload_id = int(row["id"])
     return raw_payload_id
 
 
-def read_raw_payload(conn: sqlite3.Connection, raw_payload_id: int) -> StoredRawPayload:
+def read_raw_payload(conn: Connection, raw_payload_id: int) -> StoredRawPayload:
     row = conn.execute(
-        "SELECT * FROM raw_payloads WHERE id = ?",
+        "SELECT * FROM raw_payloads WHERE id = %s",
         (raw_payload_id,),
     ).fetchone()
     if row is None:
@@ -136,7 +137,7 @@ def read_raw_payload(conn: sqlite3.Connection, raw_payload_id: int) -> StoredRaw
 
 @atomic
 def insert_source_record(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     entity_type: str,
     entity_id: int,
@@ -153,7 +154,7 @@ def insert_source_record(
           entity_type, entity_id, provider, endpoint_type, source_key,
           json_pointer, raw_payload_id, first_seen_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(entity_type, entity_id, raw_payload_id) DO NOTHING
         """,
         (
@@ -171,7 +172,7 @@ def insert_source_record(
     row = conn.execute(
         """
         SELECT id FROM source_records
-        WHERE entity_type = ? AND entity_id = ? AND raw_payload_id = ?
+        WHERE entity_type = %s AND entity_id = %s AND raw_payload_id = %s
         """,
         (entity_type, entity_id, raw_payload_id),
     ).fetchone()
@@ -182,7 +183,7 @@ def insert_source_record(
 
 @atomic
 def insert_fetch_log(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     provider: str,
     url: str,
@@ -209,7 +210,8 @@ def insert_fetch_log(
           status_code, from_cache, etag, last_modified, retry_after, bytes,
           duration_ms, attempt, attempted_at, raw_payload_id, error_ref
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
         """,
         (
             provider,
@@ -231,14 +233,15 @@ def insert_fetch_log(
             error_ref,
         ),
     )
-    if cursor.lastrowid is None:
+    row = cursor.fetchone()
+    if row is None:
         raise RuntimeError("fetch log insert did not return a row id")
-    return int(cursor.lastrowid)
+    return int(row["id"])
 
 
 @atomic
 def update_raw_payload_status(
-    conn: sqlite3.Connection,
+    conn: Connection,
     raw_payload_id: int,
     *,
     status: str,
@@ -249,11 +252,11 @@ def update_raw_payload_status(
     conn.execute(
         """
         UPDATE raw_payloads
-           SET normalization_status = ?,
-               parser_version = COALESCE(?, parser_version),
-               normalized_at = COALESCE(?, normalized_at),
-               error_ref = COALESCE(?, error_ref)
-         WHERE id = ?
+           SET normalization_status = %s,
+               parser_version = COALESCE(%s, parser_version),
+               normalized_at = COALESCE(%s, normalized_at),
+               error_ref = COALESCE(%s, error_ref)
+         WHERE id = %s
         """,
         (
             status,
@@ -283,7 +286,7 @@ def _json(value: Mapping[str, Any]) -> str:
     return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
 
 
-def latest_raw_payload_id(conn: sqlite3.Connection, canonical_source_key: str) -> int | None:
+def latest_raw_payload_id(conn: Connection, canonical_source_key: str) -> int | None:
     # Fetch evidence determines the current representation when an older body
     # hash reappears. Raw bodies and their original capture metadata stay immutable.
     row = conn.execute(
@@ -291,8 +294,8 @@ def latest_raw_payload_id(conn: sqlite3.Connection, canonical_source_key: str) -
         SELECT r.id
           FROM raw_payloads r
           LEFT JOIN fetch_logs f ON f.raw_payload_id = r.id
-         WHERE r.canonical_source_key = ?
-         ORDER BY COALESCE(f.attempted_at, r.fetched_at) DESC, f.id DESC, r.id DESC
+         WHERE r.canonical_source_key = %s
+         ORDER BY COALESCE(f.attempted_at, r.fetched_at) DESC, f.id DESC NULLS LAST, r.id DESC
          LIMIT 1
         """,
         (canonical_source_key,),
@@ -300,23 +303,24 @@ def latest_raw_payload_id(conn: sqlite3.Connection, canonical_source_key: str) -
     return int(row["id"]) if row is not None else None
 
 
-def payload_observed_at(conn: sqlite3.Connection, raw_payload_id: int) -> int:
+def payload_observed_at(conn: Connection, raw_payload_id: int) -> int:
     """Latest successful observation of a body, without rewriting its first capture."""
     row = conn.execute(
         """
-        SELECT MAX(r.fetched_at, COALESCE(MAX(f.attempted_at), r.fetched_at)) AS observed_at
+        SELECT GREATEST(r.fetched_at, COALESCE(MAX(f.attempted_at), r.fetched_at)) AS observed_at
           FROM raw_payloads r
           LEFT JOIN fetch_logs f ON f.raw_payload_id = r.id AND f.status_code IN (200, 304)
-         WHERE r.id = ?
+         WHERE r.id = %s
+         GROUP BY r.id
         """,
         (raw_payload_id,),
     ).fetchone()
-    if row["observed_at"] is None:
+    if row is None or row["observed_at"] is None:
         raise KeyError(f"raw payload not found: {raw_payload_id}")
     return int(row["observed_at"])
 
 
-def latest_validators(conn: sqlite3.Connection, canonical_source_key: str) -> tuple[str | None, str | None]:
+def latest_validators(conn: Connection, canonical_source_key: str) -> tuple[str | None, str | None]:
     raw_payload_id = latest_raw_payload_id(conn, canonical_source_key)
     if raw_payload_id is None:
         return None, None
@@ -330,10 +334,12 @@ def latest_validators(conn: sqlite3.Connection, canonical_source_key: str) -> tu
                  WHERE raw_payload_id = r.id AND last_modified IS NOT NULL
                  ORDER BY attempted_at DESC, id DESC LIMIT 1) AS last_modified
           FROM raw_payloads r
-         WHERE r.id = ?
+         WHERE r.id = %s
         """,
         (raw_payload_id,),
     ).fetchone()
+    if row is None:
+        raise KeyError(f"raw payload not found: {raw_payload_id}")
     headers = json.loads(row["response_headers"] or "{}")
     return (
         row["etag"] or headers.get("etag"),

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from chess_crawl.storage.db import Connection, connection, require_row, transaction
+
 import json
-import sqlite3
 
 import pytest
 
@@ -13,11 +14,10 @@ from chess_crawl.jobs import runner as runner_module, state
 from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.storage import migrations
-from chess_crawl.storage.db import connection, transaction
 from chess_crawl.storage.discovery import discovery_edge_count
 
 
-def create_run(conn: sqlite3.Connection, *, max_games: int = 10) -> tuple[int, int]:
+def create_run(conn: Connection, *, max_games: int = 10) -> tuple[int, int]:
     return create_opponent_crawl(
         conn, provider="lichess", username="a", since=1704067200, until=1704153600,
         bounds=CrawlBounds(max_depth=1, max_users=2, max_games=max_games, max_jobs=2),
@@ -44,10 +44,10 @@ def test_repeated_crawls_attribute_shared_edges_to_each_run(initialized_conn) ->
         snapshot = state.get_run(conn, run)
         assert snapshot is not None
         assert json.loads(snapshot["counters"])["edges"] == 1
-    assert conn.execute("SELECT COUNT(*) FROM discovery_edges").fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM discovery_edges"))[0] == 1
     assert [discovery_edge_count(conn, run) for run in runs] == [1, 1]
     # The global graph retains its original discovery provenance.
-    assert conn.execute("SELECT crawl_run_id FROM discovery_edges").fetchone()[0] == runs[0]
+    assert require_row(conn.execute("SELECT crawl_run_id FROM discovery_edges"))[0] == runs[0]
 
 
 @pytest.mark.parametrize("crash_point", ["before_frontier", "after_frontier"])
@@ -68,7 +68,7 @@ def test_resume_discovers_retained_games_after_crash_fills_budget(initialized_co
             runner.run(crawl_run_id=run)
     interrupted = state.get_job(conn, root)
     assert interrupted is not None and interrupted.state == "in_progress"
-    assert conn.execute("SELECT COUNT(*) FROM run_games WHERE crawl_run_id=?", (run,)).fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM run_games WHERE crawl_run_id=%s", (run,)))[0] == 1
 
     result = runner.run(crawl_run_id=run, resume_stale=True)
     assert result.stale_resumed == 1
@@ -80,9 +80,9 @@ def test_resume_discovers_retained_games_after_crash_fills_budget(initialized_co
     assert calls == ["a"], "a full budget must not issue another acquisition"
 
 
-def test_edge_membership_migration_backfills_only_recorded_provenance(monkeypatch) -> None:
+def test_edge_membership_migration_backfills_only_recorded_provenance(monkeypatch, uninitialized_database_url: str) -> None:
     available = migrations.migration_resources()
-    with connection(":memory:", mode="rwc") as conn:
+    with connection(uninitialized_database_url, mode="rwc") as conn:
         with monkeypatch.context() as old:
             old.setattr(migrations, "migration_resources", lambda: tuple(item for item in available if item[0] <= 4))
             old.setattr(migrations, "SCHEMA_VERSION", 4)
@@ -92,15 +92,16 @@ def test_edge_membership_migration_backfills_only_recorded_provenance(monkeypatc
         game, a, b = seed_game(conn, provider="lichess", game_key="a-b", white="a", black="b")
         other_game, _, c = seed_game(conn, provider="lichess", game_key="a-c", white="a", black="c")
         with transaction(conn):
-            conn.executemany("INSERT INTO run_games VALUES (?, ?)", [(first, game), (second, game)])
-            conn.executemany(
-                """INSERT INTO discovery_edges(crawl_run_id, provider, from_user_id, to_user_id,
-                           via_game_id, game_count, depth, first_seen_at)
-                   VALUES (?, 'lichess', ?, ?, ?, 1, 1, 123)""",
-                [(first, a, b, game), (None, a, c, other_game)],
-            )
+            with conn.cursor() as cursor:
+                cursor.executemany("INSERT INTO run_games VALUES (%s, %s)", [(first, game), (second, game)])
+                cursor.executemany(
+                    """INSERT INTO discovery_edges(crawl_run_id, provider, from_user_id, to_user_id,
+                               via_game_id, game_count, depth, first_seen_at)
+                       VALUES (%s, 'lichess', %s, %s, %s, 1, 1, 123)""",
+                    [(first, a, b, game), (None, a, c, other_game)],
+                )
         assert migrations.initialize(conn).applied == tuple(name for version, name, _ in available if version > 4)
         assert [discovery_edge_count(conn, run) for run in (first, second)] == [1, 0]
-        assert conn.execute("SELECT COUNT(*) FROM discovery_edges").fetchone()[0] == 2
-        assert conn.execute("SELECT COUNT(*) FROM run_edges").fetchone()[0] == 1
+        assert require_row(conn.execute("SELECT COUNT(*) FROM discovery_edges"))[0] == 2
+        assert require_row(conn.execute("SELECT COUNT(*) FROM run_edges"))[0] == 1
         assert migrations.initialize(conn).applied == ()

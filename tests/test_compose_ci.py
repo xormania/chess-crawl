@@ -36,9 +36,9 @@ def configurations() -> tuple[dict[str, Any], dict[str, Any]]:
                 "read_only": True,
                 "secrets": [{"source": "api_token", "target": "api_token"}],
             }
-            for name in ("api", "worker", "mercure")
+            for name in ("api", "worker", "mercure", "postgres")
         },
-        "volumes": {"archive_data": {"name": "archive_data"}},
+        "volumes": {"postgres_data": {"name": "postgres_data"}},
     }
     ci = copy.deepcopy(base)
     for service in ci["services"].values():
@@ -75,7 +75,7 @@ def test_startup_overlay_rejects_changed_dependencies_and_permissions(
         validate_overlay(base, ci)
 
 
-def test_startup_overlay_rejects_changed_archive_storage(
+def test_startup_overlay_rejects_changed_database_storage(
     configurations: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     base, ci = configurations
@@ -110,7 +110,7 @@ def test_configuration_preserves_project_name_and_file_order(monkeypatch: pytest
     ]]
 
 
-@pytest.mark.parametrize("service", ["api", "worker", "mercure"])
+@pytest.mark.parametrize("service", ["api", "worker", "mercure", "postgres"])
 def test_startup_overlay_rejects_missing_faster_probe(
     configurations: tuple[dict[str, Any], dict[str, Any]], service: str,
 ) -> None:

@@ -6,8 +6,9 @@ Start with the [README](README.md) for the project overview and
 ## Development setup
 
 Use Python 3.11 or newer, Git, and [uv](https://docs.astral.sh/uv/).
-CI exercises Python 3.11 and 3.13. Docker with the Compose plugin is needed
-only for the container stack and its smoke check.
+CI exercises Python 3.11 and 3.13 against real PostgreSQL 18. Docker with the
+Compose plugin provides the recommended application environment. Database tests
+require a dedicated disposable PostgreSQL server; they do not use file fixtures.
 
 ```bash
 git clone https://github.com/xormania/chess-crawl.git
@@ -37,10 +38,33 @@ Database connections and transactions are consolidated in
 `src/chess_crawl/storage/queries.py`. Extend these shared implementations when
 working in those areas.
 
+Use the shared transaction helper for mutations. Outermost writes explicitly
+use READ COMMITTED before acquiring the archive write lock; an externally owned
+writable transaction at stronger isolation is rejected before mutation. Read
+views use REPEATABLE READ and remain read-only. Executor writes also verify
+session ownership at the transaction boundary.
+
 SQL statements live in `storage/` or `jobs/state.py`; the storage-boundary test
 checks this consolidation.
 
 ## Validate changes
+
+Run database tests against a dedicated disposable PostgreSQL 18 server. The
+fixture's administrator must be able to create and drop databases. Never point
+these settings at an application database: tests deliberately create and remove
+isolated databases. One local setup is:
+
+```bash
+export POSTGRES_PASSWORD="disposable-test-password"
+docker run --name chess-crawl-test-postgres --detach \
+  --publish 127.0.0.1:55432:5432 --env POSTGRES_PASSWORD postgres:18
+docker exec chess-crawl-test-postgres pg_isready -U postgres
+export CHESS_CRAWL_TEST_DATABASE_URL="postgresql://postgres@127.0.0.1:55432/postgres"
+export CHESS_CRAWL_TEST_DATABASE_PASSWORD="$POSTGRES_PASSWORD"
+```
+
+Wait until `pg_isready` succeeds before testing. Remove the disposable server
+with `docker rm --force --volumes chess-crawl-test-postgres` afterward.
 
 Run these checks for code changes:
 
@@ -52,8 +76,10 @@ uv run python -m pytest -q
 uv run chess-crawl --help
 ```
 
-Tests are offline by default, block outbound connections, and ignore inherited
-`CHESS_CRAWL_*` settings. Tests that exercise configuration set their own values
+Tests are offline by default, block outbound connections except their dedicated
+PostgreSQL endpoint, and ignore inherited `CHESS_CRAWL_*` application settings.
+The explicit `CHESS_CRAWL_TEST_DATABASE_URL` and separate test password configure
+only the disposable database fixtures. Tests that exercise configuration set their own values
 with `monkeypatch`. Shared database
 fixtures live in `tests/conftest.py`; reusable builders live in
 `tests/support.py`. Organize new cases by behavior, reuse these helpers, and
@@ -95,7 +121,7 @@ were downloaded again, with no measured install benefit. The pinned, locked
 install still runs each time.
 
 Docker keeps dependency layers separate from application sources and builds the
-shared Compose image once, while pulling Mercure concurrently. CI's Compose
+shared Compose image once, while pulling PostgreSQL and Mercure concurrently. CI's Compose
 overlay checks startup readiness every second, preserving the normal health
 interval, probes, failure budgets and service dependencies. The smoke job
 compares the complete rendered base/CI configurations and rejects any other
@@ -162,7 +188,7 @@ Documentation-only changes do not require the entire application test suite.
 Check executable examples and affected claims, and state which checks ran and
 which were skipped. Follow the [backend smoke-check instructions](docs/backend.md#offline-compose-smoke-check)
 for container, worker, or event integration changes; the smoke check writes
-synthetic data and belongs on a disposable archive.
+synthetic data and belongs on a disposable database.
 
 ## Branches and pull requests
 

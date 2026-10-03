@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,7 +16,7 @@ from chess_crawl.normalize.users import PARSER_VERSION as USERS_PARSER_VERSION
 from chess_crawl.normalize.users import normalize_user_payload
 from chess_crawl.providers.base import FetchAttempt, RawRecord
 from chess_crawl.providers.registry import ProviderSession, get_provider_info
-from chess_crawl.storage.db import transaction
+from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.raw import (
     insert_fetch_log, latest_raw_payload_id, latest_validators,
     read_raw_payload, store_raw_payload, update_raw_payload_status,
@@ -37,7 +36,7 @@ class IngestResult:
 
 
 def fetch_user_profile(
-    conn: sqlite3.Connection,
+    conn: Connection,
     provider: str,
     username: str,
     *,
@@ -64,7 +63,7 @@ def fetch_user_profile(
 
 
 def fetch_chesscom_stats(
-    conn: sqlite3.Connection,
+    conn: Connection,
     username: str,
     *,
     config: Config | None = None,
@@ -88,7 +87,7 @@ def fetch_chesscom_stats(
 
 
 def fetch_chesscom_archives(
-    conn: sqlite3.Connection,
+    conn: Connection,
     username: str,
     *,
     config: Config | None = None,
@@ -106,7 +105,7 @@ def fetch_chesscom_archives(
 
 
 def fetch_chesscom_month(
-    conn: sqlite3.Connection,
+    conn: Connection,
     username: str,
     year: int,
     month: int,
@@ -134,7 +133,7 @@ def fetch_chesscom_month(
 
 
 def fetch_lichess_games(
-    conn: sqlite3.Connection,
+    conn: Connection,
     username: str,
     *,
     since: int | None,
@@ -160,7 +159,7 @@ def fetch_lichess_games(
 
 
 def fetch_lichess_game(
-    conn: sqlite3.Connection,
+    conn: Connection,
     game_id: str,
     *,
     config: Config | None = None,
@@ -192,7 +191,7 @@ def _provider_client(provider: str, *, config, transport, sleeper, session):
 
 
 def replay_raw_payload(
-    conn: sqlite3.Connection, raw_payload_id: int, *,
+    conn: Connection, raw_payload_id: int, *,
     crawl_run_id: int | None = None, max_games: int | None = None,
 ) -> IngestResult:
     """Normalize a durable raw payload without making or fabricating a fetch.
@@ -221,7 +220,7 @@ def replay_raw_payload(
     )
 
 
-def _requires_normalization(conn: sqlite3.Connection, raw_payload_id: int) -> bool:
+def _requires_normalization(conn: Connection, raw_payload_id: int) -> bool:
     raw = read_raw_payload(conn, raw_payload_id)
     if raw.endpoint_type in {"user_profile", "user_stats"}:
         version = USERS_PARSER_VERSION
@@ -290,7 +289,7 @@ def _store_and_mark_skipped(
     )
 
 
-def _mark_archives_skipped(conn: sqlite3.Connection, raw_payload_id: int) -> None:
+def _mark_archives_skipped(conn: Connection, raw_payload_id: int) -> None:
     update_raw_payload_status(
         conn, raw_payload_id, status="skipped",
         parser_version="chesscom-archives-index-v1", normalized_at=int(time.time()),
@@ -298,7 +297,7 @@ def _mark_archives_skipped(conn: sqlite3.Connection, raw_payload_id: int) -> Non
 
 
 def _persist_response(
-    conn: sqlite3.Connection,
+    conn: Connection,
     record: RawRecord,
     *,
     job_id: int | None,
@@ -326,14 +325,14 @@ def _persist_response(
     return raw_payload_id
 
 
-def _store_raw_if_present(conn: sqlite3.Connection, record: RawRecord) -> int | None:
+def _store_raw_if_present(conn: Connection, record: RawRecord) -> int | None:
     if record.body is None or record.http_status != 200:
         return None
     return store_raw_payload(conn, record)
 
 
 def _log_attempts(
-    conn: sqlite3.Connection,
+    conn: Connection,
     record: RawRecord,
     raw_payload_id: int | None,
     *,
@@ -381,7 +380,7 @@ def _log_attempts(
         )
 
 
-def _insert_error_for_attempt(conn: sqlite3.Connection, attempt: FetchAttempt) -> int | None:
+def _insert_error_for_attempt(conn: Connection, attempt: FetchAttempt) -> int | None:
     if attempt.status_code in {200, 304}:
         return None
     if attempt.status_code in {404, 410, 429}:

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from chess_crawl.storage.db import Connection, require_row, transaction
+
 import json
-import sqlite3
 
 import httpx
 import pytest
@@ -16,7 +17,6 @@ from chess_crawl.normalize.codes import canonical_hash
 from chess_crawl.normalize.users import PARSER_VERSION, normalize_user_payload
 from chess_crawl.providers.base import EndpointType, RawRecord
 from chess_crawl.providers.lichess.parser import parse_user_profile
-from chess_crawl.storage.db import transaction
 from chess_crawl.storage.raw import insert_fetch_log, store_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user
 
@@ -29,7 +29,7 @@ PROFILES = [
 
 
 def normalize_observation(
-    conn: sqlite3.Connection,
+    conn: Connection,
     provider: str,
     body: dict,
     *,
@@ -54,7 +54,7 @@ def normalize_observation(
 
 @pytest.mark.parametrize(("provider", "identity", "status"), PROFILES)
 def test_profile_refresh_clears_removed_metadata(
-    initialized_conn: sqlite3.Connection, provider: str, identity: dict, status: dict,
+    initialized_conn: Connection, provider: str, identity: dict, status: dict,
 ) -> None:
     conn = initialized_conn
     original_id = normalize_observation(conn, provider, {**identity, **status, "title": "FM"}, fetched_at=100)
@@ -67,12 +67,12 @@ def test_profile_refresh_clears_removed_metadata(
     assert user["updated_at"] == 200
     snapshots = conn.execute("SELECT status, title FROM user_snapshots ORDER BY captured_at").fetchall()
     assert snapshots[0]["status"] is not None
-    assert tuple(snapshots[1]) == (None, None)
+    assert tuple(snapshots[1].values()) == (None, None)
 
 
 @pytest.mark.parametrize(("provider", "identity", "status"), PROFILES)
 def test_sparse_game_observation_preserves_profile_metadata(
-    initialized_conn: sqlite3.Connection, provider: str, identity: dict, status: dict,
+    initialized_conn: Connection, provider: str, identity: dict, status: dict,
 ) -> None:
     conn = initialized_conn
     normalize_observation(conn, provider, {**identity, **status, "title": "FM"}, fetched_at=100)
@@ -85,7 +85,7 @@ def test_sparse_game_observation_preserves_profile_metadata(
     assert after["title"] == "FM"
 
 
-def test_stats_observation_preserves_profile_metadata(initialized_conn: sqlite3.Connection) -> None:
+def test_stats_observation_preserves_profile_metadata(initialized_conn: Connection) -> None:
     conn = initialized_conn
     normalize_observation(
         conn, "chess.com", {"player_id": 42, "username": "Alice", "status": "closed", "title": "FM"},
@@ -103,11 +103,11 @@ def test_stats_observation_preserves_profile_metadata(initialized_conn: sqlite3.
 
 @pytest.mark.parametrize(("provider", "identity", "status"), PROFILES)
 def test_old_profile_replay_preserves_newer_profile(
-    initialized_conn: sqlite3.Connection, provider: str, identity: dict, status: dict,
+    initialized_conn: Connection, provider: str, identity: dict, status: dict,
 ) -> None:
     conn = initialized_conn
     normalize_observation(conn, provider, {**identity, **status, "title": "FM"}, fetched_at=100)
-    old_raw_id = conn.execute("SELECT id FROM raw_payloads").fetchone()[0]
+    old_raw_id = require_row(conn.execute("SELECT id FROM raw_payloads"))[0]
     normalize_observation(conn, provider, {**identity, "title": "IM"}, fetched_at=200)
 
     normalize_user_payload(conn, old_raw_id)
@@ -119,25 +119,25 @@ def test_old_profile_replay_preserves_newer_profile(
 
 
 @pytest.mark.parametrize("timestamps", [(100, 200, 300), (100, 100, 100)])
-def test_repeated_profile_body_is_a_new_observation(initialized_conn: sqlite3.Connection, timestamps: tuple) -> None:
+def test_repeated_profile_body_is_a_new_observation(initialized_conn: Connection, timestamps: tuple) -> None:
     conn = initialized_conn
     original = {"id": "alice", "username": "Alice", "title": "FM"}
     changed = {"id": "alice", "username": "Alice", "title": "IM"}
     for payload, timestamp in zip((original, changed, original), timestamps, strict=True):
         normalize_observation(conn, "lichess", payload, fetched_at=timestamp)
-    changed_raw_id = conn.execute("SELECT id FROM raw_payloads ORDER BY id DESC LIMIT 1").fetchone()[0]
+    changed_raw_id = require_row(conn.execute("SELECT id FROM raw_payloads ORDER BY id DESC LIMIT 1"))[0]
 
     normalize_user_payload(conn, changed_raw_id)
 
     user = list_users(conn)["items"][0]
     assert user["title"] == "FM"
     assert user["updated_at"] == timestamps[-1]
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 2
-    assert conn.execute("SELECT fetched_at FROM raw_payloads ORDER BY id LIMIT 1").fetchone()[0] == timestamps[0]
-    assert conn.execute("SELECT captured_at FROM user_snapshots WHERE title = 'FM'").fetchone()[0] == timestamps[-1]
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 2
+    assert require_row(conn.execute("SELECT fetched_at FROM raw_payloads ORDER BY id LIMIT 1"))[0] == timestamps[0]
+    assert require_row(conn.execute("SELECT captured_at FROM user_snapshots WHERE title = 'FM'"))[0] == timestamps[-1]
 
 
-def test_profile_refresh_is_independent_of_sparse_observation_time(initialized_conn: sqlite3.Connection) -> None:
+def test_profile_refresh_is_independent_of_sparse_observation_time(initialized_conn: Connection) -> None:
     conn = initialized_conn
     original = {"player_id": 42, "username": "Alice", "status": "closed", "title": "FM"}
     normalize_observation(conn, "chess.com", original, fetched_at=100)
@@ -151,21 +151,21 @@ def test_profile_refresh_is_independent_of_sparse_observation_time(initialized_c
     assert user["updated_at"] == 300
 
 
-def test_equivalent_snapshot_replay_keeps_latest_capture(initialized_conn: sqlite3.Connection) -> None:
+def test_equivalent_snapshot_replay_keeps_latest_capture(initialized_conn: Connection) -> None:
     conn = initialized_conn
     identity = {"id": "alice", "username": "Alice", "title": "FM"}
     normalize_observation(conn, "lichess", {**identity, "seenAt": 200000}, fetched_at=200)
-    latest_raw_id = conn.execute("SELECT id FROM raw_payloads").fetchone()[0]
+    latest_raw_id = require_row(conn.execute("SELECT id FROM raw_payloads"))[0]
 
     # seenAt is raw profile evidence but not part of the normalized snapshot.
     normalize_observation(conn, "lichess", {**identity, "seenAt": 100000}, fetched_at=100)
 
-    snapshot = conn.execute("SELECT captured_at, raw_payload_id FROM user_snapshots").fetchone()
-    assert tuple(snapshot) == (200, latest_raw_id)
-    assert conn.execute("SELECT COUNT(*) FROM user_snapshots").fetchone()[0] == 1
+    snapshot = require_row(conn.execute("SELECT captured_at, raw_payload_id FROM user_snapshots"))
+    assert tuple(snapshot.values()) == (200, latest_raw_id)
+    assert require_row(conn.execute("SELECT COUNT(*) FROM user_snapshots"))[0] == 1
 
 
-def test_304_replays_profiles_normalized_before_metadata_fix(initialized_conn: sqlite3.Connection) -> None:
+def test_304_replays_profiles_normalized_before_metadata_fix(initialized_conn: Connection) -> None:
     conn = initialized_conn
     config = Config(chesscom_delay_s=0, max_retries=0)
     first = fetch_user_profile(
@@ -192,8 +192,8 @@ def test_304_replays_profiles_normalized_before_metadata_fix(initialized_conn: s
     user = list_users(conn)["items"][0]
     assert user["account_status"] is None
     assert user["title"] is None
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
-    assert conn.execute("SELECT parser_version FROM raw_payloads").fetchone()[0] == PARSER_VERSION
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
+    assert require_row(conn.execute("SELECT parser_version FROM raw_payloads"))[0] == PARSER_VERSION
 
 
 @pytest.mark.parametrize(("first", "second"), [
@@ -205,7 +205,7 @@ def test_304_replays_profiles_normalized_before_metadata_fix(initialized_conn: s
     ({"tosViolation": False}, {}),
 ])
 def test_lichess_native_profile_changes_are_preserved_in_snapshots(
-    initialized_conn: sqlite3.Connection, first: dict, second: dict,
+    initialized_conn: Connection, first: dict, second: dict,
 ) -> None:
     conn = initialized_conn
     identity = {"id": "alice", "username": "Alice", "perfs": {"blitz": {"rating": 1500}}}
@@ -232,14 +232,14 @@ def test_lichess_parser_preserves_verified_and_explicit_country(verified: bool |
     assert user.country == "GR"
 
 
-def test_v2_lichess_profile_replay_recovers_native_metadata(initialized_conn: sqlite3.Connection) -> None:
+def test_v2_lichess_profile_replay_recovers_native_metadata(initialized_conn: Connection) -> None:
     conn = initialized_conn
     body = {
         "id": "alice", "username": "Alice", "profile": {"flag": "pirate", "bio": "Chess player"},
         "disabled": True, "verified": False, "tosViolation": False,
     }
     normalize_observation(conn, "lichess", body, fetched_at=100)
-    raw_id = conn.execute("SELECT id FROM raw_payloads").fetchone()[0]
+    raw_id = require_row(conn.execute("SELECT id FROM raw_payloads"))[0]
     # Persist the old parser's content key and reduced JSON as an existing
     # archive would contain before upgrading; the raw response is unchanged.
     old_hash = canonical_hash({
@@ -247,15 +247,15 @@ def test_v2_lichess_profile_replay_recovers_native_metadata(initialized_conn: sq
         "country": None, "patron": None, "count": {}, "perfs": {},
     })
     with transaction(conn):
-        conn.execute("UPDATE user_snapshots SET perfs_or_stats = ?, content_hash = ?", ('{"perfs":{}}', old_hash))
+        conn.execute("UPDATE user_snapshots SET perfs_or_stats = %s, content_hash = %s", ('{"perfs":{}}', old_hash))
         update_raw_payload_status(conn, raw_id, status="parsed", parser_version="users-normalizer-v2")
 
     replay_raw_payload(conn, raw_id)
 
-    snapshot = conn.execute("SELECT perfs_or_stats FROM user_snapshots ORDER BY captured_at DESC, id DESC").fetchone()
+    snapshot = require_row(conn.execute("SELECT perfs_or_stats FROM user_snapshots ORDER BY captured_at DESC, id DESC"))
     assert json.loads(snapshot["perfs_or_stats"]) == {
         "perfs": {}, "profile": body["profile"], "disabled": True, "verified": False, "tosViolation": False,
     }
-    assert conn.execute("SELECT parser_version FROM raw_payloads").fetchone()[0] == PARSER_VERSION
+    assert require_row(conn.execute("SELECT parser_version FROM raw_payloads"))[0] == PARSER_VERSION
     assert PARSER_VERSION != "users-normalizer-v2"
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1

@@ -288,7 +288,7 @@ assert arguments[:2] == [".github/scripts/ci_performance.py", "measure"]
 label = arguments[arguments.index("--label") + 1]
 commands = {
     "image-build": ("build", ["docker", "compose", "build", "api"]),
-    "mercure-pull": ("pull", ["docker", "compose", "pull", "mercure"]),
+    "mercure-pull": ("pull", ["docker", "compose", "pull", "mercure", "postgres"]),
 }
 role, expected = commands[label]
 command = arguments[arguments.index("--") + 1:]
@@ -323,7 +323,7 @@ raise SystemExit(status)
         "COMPOSE_FILE": _compose_files(),
     }
     script = _shell_script(_step(
-        "compose-smoke", "Build application and pull Mercure concurrently",
+        "compose-smoke", "Build application and pull infrastructure concurrently",
     ))
     log = tmp_path / "shell.log"
     with log.open("w") as output:
@@ -429,3 +429,24 @@ def test_compose_smoke_rejects_disabled_assertions(optimization: str) -> None:
     assert result.returncode != 0
     assert "Compose smoke requires assertions" in result.stderr
     assert "FileNotFoundError" not in result.stderr  # Fail before reading credentials or contacting Docker.
+
+
+@pytest.mark.parametrize(("step_name", "condition", "phase"), [
+    ("Start disposable PostgreSQL", "steps.scope.outputs.offline == 'true'", "start"),
+    ("Remove disposable PostgreSQL", "always() && steps.scope.outputs.offline == 'true'", "stop"),
+])
+def test_postgres_lifecycle_respects_scope_and_failure_cleanup(step_name: str, condition: str, phase: str) -> None:
+    step = _step("offline-checks", step_name)
+    conditions = re.findall(r"^        if: (.+)$", step, flags=re.MULTILINE)
+    assert conditions == [condition]
+    assert f"-- python .github/scripts/test_postgres.py {phase}" in step
+    assert "continue-on-error" not in step
+
+
+def test_postgres_starts_after_scope_validation_and_has_no_unconditional_job_service() -> None:
+    job = _job("offline-checks")
+    header = job.split("    steps:\n", 1)[0]
+    assert "services:" not in header
+    assert job.index("Validate CI prerequisites") < job.index("Start disposable PostgreSQL")
+    assert job.index("Start disposable PostgreSQL") < job.index("Offline tests")
+    assert job.index("Offline tests") < job.index("Remove disposable PostgreSQL")

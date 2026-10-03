@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from chess_crawl.jobs import state
-from chess_crawl.storage.db import atomic
+from chess_crawl.storage.db import Connection, atomic
 from chess_crawl.storage.discovery import OpponentEdge, game_count_for_run
 from chess_crawl.storage.repository import upsert_provider_user
 
@@ -23,7 +22,7 @@ class CrawlBounds:
 
 
 def create_opponent_crawl(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     provider: str,
     username: str,
@@ -61,7 +60,7 @@ def create_opponent_crawl(
     )
 
 
-def ensure_local_user(conn: sqlite3.Connection, *, provider: str, username: str, now: int | None = None) -> int:
+def ensure_local_user(conn: Connection, *, provider: str, username: str, now: int | None = None) -> int:
     return upsert_provider_user(
         conn,
         provider=provider,
@@ -72,7 +71,7 @@ def ensure_local_user(conn: sqlite3.Connection, *, provider: str, username: str,
 
 
 def remaining_game_budget(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     crawl_run_id: int | None,
     provider: str,
@@ -95,7 +94,7 @@ def remaining_game_budget(
 
 @atomic
 def enqueue_opponent_children(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     crawl_run_id: int,
     parent_job_id: int,

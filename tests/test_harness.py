@@ -37,7 +37,7 @@ def test_live_opt_in_preserves_offline_isolation_for_unmarked_tests(
             assert not any(key.startswith("CHESS_CRAWL_") for key in os.environ)
             assert os.environ["UNRELATED_TEST_ENV"] == "preserved"
             for method in ("connect", "connect_ex"):
-                with pytest.raises(AssertionError, match="must not open network sockets"):
+                with pytest.raises(AssertionError, match="must not open provider network sockets"):
                     getattr(socket.socket, method)(None)
             monkeypatch.setenv("CHESS_CRAWL_MAX_GAMES", "5")
             assert Limits.from_env().max_games == 5

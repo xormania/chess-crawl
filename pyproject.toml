@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "chess-crawl"
 version = "0.1.0"
-description = "Provider-neutral, raw-first local chess data archive"
+description = "Provider-neutral, raw-first PostgreSQL chess data archive"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.27,<1.0"]
+dependencies = ["httpx>=0.27,<1.0", "psycopg[binary]>=3.2,<4"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
@@ -28,7 +28,7 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
-    "workflow: offline CLI workflow tests that exercise multiple commands and SQLite state",
+    "workflow: CLI workflow tests that exercise multiple commands and PostgreSQL state",
     "integration: offline integration tests that cross package boundaries",
     "slow: slow tests excluded from default CI unless explicitly selected",
     "live: requires explicit --run-live to use provider APIs or network access; skipped by default",
