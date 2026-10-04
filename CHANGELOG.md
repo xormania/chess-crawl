@@ -21,6 +21,13 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   unowned legacy Lichess profile relationship facts. Public profiles request
   all documented public extensions independently of OAuth relationship data.
   See [player data](docs/player-data.md) for migration and ownership details.
+- Current Chess.com statistics alongside profile facts in the rich player read;
+  statistics replay preserves account identity and display names after renames.
+- Migration-time quarantine of historical Lichess profile captures until safe
+  source replay, provider-native verification/streaming flags, and queryable
+  highest/lowest tactics and lessons ratings.
+- Public resource requests omit configured OAuth credentials; private resource
+  collection does not publish its timestamps in shared alias history.
 
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the

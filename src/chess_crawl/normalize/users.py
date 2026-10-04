@@ -14,11 +14,12 @@ from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
 from chess_crawl.storage.player_profiles import (
-    quarantine_unowned_profile, record_alias, record_profile_observations, store_profile_facts, store_rating_records,
+    publish_verified_legacy_profile, quarantine_unowned_profile, record_alias, record_profile_observations,
+    stats_account, store_profile_facts, store_rating_records,
 )
 
 
-PARSER_VERSION = "users-normalizer-v4"
+PARSER_VERSION = "users-normalizer-v5"
 
 
 def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
@@ -48,12 +49,13 @@ def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
         if not isinstance(native_data, dict):
             raise ValueError("user profiles and statistics must be JSON objects")
         observed_at = payload_observed_at(conn, raw_payload_id)
+        account = stats_account(conn, user.provider, user.display_username, raw_payload_id) if raw.endpoint_type == "user_stats" else None
         provider_user_id = upsert_provider_user(
             conn,
             provider=user.provider,
-            username=user.display_username,
-            provider_user_id=user.provider_user_id,
-            display_username=user.display_username,
+            username=user.display_username if account is None else account["username_normalized"],
+            provider_user_id=user.provider_user_id if account is None else account["provider_user_id"],
+            display_username=user.display_username if account is None else account["display_username"],
             account_status=user.account_status_raw,
             title=user.title,
             now=observed_at,
@@ -81,8 +83,9 @@ def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
         store_profile_facts(conn, snapshot_id, native_data=native_data, facts=_profile_facts(native_data, user))
         store_rating_records(conn, snapshot_id, _rating_records(native_data, user.provider))
         record_profile_observations(conn, provider_user_id, snapshot_id, raw_payload_id)
-        record_alias(conn, provider_user_id, user.display_username, observed_at=observed_at, raw_payload_id=raw_payload_id,
-                     first_observed_at=raw.fetched_at)
+        if raw.endpoint_type == "user_profile":
+            record_alias(conn, provider_user_id, user.display_username, observed_at=observed_at, raw_payload_id=raw_payload_id,
+                         first_observed_at=raw.fetched_at)
         insert_source_record(
             conn,
             entity_type="user",
@@ -108,6 +111,8 @@ def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
             parser_version=PARSER_VERSION,
             normalized_at=int(time.time()),
         )
+        if raw.provider == "lichess" and raw.endpoint_type == "user_profile":
+            publish_verified_legacy_profile(conn, raw_payload_id)
     return provider_user_id
 
 
@@ -241,7 +246,7 @@ def _profile_facts(data: dict[str, Any], user: NormalizedUser) -> dict[str, Any]
         "avatar_url": _string_or_none(data.get("avatar")),
         "profile_url": _string_or_none(data.get("url")),
         "is_verified": user.is_verified,
-        "is_streamer": data.get("is_streamer") if isinstance(data.get("is_streamer"), bool) else None,
+        "is_streamer": _boolean_or_none(data.get("is_streamer") if user.provider == "chess.com" else data.get("streaming")),
         # Chess.com's fide is a self-reported rating, never a federation ID.
         "fide_rating": _strict_integer(data.get("fide") if user.provider == "chess.com" else profile.get("fideRating")),
     }
@@ -255,6 +260,10 @@ def _strict_integer(value: object) -> int | None:
     return value if type(value) is int else None
 
 
+def _boolean_or_none(value: object) -> bool | None:
+    return value if type(value) is bool else None
+
+
 def _rating_records(data: dict[str, Any], provider: str) -> list[dict[str, Any]]:
     perfs = data.get("perfs") if provider == "lichess" else data
     if not isinstance(perfs, dict):
@@ -264,21 +273,23 @@ def _rating_records(data: dict[str, Any], provider: str) -> list[dict[str, Any]]
         if not isinstance(value, dict):
             continue
         if provider == "chess.com":
-            if not any(key in value for key in ("last", "best", "record")):
+            if not any(key in value for key in ("last", "best", "record", "highest", "lowest")):
                 continue
             last = _dictionary(value.get("last"))
-            best = _dictionary(value.get("best"))
+            best = _dictionary(value.get("best") if "best" in value else value.get("highest"))
+            lowest = _dictionary(value.get("lowest"))
             score = _dictionary(value.get("record"))
             wins, losses, draws = (_strict_integer(score.get(field)) for field in ("win", "loss", "draw"))
             games = None if wins is None or losses is None or draws is None else wins + losses + draws
             current, deviation, provisional, progress = last.get("rating"), last.get("rd"), None, None
         else:
-            best, wins, losses, draws = {}, None, None, None
+            best, lowest, wins, losses, draws = {}, {}, None, None, None
             current, deviation, provisional, progress = value.get("rating"), value.get("rd"), value.get("prov"), value.get("prog")
             games = _strict_integer(value.get("games"))
         records.append({
             "performance": performance, "rating": _strict_integer(current),
             "best_rating": _strict_integer(best.get("rating")), "best_at": _strict_integer(best.get("date")),
+            "lowest_rating": _strict_integer(lowest.get("rating")), "lowest_at": _strict_integer(lowest.get("date")),
             "rating_deviation": deviation if type(deviation) in {int, float} else None,
             "provisional": provisional if type(provisional) is bool else None,
             "games": games, "wins": wins, "losses": losses, "draws": draws,

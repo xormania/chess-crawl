@@ -159,7 +159,7 @@ def _merge_user_placeholder(conn: Connection, survivor: int, replaced: int) -> N
             _merge_source_records(conn, "user_snapshot", int(matching["id"]), int(snapshot["id"]))
             conn.execute("UPDATE user_observations SET snapshot_id = %s WHERE snapshot_id = %s", (matching["id"], snapshot["id"]))
             conn.execute(
-                """INSERT INTO user_rating_records SELECT %s, performance, rating, best_rating, best_at,
+                """INSERT INTO user_rating_records SELECT %s, performance, rating, best_rating, best_at, lowest_rating, lowest_at,
                      rating_deviation, provisional, games, wins, losses, draws, progress, native_data
                    FROM user_rating_records WHERE snapshot_id = %s
                    ON CONFLICT(snapshot_id, performance) DO NOTHING""", (matching["id"], snapshot["id"]),

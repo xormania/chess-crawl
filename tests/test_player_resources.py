@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 from datetime import date
 
@@ -65,7 +66,7 @@ def test_complete_public_profile_facts_and_unknown_fields_are_queryable(initiali
     body = {
         "username": "Alice", "player_id": 42, "joined": 0, "last_online": 123,
         "name": "Example Player", "location": "Port-au-Prince", "avatar": "https://example.test/avatar",
-        "url": "https://example.test/alice", "followers": 0, "is_streamer": False, "is_verified": False,
+        "url": "https://example.test/alice", "followers": 0, "is_streamer": False, "verified": False,
         "fide": 1800, "futureField": {"absent": None, "false": False, "zero": 0},
     }
     user_id, raw_id = _profile(initialized_conn, body, provider="chess.com")
@@ -117,13 +118,14 @@ def test_ratings_keep_zero_and_false_without_inventing_unknown_counts(initialize
     conn = initialized_conn
     user_id, _ = _profile(conn, {
         "id": "alice", "username": "Alice", "createdAt": 123456, "seenAt": 234567,
-        "profile": {"flag": "pirate", "fideRating": 1700}, "verified": False,
+        "profile": {"flag": "pirate", "fideRating": 1700}, "verified": False, "streaming": False,
         "perfs": {"blitz": {"rating": 1500, "rd": 0, "games": 0, "prov": False, "prog": 0},
                   "chess960": {"rating": 1600}},
     })
     profile = player_profile(conn, "lichess", "alice")
     assert profile is not None
     assert profile["profile"]["country"] is None
+    assert profile["profile"]["is_streamer"] is False
     assert profile["profile"]["native_data"]["createdAt"] == 123456
     records = {item["performance"]: item for item in profile["ratings"]}
     assert (records["blitz"]["rating_deviation"], records["blitz"]["games"], records["blitz"]["provisional"]) == (0, 0, False)
@@ -221,6 +223,29 @@ def test_resource_replay_follows_stable_account_after_rename(initialized_conn: C
     assert require_row(conn.execute("SELECT COUNT(*) FROM provider_users"))[0] == 1
     assert require_row(conn.execute("SELECT provider_user_id FROM user_resource_snapshots"))[0] == user_id
     assert require_row(conn.execute("SELECT username_normalized FROM provider_users"))[0] == "newname"
+
+
+def test_latest_statistics_are_visible_and_replay_preserves_renamed_identity(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    user_id, _ = _profile(conn, {"username": "OldName", "player_id": 42}, provider="chess.com", at=100)
+    stats = {"chess_blitz": {"last": {"rating": 1500}, "record": {"win": 2, "loss": 0, "draw": 0}},
+             "futureStats": {"supplied": False}}
+    raw_id = store_raw_payload(conn, RawRecord(
+        provider="chess.com", endpoint_type="user_stats", request_url="https://example.test/stats",
+        canonical_source_key="chess.com/player/oldname/stats", fetched_at=150, body=json.dumps(stats).encode(),
+    ))
+    normalize_user_payload(conn, raw_id)
+    profile = player_profile(conn, "chess.com", "OldName")
+    assert profile is not None and profile["display_username"] == "OldName"
+    assert profile["statistics"]["native_data"] == stats
+    assert profile["statistics"]["count_all"] == 2
+    _profile(conn, {"username": "NewName", "player_id": 42}, provider="chess.com", at=200)
+    replay_raw_payload(conn, raw_id)
+    assert require_row(conn.execute("SELECT COUNT(*) FROM provider_users"))[0] == 1
+    assert require_row(conn.execute("SELECT provider_user_id FROM user_snapshots WHERE raw_payload_id = %s", (raw_id,)))[0] == user_id
+    profile = player_profile(conn, "chess.com", "NewName")
+    assert profile is not None and profile["display_username"] == "NewName"
+    assert profile["statistics"]["native_data"] == stats
 
 
 def test_teams_require_token_and_owner_before_request() -> None:
@@ -378,9 +403,10 @@ def test_populated_archive_upgrade_recovers_recurring_observation_history(
                              content_hash="FM", raw_payload_id=raw_ids[0], title="FM")
         migrations.initialize(conn)
         history = profile_history(conn, user_id)
-        assert [item["title"] for item in history] == ["FM", "IM", "FM"]
-        assert [item["observed_at"] for item in history] == [100, 200, 300]
-        assert all(item["native_data"] is None for item in history)
+        assert history == []  # Old profile captures are private until safely classified.
+        retained = list(conn.execute("SELECT captured_at FROM user_observations ORDER BY id"))
+        assert [row["captured_at"] for row in retained] == [100, 200, 300]
+        assert all(read_raw_payload(conn, raw_id).owner_scope == "unassigned:legacy-profile" for raw_id in raw_ids)
         for raw_id in raw_ids:
             replay_raw_payload(conn, raw_id)
         history = profile_history(conn, user_id)
@@ -388,3 +414,102 @@ def test_populated_archive_upgrade_recovers_recurring_observation_history(
         assert len(history) == 3
         profile = player_profile(conn, "lichess", "Alice")
         assert profile is not None and profile["profile"]["native_data"]["title"] == "FM"
+
+
+@pytest.mark.parametrize("relationship", ["following", "blocking", "followable"])
+def test_migration_quarantines_legacy_oauth_body_before_any_replay(
+    uninitialized_database_url: str, monkeypatch: pytest.MonkeyPatch, relationship: str,
+) -> None:
+    baseline = tuple(item for item in migrations.migration_resources() if item[0] <= 5)
+    with connection(uninitialized_database_url, mode="rwc") as conn:
+        with monkeypatch.context() as old:
+            old.setattr(migrations, "migration_resources", lambda: baseline)
+            old.setattr(migrations, "SCHEMA_VERSION", 5)
+            migrations.initialize(conn)
+        body = json.dumps({"id": "alice", "username": "Alice", relationship: False}).encode()
+        raw_id = int(require_row(conn.execute(
+            """INSERT INTO raw_payloads(provider, endpoint_type, canonical_source_key, response_status, fetched_at,
+               body_hash, body_compression, raw_body, body_bytes)
+               VALUES('lichess', 'user_profile', 'lichess/user/alice/profile', 200, 100, %s, 'gzip', %s, %s) RETURNING id""",
+            (compute_body_hash(body), gzip.compress(body), len(body)),
+        ))[0])
+        migrations.initialize(conn)
+        assert conn.execute("SELECT id FROM raw_payloads WHERE owner_scope='public'").fetchall() == []
+        assert read_raw_payload(conn, raw_id).owner_scope == "unassigned:legacy-profile"
+        with pytest.raises(ValueError, match="scoped ownership"):
+            replay_raw_payload(conn, raw_id)
+        assert read_raw_payload(conn, raw_id).body == body
+        assert read_raw_payload(conn, raw_id).owner_scope == "unassigned:legacy-profile"
+        assert conn.execute("SELECT id FROM raw_payloads WHERE owner_scope='public'").fetchall() == []
+
+
+@pytest.mark.parametrize("provider,verified,streamer", [
+    ("chess.com", True, False), ("chess.com", False, True),
+    ("lichess", True, False), ("lichess", False, True),
+])
+def test_profile_flags_use_actual_provider_keys(
+    initialized_conn: Connection, provider: str, verified: bool, streamer: bool,
+) -> None:
+    body = {"username": "Alice", "verified": verified,
+            "is_streamer" if provider == "chess.com" else "streaming": streamer}
+    if provider == "chess.com":
+        body.update({"player_id": 42, "is_verified": not verified})
+    else:
+        body["id"] = "alice"
+    _profile(initialized_conn, body, provider=provider)
+    profile = player_profile(initialized_conn, provider, "Alice")
+    assert profile is not None
+    assert profile["profile"]["is_verified"] is verified
+    assert profile["profile"]["is_streamer"] is streamer
+    assert profile["profile"]["native_data"] == body
+
+
+def test_tactics_and_lessons_extrema_are_queryable_without_inventing_current_ratings(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    body = {"tactics": {"highest": {"rating": 1800, "date": 100}, "lowest": {"rating": 0, "date": 0}},
+            "lessons": {"highest": {"rating": 2000, "date": 200}, "lowest": {"rating": 1200, "date": 150}}}
+    raw_id = store_raw_payload(conn, RawRecord(provider="chess.com", endpoint_type="user_stats", request_url="https://api.chess.com/pub/player/alice/stats",
+        canonical_source_key="chess.com/player/alice/stats", fetched_at=300, body=json.dumps(body).encode()))
+    normalize_user_payload(conn, raw_id)
+    profile = player_profile(conn, "chess.com", "Alice")
+    assert profile is not None
+    records = {row["performance"]: row for row in profile["ratings"]}
+    assert set(records) == {"tactics", "lessons"}
+    for key in records:
+        row = records[key]
+        assert (row["best_rating"], row["best_at"]) == (body[key]["highest"]["rating"], body[key]["highest"]["date"])
+        assert (row["lowest_rating"], row["lowest_at"]) == (body[key]["lowest"]["rating"], body[key]["lowest"]["date"])
+        assert row["rating"] is None and row["games"] is None
+        assert row["native_data"] == body[key]
+    replay_raw_payload(conn, raw_id)
+    replay_profile = player_profile(conn, "chess.com", "Alice")
+    assert replay_profile is not None and len(replay_profile["ratings"]) == 2
+
+
+def test_private_resource_does_not_publish_collection_timestamps_as_alias_history(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    user_id, _ = _profile(conn, {"id": "alice", "username": "Alice"}, at=100)
+    before = player_profile(conn, "lichess", "Alice")
+    assert before is not None
+    before_history = profile_history(conn, user_id)
+    _resource(conn, "lichess", "teams", [{"id": "hidden-team"}], at=200, authenticated=True, owner_scope="alpha")
+    public = player_profile(conn, "lichess", "Alice")
+    assert public is not None
+    assert public["aliases"] == before["aliases"]
+    assert profile_history(conn, user_id) == before_history
+    assert public["resources"] == [] and public["resource_attempts"] == []
+
+
+@pytest.mark.parametrize("key,parameters,data", [("activity", None, []), ("performance", {"perf": "blitz"}, {})])
+def test_public_resource_contract_omits_oauth_even_when_configured(key: str, parameters: dict | None, data: object) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert "authorization" not in request.headers
+        return httpx.Response(200, json=data)
+
+    client = LichessClient(_config(token="private-token").provider("lichess"), transport=httpx.MockTransport(respond))
+    try:
+        raw = client.get_user_resource("Alice", key, parameters=parameters)
+        assert raw.owner_scope == "public"
+        assert raw.request_params["authenticated"] is False
+    finally:
+        client.close()

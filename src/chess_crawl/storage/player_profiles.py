@@ -22,6 +22,17 @@ def quarantine_unowned_profile(conn: Connection, raw_payload_id: int) -> None:
 
 
 @atomic
+def publish_verified_legacy_profile(conn: Connection, raw_payload_id: int) -> None:
+    """Only a successfully parsed, relationship-free Lichess profile is public."""
+    conn.execute(
+        """UPDATE raw_payloads SET owner_scope = 'public' WHERE id = %s
+           AND provider = 'lichess' AND endpoint_type = 'user_profile'
+           AND owner_scope = 'unassigned:legacy-profile'""",
+        (raw_payload_id,),
+    )
+
+
+@atomic
 def store_profile_facts(
     conn: Connection, snapshot_id: int, *, native_data: dict[str, Any], facts: dict[str, Any],
 ) -> None:
@@ -41,10 +52,11 @@ def store_rating_records(conn: Connection, snapshot_id: int, records: list[dict[
     conn.execute("DELETE FROM user_rating_records WHERE snapshot_id = %s", (snapshot_id,))
     for record in records:
         conn.execute(
-            """INSERT INTO user_rating_records(snapshot_id, performance, rating, best_rating, best_at,
+            """INSERT INTO user_rating_records(snapshot_id, performance, rating, best_rating, best_at, lowest_rating, lowest_at,
                 rating_deviation, provisional, games, wins, losses, draws, progress, native_data)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (snapshot_id, record["performance"], record.get("rating"), record.get("best_rating"), record.get("best_at"),
+             record.get("lowest_rating"), record.get("lowest_at"),
              record.get("rating_deviation"), record.get("provisional"), record.get("games"), record.get("wins"),
              record.get("losses"), record.get("draws"), record.get("progress"), Jsonb(record["native_data"])),
         )
@@ -260,6 +272,25 @@ def resource_account(conn: Connection, provider: str, username: str, raw_payload
     return int(aliases[0]["provider_user_id"]) if len(aliases) == 1 else None
 
 
+def stats_account(conn: Connection, provider: str, username: str, raw_payload_id: int) -> dict[str, Any] | None:
+    observed = conn.execute(
+        """SELECT p.* FROM user_observations o JOIN provider_users p ON p.id = o.provider_user_id
+           WHERE o.raw_payload_id = %s ORDER BY o.id DESC LIMIT 1""", (raw_payload_id,),
+    ).fetchone()
+    if observed is not None:
+        return dict(observed)
+    current = conn.execute(
+        "SELECT * FROM provider_users WHERE provider = %s AND username_normalized = %s", (provider, username.lower()),
+    ).fetchone()
+    if current is not None:
+        return dict(current)
+    aliases = conn.execute(
+        """SELECT p.* FROM provider_user_aliases a JOIN provider_users p ON p.id = a.provider_user_id
+           WHERE p.provider = %s AND a.username_normalized = %s LIMIT 2""", (provider, username.lower()),
+    ).fetchall()
+    return dict(aliases[0]) if len(aliases) == 1 else None
+
+
 def player_profile(conn: Connection, provider: str, username: str, *, owner_scope: str = "public") -> dict[str, Any] | None:
     user = conn.execute(
         "SELECT * FROM provider_users WHERE provider = %s AND username_normalized = %s",
@@ -284,6 +315,14 @@ def player_profile(conn: Connection, provider: str, username: str, *, owner_scop
         (user_id,),
     ).fetchone()
     result["profile"] = None if snapshot is None else dict(snapshot)
+    stats = conn.execute(
+        """SELECT s.*, o.captured_at AS observed_at, o.fetch_log_id FROM user_observations o
+           JOIN user_snapshots s ON s.id = o.snapshot_id JOIN raw_payloads raw ON raw.id = o.raw_payload_id
+           WHERE o.provider_user_id = %s AND raw.owner_scope = 'public'
+           AND o.endpoint_type = 'user_stats' ORDER BY o.captured_at DESC,
+             o.fetch_log_id DESC NULLS LAST, o.id DESC LIMIT 1""", (user_id,),
+    ).fetchone()
+    result["statistics"] = None if stats is None else dict(stats)
     result["aliases"] = [dict(row) for row in conn.execute(
         """SELECT a.* FROM provider_user_aliases a LEFT JOIN raw_payloads r ON r.id = a.raw_payload_id
            WHERE a.provider_user_id = %s AND (r.owner_scope = 'public' OR a.raw_payload_id IS NULL)

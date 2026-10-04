@@ -19,12 +19,18 @@ status, and FIDE rating. Original provider timestamps retain their precision in
 native JSON; convenience timestamps are Unix seconds. Chess.com's `fide` field
 is a rating, never an identity number. A Lichess flag is not inferred to be a
 country. Supplied FIDE identities remain separately named native fields.
+The streamer convenience flag maps Chess.com's `is_streamer` and Lichess's
+`streaming`; the latter describes current streaming activity. Native fields
+retain these provider-specific meanings and the separate Lichess streamer data.
 
-`user_rating_records` makes supplied ratings, best ratings/dates, deviations,
+`user_rating_records` makes supplied ratings, best/lowest ratings and dates, deviations,
 provisional flags, records, game totals, and progress queryable by provider
 performance name. Unreported counts remain null. All native rating/statistic
 fields remain available in JSONB. Historical ratings reconstructed from games
 are a separate future calculation, not provider-supplied history.
+The rich player read includes the latest Chess.com statistics snapshot separately
+from its latest profile. Replaying older statistics follows its recorded account
+identity and cannot recreate or rename an account from an outdated request name.
 
 Snapshot content is deduplicated; `user_observations` records each successful
 HTTP 200/304 occurrence separately. An A → B → A profile therefore has two
@@ -35,8 +41,12 @@ links; a raw-only source supplies one observation when no fetch was recorded.
 
 Schema migration does not download player data. Existing snapshots initially
 retain their older projections and observations; replay archived responses
-with `users-normalizer-v4` to populate complete facts and ratings. Existing
-sources remain usable throughout that data upgrade.
+with `users-normalizer-v5` to populate complete facts and ratings. Historical
+Lichess profile captures are conservatively quarantined at migration time,
+because retained request metadata cannot establish whether OAuth was used.
+This works for inline, compressed, and external source bodies without reading
+them inside the schema transaction. A successful relationship-free replay
+publishes the capture as public; unrelated sources remain usable throughout.
 
 The public Lichess profile collector explicitly requests profile, trophies,
 performance ranks, and public FIDE ID. It omits OAuth authorization because

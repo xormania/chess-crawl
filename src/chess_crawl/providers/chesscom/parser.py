@@ -28,7 +28,7 @@ def parse_user_profile(body: bytes) -> NormalizedUser:
         created_at=_int_or_none(data.get("joined")),
         last_seen_at=_int_or_none(data.get("last_online")),
         country=data.get("country"),
-        is_verified=_bool_or_none(data.get("is_verified")),
+        is_verified=_bool_or_none(data.get("verified", data.get("is_verified"))),
     )
 
 

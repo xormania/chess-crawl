@@ -1,5 +1,10 @@
 -- Profile bodies are deduplicated; observations retain every successful fetch.
 ALTER TABLE raw_payloads ADD COLUMN owner_scope TEXT NOT NULL DEFAULT 'public';
+-- Historical request captures cannot prove whether OAuth was used, and bodies
+-- may be compressed or external. Keep all old Lichess profiles out of public
+-- reads until a source replay verifies the absence of caller-relative fields.
+UPDATE raw_payloads SET owner_scope = 'unassigned:legacy-profile'
+WHERE provider = 'lichess' AND endpoint_type = 'user_profile';
 CREATE INDEX idx_raw_payload_owner_scope ON raw_payloads(owner_scope, id);
 ALTER TABLE user_snapshots
     ADD COLUMN native_data JSONB,
@@ -19,6 +24,8 @@ CREATE TABLE user_rating_records (
     rating INTEGER,
     best_rating INTEGER,
     best_at BIGINT,
+    lowest_rating INTEGER,
+    lowest_at BIGINT,
     rating_deviation DOUBLE PRECISION,
     provisional BOOLEAN,
     games INTEGER,

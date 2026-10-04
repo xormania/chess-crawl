@@ -152,17 +152,19 @@ class LichessClient:
             raise ValueError(f"resource {resource_key} requires an OAuth token")
         if resource.access_scope == "workspace" and scope != self.settings.oauth_owner_scope:
             raise ValueError("provider OAuth credentials belong to a different workspace")
+        authenticated = resource.authentication != "none" and bool(self.settings.oauth_token)
         result = self.http.request(
-            "GET", resource.url(username, values), endpoint_type="user_resource", headers=self._headers("application/json"),
+            "GET", resource.url(username, values), endpoint_type="user_resource",
+            headers=self._headers("application/json") if authenticated else {"Accept": "application/json"},
         )
         return _raw_record(
             result, endpoint_type="user_resource",
             canonical_source_key=resource_source_key(
-                PROVIDER, username, resource_key, values, owner_scope=scope, authenticated=bool(self.settings.oauth_token),
+                PROVIDER, username, resource_key, values, owner_scope=scope, authenticated=authenticated,
             ),
             target_username=_username(username), request_params={
                 "resource_key": resource_key, "parameters": values, "owner_scope": scope,
-                "authenticated": bool(self.settings.oauth_token),
+                "authenticated": authenticated,
             },
             owner_scope=scope,
         )

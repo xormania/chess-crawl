@@ -45,8 +45,9 @@ def normalize_resource_payload(conn: Connection, raw_payload_id: int) -> int:
         user_id = resource_account(conn, raw.provider, username, raw_payload_id)
         if user_id is None:
             user_id = upsert_provider_user(conn, provider=raw.provider, username=username, now=observed_at)
-        record_alias(conn, user_id, username, observed_at=observed_at,
-                     raw_payload_id=raw_payload_id if owner_scope == "public" else None, first_observed_at=raw.fetched_at)
+        if owner_scope == "public":
+            record_alias(conn, user_id, username, observed_at=observed_at,
+                         raw_payload_id=raw_payload_id, first_observed_at=raw.fetched_at)
         snapshot_id = store_resource_snapshot(
             conn, user_id=user_id, resource_key=resource_key, parameters=parameters, native_data=data,
             coverage_status=status, coverage_note=note, parser_version=PARSER_VERSION, raw_payload_id=raw_payload_id,
