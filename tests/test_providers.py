@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from chess_crawl.storage.db import Connection, require_row
+
 import json
-import sqlite3
 from pathlib import Path
 
 import httpx
@@ -148,9 +149,9 @@ def test_chesscom_200_stores_raw_before_user_normalization(fixtures_dir: Path, i
     raw = conn.execute("SELECT response_headers, normalization_status FROM raw_payloads").fetchone()
     assert json.loads(raw["response_headers"])["etag"] == '"profile-v1"'
     assert raw["normalization_status"] == "parsed"
-    assert conn.execute("SELECT COUNT(*) FROM provider_users WHERE provider = 'chess.com'").fetchone()[0] == 1
-    assert conn.execute("SELECT raw_payload_id FROM user_snapshots").fetchone()[0] == result.raw_payload_id
-    assert conn.execute("SELECT raw_payload_id FROM fetch_logs WHERE status_code = 200").fetchone()[0] == result.raw_payload_id
+    assert require_row(conn.execute("SELECT COUNT(*) FROM provider_users WHERE provider = 'chess.com'"))[0] == 1
+    assert require_row(conn.execute("SELECT raw_payload_id FROM user_snapshots"))[0] == result.raw_payload_id
+    assert require_row(conn.execute("SELECT raw_payload_id FROM fetch_logs WHERE status_code = 200"))[0] == result.raw_payload_id
 
 
 def test_raw_payload_exists_before_normalizer_runs(initialized_conn) -> None:
@@ -168,7 +169,7 @@ def test_raw_payload_exists_before_normalizer_runs(initialized_conn) -> None:
     )
 
     def normalizer(inner_conn, raw_payload_id: int) -> list[int]:
-        seen.append(inner_conn.execute("SELECT COUNT(*) FROM raw_payloads WHERE id = ?", (raw_payload_id,)).fetchone()[0])
+        seen.append(require_row(inner_conn.execute("SELECT COUNT(*) FROM raw_payloads WHERE id = %s", (raw_payload_id,)))[0])
         return []
 
     result = _store_and_normalize(conn, record, normalizer=normalizer)
@@ -210,8 +211,8 @@ def test_chesscom_304_uses_conditional_headers_without_new_raw(fixtures_dir: Pat
     assert first.raw_payload_id is not None
     assert second.raw_payload_id is None
     assert second.status_code == 304
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
-    assert conn.execute("SELECT COUNT(*) FROM fetch_logs WHERE status_code = 304 AND from_cache = 1").fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM fetch_logs WHERE status_code = 304 AND from_cache = 1"))[0] == 1
 
 
 def test_404_and_410_are_logged_without_raw_payload(initialized_conn) -> None:
@@ -227,8 +228,8 @@ def test_404_and_410_are_logged_without_raw_payload(initialized_conn) -> None:
 
     assert first.status_code == 404
     assert second.status_code == 410
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM errors WHERE error_kind IN ('http_404','http_410')").fetchone()[0] == 2
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 0
+    assert require_row(conn.execute("SELECT COUNT(*) FROM errors WHERE error_kind IN ('http_404','http_410')"))[0] == 2
 
 
 def test_chesscom_stats_store_raw_and_snapshot(fixtures_dir: Path, initialized_conn) -> None:
@@ -278,7 +279,7 @@ def test_lichess_429_waits_60_seconds_then_retries(fixtures_dir: Path, initializ
     assert result.status_code == 200
     assert sleeps == [60.0]
     assert [row["status_code"] for row in conn.execute("SELECT status_code FROM fetch_logs ORDER BY id")] == [429, 200]
-    assert conn.execute("SELECT retry_after FROM fetch_logs WHERE status_code = 429").fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT retry_after FROM fetch_logs WHERE status_code = 429"))[0] == 1
 
 
 def test_chesscom_monthly_archive_normalizes_game(fixtures_dir: Path, initialized_conn) -> None:
@@ -300,8 +301,8 @@ def test_chesscom_monthly_archive_normalizes_game(fixtures_dir: Path, initialize
     assert game["provider_game_id"] == "00000000-0000-4000-8000-000000000001"
     assert game["outcome"] == "white_win"
     assert game["ended_at"] == 1704067500
-    assert conn.execute("SELECT COUNT(*) FROM game_participants WHERE game_id = ?", (game["id"],)).fetchone()[0] == 2
-    assert conn.execute("SELECT rating FROM ratings_at_game WHERE game_id = ? AND color = 'white'", (game["id"],)).fetchone()[0] == 1510
+    assert require_row(conn.execute("SELECT COUNT(*) FROM game_participants WHERE game_id = %s", (game["id"],)))[0] == 2
+    assert require_row(conn.execute("SELECT rating FROM ratings_at_game WHERE game_id = %s AND color = 'white'", (game["id"],)))[0] == 1510
 
 
 def test_game_normalization_failure_rolls_back_partial_normalized_rows(
@@ -337,11 +338,11 @@ def test_game_normalization_failure_rolls_back_partial_normalized_rows(
     with pytest.raises(RuntimeError, match="injected normalization failure"):
         normalize_games_payload(conn, raw_payload_id)
 
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
-    assert conn.execute("SELECT normalization_status FROM raw_payloads").fetchone()[0] == "pending"
-    assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM provider_users").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0] == 0
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
+    assert require_row(conn.execute("SELECT normalization_status FROM raw_payloads"))[0] == "pending"
+    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 0
+    assert require_row(conn.execute("SELECT COUNT(*) FROM provider_users"))[0] == 0
+    assert require_row(conn.execute("SELECT COUNT(*) FROM source_records"))[0] == 0
 
 
 def test_lichess_games_ndjson_normalizes_ms_timestamps(fixtures_dir: Path, initialized_conn) -> None:
@@ -369,7 +370,7 @@ def test_lichess_games_ndjson_normalizes_ms_timestamps(fixtures_dir: Path, initi
     assert game["outcome"] == "black_win"
     assert game["created_at"] == 1704067200
     assert game["ended_at"] == 1704067500
-    assert b"1704067200000" in conn.execute("SELECT raw_body FROM raw_payloads").fetchone()[0]
+    assert b"1704067200000" in require_row(conn.execute("SELECT raw_body FROM raw_payloads"))[0]
 
 
 @pytest.mark.parametrize("single_game", [False, True], ids=["user-export", "single-export"])
@@ -443,7 +444,7 @@ def test_provider_registry_lists_chesscom_and_lichess() -> None:
 )
 def test_user_normalization_failure_rolls_back_all_normalized_rows(
     fixtures_dir: Path,
-    initialized_conn: sqlite3.Connection,
+    initialized_conn: Connection,
     monkeypatch: pytest.MonkeyPatch,
     provider,
     endpoint_type,
@@ -474,11 +475,11 @@ def test_user_normalization_failure_rolls_back_all_normalized_rows(
         normalize_user_payload(conn, raw_payload_id)
 
     for table in ("provider_users", "user_snapshots", "source_records"):
-        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
-    assert conn.execute("SELECT normalization_status FROM raw_payloads").fetchone()[0] == "pending"
+        assert require_row(conn.execute(f"SELECT COUNT(*) FROM {table}"))[0] == 0
+    assert require_row(conn.execute("SELECT normalization_status FROM raw_payloads"))[0] == "pending"
 
     monkeypatch.setattr(users_module, "insert_source_record", original_insert)
     assert normalize_user_payload(conn, raw_payload_id) is not None
-    assert conn.execute("SELECT COUNT(*) FROM user_snapshots").fetchone()[0] == 1
-    assert conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0] == 2
-    assert conn.execute("SELECT normalization_status FROM raw_payloads").fetchone()[0] == "parsed"
+    assert require_row(conn.execute("SELECT COUNT(*) FROM user_snapshots"))[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM source_records"))[0] == 2
+    assert require_row(conn.execute("SELECT normalization_status FROM raw_payloads"))[0] == "parsed"

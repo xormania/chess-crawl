@@ -13,18 +13,44 @@ x-python: &python
     - ALL
   security_opt:
     - no-new-privileges:true
-  volumes:
-    # Mount the directory, including SQLite WAL/SHM files and executor locks.
-    - archive_data:/data
 
-x-archive-env: &archive-env
-  CHESS_CRAWL_DB: /data/archive.sqlite
+x-database-env: &database-env
+  CHESS_CRAWL_DATABASE_URL: ${CHESS_CRAWL_DATABASE_URL:-postgresql://chess_crawl@postgres:5432/chess_crawl}
+  CHESS_CRAWL_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+  # This explicit policy trusts only the bundled Compose service hostname.
+  CHESS_CRAWL_DATABASE_TRANSPORT: local
+  CHESS_CRAWL_DATABASE_TRUSTED_HOST: postgres
 
 services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chess_crawl
+      POSTGRES_DB: chess_crawl
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      # PostgreSQL 18 places its versioned data directory beneath this mount.
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 60s
+
   init:
     <<: *python
-    command: ["chess-crawl", "init", "--db", "/data/archive.sqlite"]
-    environment: *archive-env
+    command: ["chess-crawl", "init"]
+    environment: *database-env
+    secrets:
+      - postgres_password
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: "no"
 
   api:
@@ -34,7 +60,7 @@ services:
       init:
         condition: service_completed_successfully
     environment:
-      <<: *archive-env
+      <<: *database-env
       CHESS_CRAWL_API_TOKEN_FILE: /run/secrets/api_token
       CHESS_CRAWL_MAX_GAMES: ${CHESS_CRAWL_MAX_GAMES:-1000}
       CHESS_CRAWL_MAX_DEPTH: ${CHESS_CRAWL_MAX_DEPTH:-2}
@@ -43,6 +69,7 @@ services:
       CHESS_CRAWL_PAGE_SIZE: ${CHESS_CRAWL_PAGE_SIZE:-100}
       CHESS_CRAWL_MAX_DATE_SPAN_DAYS: ${CHESS_CRAWL_MAX_DATE_SPAN_DAYS:-366}
     secrets:
+      - postgres_password
       - api_token
     ports:
       - "${CHESS_CRAWL_BIND_ADDRESS:-127.0.0.1}:${CHESS_CRAWL_API_PORT:-8000}:8000"
@@ -63,8 +90,6 @@ services:
       - python
       - -m
       - chess_crawl.jobs.worker
-      - --db
-      - /data/archive.sqlite
       - --poll-interval
       - "${CHESS_CRAWL_POLL_INTERVAL:-1}"
       - --heartbeat-interval
@@ -76,12 +101,14 @@ services:
       - --retry-max
       - "${CHESS_CRAWL_RETRY_MAX:-3600}"
     environment:
-      <<: *archive-env
+      <<: *database-env
       CHESS_CRAWL_CONTACT: ${CHESS_CRAWL_CONTACT:-set-me@example.invalid}
       CHESS_CRAWL_LICHESS_TOKEN: ${CHESS_CRAWL_LICHESS_TOKEN:-}
       CHESS_CRAWL_LICHESS_CLOCKS: ${CHESS_CRAWL_LICHESS_CLOCKS:-true}
       CHESS_CRAWL_LICHESS_EVALS: ${CHESS_CRAWL_LICHESS_EVALS:-true}
       CHESS_CRAWL_LICHESS_ACCURACY: ${CHESS_CRAWL_LICHESS_ACCURACY:-true}
+    secrets:
+      - postgres_password
     stop_grace_period: 90s
     healthcheck:
       test: ["CMD", "python", "/app/docker/healthcheck.py", "worker"]
@@ -98,13 +125,14 @@ services:
         condition: service_completed_successfully
       mercure:
         condition: service_healthy
-    command: ["python", "-m", "chess_crawl.events.publisher", "--db", "/data/archive.sqlite"]
+    command: ["python", "-m", "chess_crawl.events.publisher"]
     environment:
-      <<: *archive-env
+      <<: *database-env
       CHESS_CRAWL_MERCURE_URL: http://mercure/.well-known/mercure
       CHESS_CRAWL_MERCURE_PUBLISHER_JWT_FILE: /run/secrets/mercure_publisher_jwt
       CHESS_CRAWL_MERCURE_TOPIC_PREFIX: ${CHESS_CRAWL_MERCURE_TOPIC_PREFIX:-https://chess-crawl.local}
     secrets:
+      - postgres_password
       - mercure_publisher_jwt
     stop_grace_period: 30s
 
@@ -137,11 +165,13 @@ services:
       start_period: 10s
 
 volumes:
-  archive_data:
+  postgres_data:
   mercure_data:
   mercure_config:
 
 secrets:
+  postgres_password:
+    file: ${CHESS_CRAWL_SECRETS_DIR:-./data/dev-secrets}/postgres_password
   api_token:
     file: ${CHESS_CRAWL_SECRETS_DIR:-./data/dev-secrets}/api_token
   mercure_signing_key:

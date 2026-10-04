@@ -14,17 +14,13 @@ RUN uv sync --locked --no-dev --extra api --no-editable
 
 FROM python:3.13-slim AS runtime
 RUN groupadd --gid 10001 chess-crawl \
-    && useradd --uid 10001 --gid 10001 --create-home chess-crawl \
-    && mkdir /data \
-    && chown chess-crawl:chess-crawl /data
+    && useradd --uid 10001 --gid 10001 --create-home chess-crawl
 COPY --from=builder /app/.venv /app/.venv
 COPY docker/healthcheck.py /app/docker/healthcheck.py
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    CHESS_CRAWL_DB=/data/archive.sqlite
+    PYTHONUNBUFFERED=1
 WORKDIR /app
 USER 10001:10001
-VOLUME ["/data"]
 EXPOSE 8000
 CMD ["uvicorn", "chess_crawl.api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

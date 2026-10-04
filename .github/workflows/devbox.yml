@@ -1,0 +1,63 @@
+name: Devbox
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [dev, 'work/**', master]
+    paths:
+      - devbox.json
+      - devbox.lock
+      - pyproject.toml
+      - uv.lock
+      - scripts/check_dev.sh
+      - .github/workflows/devbox.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  devbox-smoke:
+    name: Devbox setup and tools (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up a pre-existing non-Devbox Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Reproduce adopting Devbox with an existing virtual environment
+        run: python -m venv .venv
+
+      - name: Install the locked development toolchain
+        uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0 # v0.14.0
+        with:
+          devbox-version: '0.18.4'
+          enable-cache: false
+
+      - name: Set up the uv environment
+        run: devbox run setup
+
+      - name: Verify tool and interpreter selection
+        run: |
+          devbox run python --version
+          devbox run uv --version
+          devbox run git --version
+          devbox run psql --version
+          devbox run pg_dump --version
+          devbox run pg_restore --version
+          devbox run uv run --locked python -c 'import pathlib, sys; assert sys.version_info[:2] == (3, 13); assert pathlib.Path(sys.prefix) == pathlib.Path.cwd() / ".venv"; assert pathlib.Path(sys.base_prefix).resolve().is_relative_to("/nix/store")'
+
+      - name: Run source checks and exercise pytest argument forwarding
+        run: |
+          devbox run check
+          devbox run test -q tests/test_config_and_codes.py
+
+      - name: Ensure setup preserves both lock files
+        run: git diff --exit-code -- devbox.json devbox.lock pyproject.toml uv.lock

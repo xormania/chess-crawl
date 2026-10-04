@@ -23,7 +23,7 @@ def main() -> int:
             finally:
                 client.close()
         if mode == "worker":
-            with connection(os.environ["CHESS_CRAWL_DB"]) as conn:
+            with connection(os.environ["CHESS_CRAWL_DATABASE_URL"]) as conn:
                 return 0 if worker_status(conn)["alive"] else 1
         return 1
     except Exception:

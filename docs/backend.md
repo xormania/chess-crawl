@@ -26,25 +26,37 @@ set `CHESS_CRAWL_CONTACT` to your contact address in the shell or Compose `.env`
 and run `docker compose up -d --wait` to apply the worker configuration.
 
 The bootstrap generates local credentials under `data/dev-secrets/`; these files
-are ignored by Git and excluded from image builds. It preserves `api_token` and
-`mercure_signing_key` on reruns, and generates scoped
+are ignored by Git and excluded from image builds. It preserves
+`postgres_password`, `api_token`, and `mercure_signing_key` on reruns, and generates scoped
 `mercure_publisher_jwt` and `mercure_subscriber_jwt` files. The subscriber token
 stays on the host for integration clients. These development JWTs have no expiry;
 deployment and end-user token issuance belong to the deploying application.
 
 | Service | Responsibility |
 | --- | --- |
-| `init` | Apply archive migrations, then exit successfully. |
+| `postgres` | Persist archive data using PostgreSQL 18 on the private Compose network. |
+| `init` | Wait for PostgreSQL readiness, apply archive migrations, then exit successfully. |
 | `api` | Authenticated HTTP submissions and archive reads. |
 | `worker` | Hold the executor lock and acquire provider data serially. |
 | `events` | Deliver committed outbox entries to Mercure. |
 | `mercure` | Serve private event subscriptions using `dunglas/mercure`. |
 
-The Python services run as UID/GID `10001` and share the named `archive_data`
-volume at `/data`, with the database at `/data/archive.sqlite`. Mounting the
-directory also preserves SQLite's WAL/SHM files and archive lock files. Mercure
-has separate `mercure_data` and `mercure_config` volumes. The API and worker can
-start independently of hub availability; the event publisher waits for the hub.
+The Python services run as UID/GID `10001` with read-only filesystems and connect
+to PostgreSQL using a password-free URL and a mounted password secret. PostgreSQL
+18 owns the `postgres_data` volume mounted at `/var/lib/postgresql`; the versioned
+server data directory is below that mount. No database port is published to the
+host. Mercure has separate `mercure_data` and `mercure_config` volumes.
+
+The migration service waits for healthy PostgreSQL. API, worker, and publisher
+start only after migrations succeed; a migration failure blocks application
+startup. The API and worker can start independently of hub availability, while
+the event publisher also waits for healthy Mercure.
+
+Retain `postgres_password` alongside the persistent database. The PostgreSQL
+image uses it to initialize the database role on its first start; changing the
+secret file later does not rotate the role's password. Bootstrap reruns retain
+the existing value. A PostgreSQL major-version upgrade requires a deliberate
+database upgrade procedure; replacing the image tag alone is insufficient.
 
 The API is available at `http://127.0.0.1:8000`, with interactive documentation
 at `/docs` and its schema at `/openapi.json`. The Mercure subscriber endpoint is
@@ -56,6 +68,8 @@ Compose supports these host settings, in addition to the request ceilings below:
 
 | Variable | Default or purpose |
 | --- | --- |
+| `CHESS_CRAWL_DATABASE_URL` | `postgresql://chess_crawl@postgres:5432/chess_crawl` for bundled Compose; external mode requires its own URL. |
+| `CHESS_CRAWL_DATABASE_CA_FILE` | Host PEM CA file required by `compose.external.yaml`. |
 | `CHESS_CRAWL_BIND_ADDRESS` | `127.0.0.1` |
 | `CHESS_CRAWL_API_PORT` | `8000` |
 | `CHESS_CRAWL_MERCURE_PORT` | `3000` |
@@ -69,6 +83,54 @@ Compose reads this repository's `.env` for interpolation. The CLI and bootstrap
 script do not load `.env` themselves. Export matching secrets-directory and
 topic-prefix settings before running bootstrap and Compose; JWT topic scopes
 must match the publisher's prefix. No Symfony configuration is required.
+
+
+### External PostgreSQL
+
+Use Compose 2.24.4 or newer and the external overlay when the database is
+provisioned separately. Changing only the URL in the default stack retains its
+bundled PostgreSQL dependency and local transport policy. The external overlay
+removes that dependency, excludes the bundled server from the active services,
+and keeps API, worker and publisher startup gated on successful migrations.
+It requires both an explicit database URL and a CA certificate file:
+
+```bash
+export CHESS_CRAWL_DATABASE_URL="postgresql://chess_crawl@database.example:5432/chess_crawl"
+export CHESS_CRAWL_DATABASE_CA_FILE="./data/dev-secrets/postgres_ca.pem"
+docker compose -f compose.yaml -f compose.external.yaml up --build --detach --wait --wait-timeout 120
+```
+
+Create the database and login role on that server first, and supply its password
+in the `postgres_password` secret selected by `CHESS_CRAWL_SECRETS_DIR`. Bootstrap
+preserves an existing valid password file; it does not configure the external
+server's role. Obtain the CA PEM from that server's operator, place it at the
+configured host path, and make the file readable by container UID `10001`
+(for example, mode `0444` inside the protected secrets directory). The overlay
+mounts it read-only at `/run/secrets/postgres_ca` in all four Python services.
+A missing or unreadable certificate blocks connection instead of disabling TLS.
+
+Keep using both Compose files for subsequent `up`, `stop`, `start`, `logs` and
+`down` commands. For example:
+
+```bash
+docker compose -f compose.yaml -f compose.external.yaml ps
+docker compose -f compose.yaml -f compose.external.yaml logs --tail 100 init
+```
+
+The application defaults to `CHESS_CRAWL_DATABASE_TRANSPORT=verified`, enforcing
+TLS for TCP connections with certificate-chain and hostname verification
+(`sslmode=verify-full`). Unix sockets remain local and do not use TLS.
+`CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE` supplies the CA file for source-run
+clients; external Compose sets it to the mounted certificate. Connection URL
+options cannot downgrade the enforced verified policy.
+
+The default bundled stack explicitly sets transport `local` and trusts the
+exact `postgres` hostname through `CHESS_CRAWL_DATABASE_TRUSTED_HOST`. This
+exception is for that Compose service. Source-run local mode otherwise accepts
+Unix sockets and loopback addresses. An external hostname does not become local
+merely because its URL was substituted; routing overrides such as alternate
+host addresses or service definitions cannot bypass this boundary. The external
+overlay sets transport `verified` and clears the bundled trust marker.
 
 Stop and restart the services without removing the archive:
 
@@ -91,8 +153,12 @@ it and make backend requests on behalf of its authenticated users.
 
 The API loads either `CHESS_CRAWL_API_TOKEN` or
 `CHESS_CRAWL_API_TOKEN_FILE`; configuring both is an error.
-`CHESS_CRAWL_DB` selects the initialized archive. HTTP requests never create or
-migrate an archive, and authentication runs before database access.
+`CHESS_CRAWL_DATABASE_URL` selects the initialized PostgreSQL database. Source-run
+services load either `CHESS_CRAWL_DATABASE_PASSWORD` or
+`CHESS_CRAWL_DATABASE_PASSWORD_FILE`; configuring both is an error. Compose
+mounts its generated database secret and sets the file variant. Credentials do
+not belong in connection URLs or command arguments. HTTP requests never create
+or migrate an archive, and authentication runs before database access.
 
 ### Submit bounded work
 
@@ -205,7 +271,7 @@ meanings.
 ## Worker and recovery
 
 One executor owns an archive at a time. The worker and acquisition CLI share a
-kernel-held archive lock; a second executor cannot take ownership merely
+PostgreSQL session advisory lock; a second executor cannot take ownership merely
 because a heartbeat is old. An idle worker remains alive: `/v1/worker` separates
 heartbeat liveness from whether any job is currently executing. API readiness
 alone does not prove that acquisition is running.
@@ -224,7 +290,7 @@ run attribution are transactional and idempotent.
 Outside Compose, the worker entry point is:
 
 ```bash
-uv run python -m chess_crawl.jobs.worker --db /path/to/archive.sqlite
+uv run python -m chess_crawl.jobs.worker
 ```
 
 `--once` executes at most one due job. Polling, heartbeat, and retry options are
@@ -243,7 +309,7 @@ The archive-wide graph remains deduplicated.
 
 ## Mercure events and client synchronization
 
-Committed job and run changes enter an SQLite outbox in the same transaction
+Committed job and run changes enter a PostgreSQL outbox in the same transaction
 as their state changes. The separate publisher sends private JSON updates to
 Mercure. Its retries do not stop chess acquisition. Delivery is at least once:
 a publisher crash after hub acceptance can cause the same event to be sent
@@ -308,26 +374,21 @@ when an existing archive must be retained unchanged.
 
 ## Storage and deployment boundary
 
-The current deployment uses SQLite on one host with a local persistent volume.
-API, worker, and event publisher share that archive; only one acquisition
-executor may operate on it. Run separate archives for separate deployments.
-Execution locks require POSIX `flock`; use Linux/WSL or the supplied Linux
-containers. The CLI's default `./chess-crawl.db` is a separate archive from
-Compose's volume unless you explicitly arrange shared storage.
+PostgreSQL is the only supported storage engine. Each deployment should use its
+own database. API, worker, and publisher use independent connections to the same
+database; PostgreSQL session advisory locks retain one acquisition executor and
+one publisher. A disconnected ownership session cannot continue processing with
+its old lock. The database is configured independently of Compose, so a
+separately managed PostgreSQL server can be used through
+`CHESS_CRAWL_DATABASE_URL` and the password secret.
 
-Schema migration 5 adds per-run discovery-edge membership. Compose's `init`
-service applies it at startup; for a CLI archive, run `uv run chess-crawl init`
-with that archive's `--db` path before using the upgraded backend. Existing
-edges retain their original recorded run. Earlier schemas did not preserve
-later runs' shared-edge membership, so the migration does not reconstruct
-unrecorded historical counts. New and resumed discovery records membership
-for each run explicitly.
+Compose's `init` service applies the packaged PostgreSQL schema and migrations
+at startup. For source-run services, run `uv run chess-crawl init` against the
+selected database before starting the upgraded backend. The previous file-based
+storage configuration and `--db` option are removed. Existing SQLite archives
+are not automatically imported; retain their files separately if needed.
 
-PostgreSQL remains a future storage implementation decision. There is no
-`DATABASE_URL` switch that makes the SQLite schema, transaction behavior,
-locking, or worker coordination run on PostgreSQL. Adopting it requires an
-explicit implementation and migration plan.
-
-Keep the future Symfony Docker environment separate. Connect it through the
-backend API and Mercure URLs, with application-owned credentials and networking;
-it does not need the Python archive mounted into its containers.
+Keep the Symfony Docker environment separate. Connect it through the backend
+API and Mercure URLs, with application-owned credentials and networking; it does
+not need direct database access or the PostgreSQL volume mounted into its
+containers.

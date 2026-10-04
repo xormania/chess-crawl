@@ -7,6 +7,13 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- A locked Devbox development environment with Python 3.13, uv, Git, and
+  PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
+  project's `.venv`; Docker Compose continues to own the application services.
+- Pinned Bandit security checks for application, deployment, and CI Python,
+  with reviewed, rule-specific exceptions, complete-scan validation, and stage
+  timings in the existing required offline check. Compose smoke now rejects
+  optimized Python so its assertions cannot silently disappear.
 - Shared application services for bounded imports and opponent crawls, with
   idempotent submissions and consistent archive snapshots. ([#7](https://github.com/xormania/chess-crawl/pull/7))
 - An authenticated JSON API for asynchronous submissions, job/run state,
@@ -16,15 +23,43 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 - Transactional job/run events, a durable outbox, and private Mercure delivery.
   ([#10](https://github.com/xormania/chess-crawl/pull/10))
 - A standalone Docker Compose backend with its own Mercure hub, development
-  credentials, health checks, and persistent SQLite archive. API and event
+  credentials, health checks, and persistent PostgreSQL archive. API and event
   integration remain independent of an external web application's deployment.
   ([#11](https://github.com/xormania/chess-crawl/pull/11), [#12](https://github.com/xormania/chess-crawl/pull/12))
 - Contributor setup, PR guidelines and a PR template requiring evidence of the
   need and of the result; a changelog update requirement for all PRs beyond
   CI/test-only changes.
 
+- A PostgreSQL operations guide with full-database custom backups, isolated
+  restoration, binary payload and event identity verification, authenticated
+  readiness checks, and major-version upgrade and recovery instructions.
+  External-server setup uses the optional Compose overlay and a mounted CA
+  certificate for verified TLS, without starting an unused bundled database.
+  See [PostgreSQL operations](docs/postgresql-operations.md).
+
 ### Changed
 
+- External PostgreSQL connections require certificate-chain and hostname
+  verification by default. A separate Compose overlay omits the bundled
+  database and mounts its operator-supplied CA certificate, retaining migration
+  startup gates. Local plaintext connections require an explicit confined
+  transport policy; changing the bundled URL alone cannot weaken remote TLS.
+- Database password-file read and decoding failures return sanitized archive
+  unavailability responses (503 with retry guidance) instead of internal errors.
+- PostgreSQL 18 is now the only supported database. Compose provisions it with
+  persistent storage, password-file secrets, readiness checks, and migrations
+  before application startup. CLI and services use `CHESS_CRAWL_DATABASE_URL`
+  or `--database-url`; the SQLite backend, shared archive volume, and `--db`
+  option are removed. Existing SQLite files are not automatically imported.
+- Database coordination uses PostgreSQL session advisory locks, preserving
+  one acquisition executor and one publisher per archive. Database integration
+  tests run against real disposable PostgreSQL instances in both Python CI jobs.
+
+- CI isolates deployment-only checks, overlaps image build/pull and polls
+  startup health sooner without weakening readiness. It records stage timings,
+  test durations and machine-readable performance evidence, with optional
+  repeatable regression comparisons. Changelog policy now inspects the pinned
+  merge diff and has executable behavior tests for rename and content rules.
 - CI scopes application checks to the PR merge diff while preserving required
   check names and full promotion validation. Documentation-only changes skip
   application work, test-only changes skip Compose, and unrecognized paths run

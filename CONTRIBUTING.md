@@ -5,21 +5,72 @@ Start with the [README](README.md) for the project overview and
 
 ## Development setup
 
-Use Python 3.11 or newer, Git, and [uv](https://docs.astral.sh/uv/).
-CI exercises Python 3.11 and 3.13. Docker with the Compose plugin is needed
-only for the container stack and its smoke check.
+Use [Devbox](https://www.jetify.com/docs/devbox/installing-devbox) for the pinned
+development toolchain. Install Devbox as your normal user; it also requires Nix
+and offers to install it if missing. On Windows, install and run it inside WSL2,
+with the checkout in the Linux filesystem (for example, `~/src/chess-crawl`).
+Use Docker Desktop's WSL integration or a working Linux Docker engine with the
+Compose v2 plugin. Docker is a separate host prerequisite, not a Devbox service.
+The lock includes Linux x86-64/ARM64 and Apple Silicon macOS packages. Use the
+[direct uv setup](#without-devbox) on Intel macOS.
+
+Devbox provides Python 3.13, uv, Git, and PostgreSQL 18 tools such as `psql`,
+`pg_dump`, and `pg_restore`. `devbox.lock` pins the tool packages; `uv.lock` pins
+the Python dependencies. uv creates and manages the project's ignored `.venv`.
+Devbox's Python and PostgreSQL plugins are disabled, so entering the environment
+does not create another virtual environment or start a database. Docker Compose
+provides the application services; tests require a separate disposable database.
+uv is directed to Devbox's exact Python executable with interpreter downloads
+disabled. Setup replaces an existing `.venv` if it uses a different interpreter.
+
+Use your host Git for the initial checkout, then enter the pinned environment:
 
 ```bash
 git clone https://github.com/xormania/chess-crawl.git
 cd chess-crawl
 git switch dev
 git switch -c docs/my-change
-uv sync --locked --group dev
+devbox shell
+devbox run setup
 uv run chess-crawl --help
 ```
 
-Choose a descriptive branch name for the actual work. Install `--extra api`
-as well when running the HTTP server outside Docker:
+Choose a descriptive branch name for the actual work. `devbox run setup` installs
+the development group and API extra with the existing lock file. Run it after
+pulling dependency changes. Shell entry does not install Python dependencies or
+start services. Use `uv run ...` inside the shell; no manual `.venv` activation
+is needed. You can also use `devbox run` commands from outside the shell:
+
+```bash
+devbox run setup
+devbox run check
+# After configuring the disposable test database below:
+devbox run test -q
+devbox run test -q -k provider
+```
+
+`check` runs Ruff, Mypy, Bandit, and CLI help, stopping at the first failure.
+`test` forwards its arguments to pytest. The PostgreSQL tools use explicit
+connection settings; they do not automatically connect to Compose's unpublished
+database port. Follow the [operations guide](docs/postgresql-operations.md) for
+container-based backup and restore commands.
+
+Keep `devbox.json`, `devbox.lock`, and `uv.lock` in Git; keep `.devbox/` and `.venv/`
+local. To upgrade a pinned tool, change its version in `devbox.json`, run
+`devbox install`, and review both Devbox files together. Use uv for Python
+dependency upgrades. CI still exercises Python 3.11 and 3.13 against real
+PostgreSQL 18, and the package continues to support Python 3.11 or newer.
+An additional Linux CI smoke check replaces an existing non-Devbox Python 3.13
+virtual environment, runs setup and source checks,
+exercises pytest argument forwarding without a database, and verifies that setup
+preserves both lock files. It runs when the toolchain, dependency files, check
+script, or its workflow changes. The existing CI jobs retain the full database
+suite and Compose integration checks.
+
+### Without Devbox
+
+Devbox is the recommended contributor setup, but direct uv use remains
+supported. Install Python 3.11+, Git, uv, and the PostgreSQL tools yourself, then:
 
 ```bash
 uv sync --locked --group dev --extra api
@@ -37,22 +88,48 @@ Database connections and transactions are consolidated in
 `src/chess_crawl/storage/queries.py`. Extend these shared implementations when
 working in those areas.
 
+Use the shared transaction helper for mutations. Outermost writes explicitly
+use READ COMMITTED before acquiring the archive write lock; an externally owned
+writable transaction at stronger isolation is rejected before mutation. Read
+views use REPEATABLE READ and remain read-only. Executor writes also verify
+session ownership at the transaction boundary.
+
 SQL statements live in `storage/` or `jobs/state.py`; the storage-boundary test
 checks this consolidation.
 
 ## Validate changes
+
+Run database tests against a dedicated disposable PostgreSQL 18 server. The
+fixture's administrator must be able to create and drop databases. Never point
+these settings at an application database: tests deliberately create and remove
+isolated databases. One local setup is:
+
+```bash
+export POSTGRES_PASSWORD="disposable-test-password"
+docker run --name chess-crawl-test-postgres --detach \
+  --publish 127.0.0.1:55432:5432 --env POSTGRES_PASSWORD postgres:18
+docker exec chess-crawl-test-postgres pg_isready -U postgres
+export CHESS_CRAWL_TEST_DATABASE_URL="postgresql://postgres@127.0.0.1:55432/postgres"
+export CHESS_CRAWL_TEST_DATABASE_PASSWORD="$POSTGRES_PASSWORD"
+```
+
+Wait until `pg_isready` succeeds before testing. Remove the disposable server
+with `docker rm --force --volumes chess-crawl-test-postgres` afterward.
 
 Run these checks for code changes:
 
 ```bash
 uv run ruff check .
 uv run mypy .
+uv run python .github/scripts/check_bandit.py
 uv run python -m pytest -q
 uv run chess-crawl --help
 ```
 
-Tests are offline by default, block outbound connections, and ignore inherited
-`CHESS_CRAWL_*` settings. Tests that exercise configuration set their own values
+Tests are offline by default, block outbound connections except their dedicated
+PostgreSQL endpoint, and ignore inherited `CHESS_CRAWL_*` application settings.
+The explicit `CHESS_CRAWL_TEST_DATABASE_URL` and separate test password configure
+only the disposable database fixtures. Tests that exercise configuration set their own values
 with `monkeypatch`. Shared database
 fixtures live in `tests/conftest.py`; reusable builders live in
 `tests/support.py`. Organize new cases by behavior, reuse these helpers, and
@@ -65,18 +142,20 @@ cases, use `uv run python -m pytest --run-live -m live` with appropriate provide
 credentials and acquisition bounds.
 
 CI runs the offline suite with `-m "not live and not slow"` on Python 3.11 and
-3.13. Both versions run Mypy; Ruff runs once. It classifies the actual PR merge
-result against its base parent, including both sides of renames:
+3.13. Both versions run Mypy; Ruff and Bandit run once, on Python 3.11. CI
+classifies the actual PR merge result against its base parent, including both
+sides of renames:
 
 | Changed files | Offline checks | Compose smoke |
 | --- | --- | --- |
 | Only Markdown under `docs/`, `AGENTS.md`, `PROJECT.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, or the PR template | Omitted | Omitted |
-| Only `tests/` and the documentation above | Run | Omitted |
-| Application, dependencies, deployment, CI, `README.md`, `LICENSE`, or any unrecognized path | Run | Run |
+| Only tests, the changelog workflow/checker, and the documentation above | Run | Omitted |
+| Only `Dockerfile`, `compose.yaml`, `.dockerignore`, `.env.example`, `docker/mercure-entrypoint.sh`, or the CI Compose overlay | Omitted | Run |
+| Application, dependencies, Python deployment helpers, shared CI, `README.md`, `LICENSE`, or any unrecognized path | Run | Run |
 | Any promotion to `master`, or an empty merge diff | Run | Run |
 
-Required checks retain their names and report their scope even when no
-application work is needed. A scope-classification error fails those required
+Mixed changes take the union of the applicable checks. Required checks retain
+their names and report their scope even when no application work is needed. A scope-classification error fails those required
 checks. `README.md` and `LICENSE` are packaging inputs, so they need full checks.
 Tests remain the full offline suite; CI does not guess which individual tests
 are affected by a source edit.
@@ -84,13 +163,69 @@ are affected by a source edit.
 CI revalidates PR edits as well as new commits so retargeting cannot reuse an
 obsolete promotion check. Title and description edits also rerun scoped checks;
 skipping the required jobs on those events could hide a previous failure.
-Dependency and Mypy caches are separated by Python version; Mypy still executes
-and validates its incremental data. These caches primarily help subsequent
-commits and reruns within a PR because GitHub isolates PR cache entries. Docker
-keeps dependency layers separate from application sources and builds the shared
-Compose image once. Remote Docker cache export is deliberately omitted: measured
-setup and transfer overhead exceeded the benefit for this small image. Caches
-accelerate work; they never stand in for a successful check.
+Mypy caches are separated by Python version; Mypy still executes and validates
+its incremental data. These caches primarily help subsequent commits and reruns
+within a PR because GitHub isolates PR cache entries. uv's remote dependency
+cache is disabled: its pruned cache retained metadata while the prebuilt wheels
+were downloaded again, with no measured install benefit. The pinned, locked
+install still runs each time.
+
+Docker keeps dependency layers separate from application sources and builds the
+shared Compose image once, while pulling PostgreSQL and Mercure concurrently. CI's Compose
+overlay checks startup readiness every second, preserving the normal health
+interval, probes, failure budgets and service dependencies. The smoke job
+compares the complete rendered base/CI configurations and rejects any other
+change introduced by that overlay. Remote Docker cache export is deliberately
+omitted: measured setup and transfer overhead exceeded the benefit for this
+small image. Caches accelerate work; they never stand in for a successful check.
+
+### Behavior and performance evidence
+
+Normal CI exercises real temporary Git merges for scope and changelog policy,
+executes the workflow's shell guards (including both failures in concurrent
+build/pull), and tests the Compose overlay contract. It also retains the full
+application suite and real API/worker/private-Mercure smoke whenever selected.
+
+Bandit is pinned in the development dependency group and scans every Python
+file under `src/`, `scripts/`, `docker/`, and `.github/scripts/`, including its
+own wrapper. The wrapper rejects findings at every severity/confidence level,
+reported scan errors, missing target directories, and incomplete file coverage.
+It uses the checked-in `pyproject.toml` configuration and the existing required
+offline check; no additional required-check setting is needed. Ruff's optional
+`S` rules are not also enabled.
+
+Review scanner findings before suppressing them. Use a rule-specific comment
+with its reason (for example, `# nosec B608 # Only literal columns; values are bound`).
+Existing exceptions document fixed SQL fragments/columns, trusted workflow or
+operator subprocess arguments, and operator-selected disposable smoke endpoints.
+Do not use blanket suppressions or a baseline to conceal unreviewed findings.
+Pytest fixtures under `tests/` are outside the scan. The executable Compose
+smoke test remains scanned, with only its assertion rule exempted; it refuses
+to run with `-O` or `PYTHONOPTIMIZE` because those options remove its checks.
+Behavior tests execute the actual timed CI command against clean, vulnerable,
+unparseable, and incomplete fixture trees, checking that failures stay failures.
+
+Each selected job writes stage timings to its job summary and uploads a
+`ci-performance-*` artifact retained for 14 days. JSON samples include the
+revision, run attempt, Python version, runner and check variant. Offline jobs
+also retain JUnit results and print the 15 slowest test durations. Failures keep
+the command's exit status and are recorded as failures, never faster successes.
+
+Use `.github/scripts/ci_performance.py` to repeat the same command into separate
+baseline/candidate directories, then compare their medians. For example:
+
+```bash
+python .github/scripts/ci_performance.py measure --label mypy --output-dir /tmp/ci-baseline -- uv run --no-sync mypy . .github/scripts
+python .github/scripts/ci_performance.py measure --label mypy --output-dir /tmp/ci-candidate -- uv run --no-sync mypy . .github/scripts
+python .github/scripts/ci_performance.py compare --baseline /tmp/ci-baseline --candidate /tmp/ci-candidate
+```
+
+Collect several samples with the same interpreter/runner and cache condition.
+Hosted wall times are informational by default because shared-runner variance
+is material. An explicit `--fail-on-regression` comparison can enforce a budget
+using both `--max-regression-percent` and `--min-regression-seconds`; keep generous
+limits and separate cold and warm measurements. Missing or incompatible samples
+must not be treated as proof of a speedup.
 
 A focused CLI workflow run and a coverage run are available when useful:
 
@@ -103,7 +238,7 @@ Documentation-only changes do not require the entire application test suite.
 Check executable examples and affected claims, and state which checks ran and
 which were skipped. Follow the [backend smoke-check instructions](docs/backend.md#offline-compose-smoke-check)
 for container, worker, or event integration changes; the smoke check writes
-synthetic data and belongs on a disposable archive.
+synthetic data and belongs on a disposable database.
 
 ## Branches and pull requests
 
@@ -189,8 +324,9 @@ Both the old and new path must qualify for a rename. Shared files such as
 `pyproject.toml` and `uv.lock` are not exempt just because a change helps tests.
 New CI/test support paths need a reviewed policy/check update or a changelog
 entry. A removed changelog or a rename without added content does not satisfy
-the check. The check verifies the presence of a content update; reviewers
-verify that the entry accurately describes the change.
+the check. The check inspects the pinned PR merge and its base parent, without
+paginated or mutable GitHub file-list reads. It verifies the presence of a content update;
+reviewers verify that the entry accurately describes the change.
 
 A `dev` to `master` promotion carries the changelog entries already accumulated
 on `dev`; do not add a duplicate entry merely to promote them. Review the full

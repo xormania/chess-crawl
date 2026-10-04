@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from chess_crawl.storage.db import Connection, open_database, require_row
+
 import copy
 import json
-import sqlite3
 from pathlib import Path
 
 import httpx
@@ -16,7 +17,6 @@ import chess_crawl.normalize.games as games_module
 from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage.acquisition import associate_run_game, run_game_ids
-from chess_crawl.storage.db import open_database
 from chess_crawl.storage.discovery import game_count_for_run
 from chess_crawl.storage.raw import read_raw_payload, store_raw_payload
 
@@ -35,7 +35,7 @@ def _archive_body(
     return json.dumps({"games": games}).encode()
 
 
-def _store_archive(conn: sqlite3.Connection, body: bytes, month: int = 1) -> int:
+def _store_archive(conn: Connection, body: bytes, month: int = 1) -> int:
     return store_raw_payload(
         conn,
         RawRecord(
@@ -50,40 +50,40 @@ def _store_archive(conn: sqlite3.Connection, body: bytes, month: int = 1) -> int
     )
 
 
-def _run(conn: sqlite3.Connection, maximum: int) -> int:
+def _run(conn: Connection, maximum: int) -> int:
     return state.create_crawl_run(
         conn, provider="chess.com", seed_spec="samename", params={"max_games": maximum},
     )
 
 
-def _count(conn: sqlite3.Connection, run_id: int) -> int:
+def _count(conn: Connection, run_id: int) -> int:
     return game_count_for_run(conn, crawl_run_id=run_id, provider="chess.com", since=None, until=None)
 
 
 def test_monthly_cap_survives_restart_and_retains_full_pending_payload(
-    archive_path: Path, fixtures_dir: Path,
+    database_url: str, fixtures_dir: Path,
 ) -> None:
     body = _archive_body(fixtures_dir, ["one", "two", "three", "four"])
-    with open_database(archive_path, writable=True) as conn:
+    with open_database(database_url, writable=True) as conn:
         raw_id = _store_archive(conn, body)
         run_id = _run(conn, 2)
         selected = normalize_games_payload(conn, raw_id, crawl_run_id=run_id, max_games=100)
         assert len(selected) == 2
         assert run_game_ids(conn, run_id) == set(selected)
-        assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 2
+        assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 2
         raw = read_raw_payload(conn, raw_id)
         assert raw.body == body
         assert raw.normalization_status == "pending"
 
-    with open_database(archive_path, writable=True) as conn:
+    with open_database(database_url, writable=True) as conn:
         assert normalize_games_payload(conn, raw_id, crawl_run_id=run_id, max_games=100) == []
         assert _count(conn, run_id) == 2
-        assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 2
+        assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 2
         assert read_raw_payload(conn, raw_id).normalization_status == "pending"
 
 
 def test_interrupted_selection_rolls_back_new_associations_and_resumes_remaining_games(
-    initialized_conn: sqlite3.Connection, fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    initialized_conn: Connection, fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = initialized_conn
     raw_id = _store_archive(conn, _archive_body(fixtures_dir, ["one", "two", "three"]))
@@ -100,7 +100,7 @@ def test_interrupted_selection_rolls_back_new_associations_and_resumes_remaining
     with pytest.raises(RuntimeError, match="interrupted selection"):
         normalize_games_payload(conn, raw_id, crawl_run_id=run_id, max_games=2)
     assert run_game_ids(conn, run_id) == set(first)
-    assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 1
     assert read_raw_payload(conn, raw_id).normalization_status == "pending"
 
     monkeypatch.setattr(games_module, "_normalize_game", original)
@@ -112,7 +112,7 @@ def test_interrupted_selection_rolls_back_new_associations_and_resumes_remaining
 
 
 def test_parsed_payload_is_bounded_independently_for_each_new_run(
-    initialized_conn: sqlite3.Connection, fixtures_dir: Path,
+    initialized_conn: Connection, fixtures_dir: Path,
 ) -> None:
     conn = initialized_conn
     raw_id = _store_archive(conn, _archive_body(fixtures_dir, ["one", "two", "three", "four"]))
@@ -122,12 +122,12 @@ def test_parsed_payload_is_bounded_independently_for_each_new_run(
     assert normalize_games_payload(conn, raw_id, crawl_run_id=first_run, max_games=100) == globally_normalized[:1]
     assert normalize_games_payload(conn, raw_id, crawl_run_id=second_run, max_games=100) == globally_normalized[:3]
     assert (_count(conn, first_run), _count(conn, second_run)) == (1, 3)
-    assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 4
+    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 4
     assert read_raw_payload(conn, raw_id).normalization_status == "parsed"
 
 
 def test_cached_month_replay_attributes_only_each_runs_bounded_selection(
-    initialized_conn: sqlite3.Connection, fixtures_dir: Path,
+    initialized_conn: Connection, fixtures_dir: Path,
 ) -> None:
     conn = initialized_conn
     body = _archive_body(fixtures_dir, ["one", "two", "three"])
@@ -154,15 +154,15 @@ def test_cached_month_replay_attributes_only_each_runs_bounded_selection(
     assert seen == [None, '"month-v1"']
     assert (_count(conn, first_run), _count(conn, second_run)) == (1, 2)
     assert len(second.normalized_ids) == 2
-    assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 2
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 2
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
     assert first.raw_payload_id is not None
     assert read_raw_payload(conn, first.raw_payload_id).body == body
     assert read_raw_payload(conn, first.raw_payload_id).normalization_status == "pending"
 
 
 def test_runner_enforces_one_budget_across_monthly_responses(
-    initialized_conn: sqlite3.Connection, fixtures_dir: Path,
+    initialized_conn: Connection, fixtures_dir: Path,
 ) -> None:
     conn = initialized_conn
     bodies = {
@@ -188,14 +188,14 @@ def test_runner_enforces_one_budget_across_monthly_responses(
     assert result.done == 1
     assert requests == ["01", "02"]
     assert _count(conn, run_id) == 3
-    assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 3
+    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 3
     assert [row[0] for row in conn.execute("SELECT normalization_status FROM raw_payloads ORDER BY id")] == [
         "parsed", "pending",
     ]
 
 
 def test_run_attribution_boundary_enforces_capacity_and_provider(
-    initialized_conn: sqlite3.Connection, fixtures_dir: Path,
+    initialized_conn: Connection, fixtures_dir: Path,
 ) -> None:
     conn = initialized_conn
     raw_id = _store_archive(conn, _archive_body(fixtures_dir, ["one", "two"]))
@@ -214,7 +214,7 @@ def test_run_attribution_boundary_enforces_capacity_and_provider(
 
 @pytest.mark.parametrize("already_parsed", [False, True], ids=["new-raw", "parsed-raw"])
 def test_monthly_import_applies_half_open_date_window_before_game_budget(
-    initialized_conn: sqlite3.Connection, fixtures_dir: Path, already_parsed: bool,
+    initialized_conn: Connection, fixtures_dir: Path, already_parsed: bool,
 ) -> None:
     conn = initialized_conn
     since, until = 1705276800, 1705363200  # January 15 through January 16, exclusive.
@@ -241,19 +241,19 @@ def test_monthly_import_applies_half_open_date_window_before_game_budget(
 
     assert result.done == 1
     selected = conn.execute(
-        "SELECT provider_game_id FROM games JOIN run_games ON game_id = games.id WHERE crawl_run_id = ?",
+        "SELECT provider_game_id FROM games JOIN run_games ON game_id = games.id WHERE crawl_run_id = %s",
         (run_id,),
     ).fetchall()
     assert [row[0] for row in selected] == ["at-since"]
     assert _count(conn, run_id) == 1
-    assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == (5 if already_parsed else 1)
+    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == (5 if already_parsed else 1)
     raw = read_raw_payload(conn, raw_id)
     assert raw.body == body
     assert raw.normalization_status == ("parsed" if already_parsed else "pending")
 
 
 def test_attribution_rejects_out_of_window_game_without_consuming_capacity(
-    initialized_conn: sqlite3.Connection, fixtures_dir: Path,
+    initialized_conn: Connection, fixtures_dir: Path,
 ) -> None:
     conn = initialized_conn
     since, until = 1705276800, 1705363200

@@ -11,6 +11,12 @@ from typing import cast
 
 import pytest
 
+from ci_support import commit as _commit
+from ci_support import git as _git
+from ci_support import merge_feature as _merge
+from ci_support import repository
+from ci_support import write as _write
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / ".github/scripts/ci_scope.py"
 
@@ -26,13 +32,21 @@ SCRIPT = Path(__file__).resolve().parents[1] / ".github/scripts/ci_scope.py"
         (["pyproject.toml"], (True, True)),
         (["uv.lock"], (True, True)),
         (["src/chess_crawl/storage/schema.sql"], (True, True)),
-        (["Dockerfile", ".dockerignore", "compose.yaml"], (True, True)),
-        (["docker/mercure-entrypoint.sh"], (True, True)),
-        ([".env.example"], (True, True)),
+        (["Dockerfile", ".dockerignore", "compose.yaml"], (False, True)),
+        (["docker/mercure-entrypoint.sh"], (False, True)),
+        ([".env.example"], (False, True)),
+        ([".github/compose.ci.yaml"], (False, True)),
+        (["docker/healthcheck.py"], (True, True)),
+        (["docker/new-entrypoint.sh"], (True, True)),
         (["scripts/bootstrap_dev.py"], (True, True)),
         (["scripts/compose_smoke.py"], (True, True)),
         ([".github/workflows/ci.yml"], (True, True)),
+        ([".github/workflows/changelog.yml"], (True, False)),
+        ([".github/scripts/check_changelog.py"], (True, False)),
         ([".github/scripts/ci_scope.py"], (True, True)),
+        (["tests/test_api.py", "compose.yaml"], (True, True)),
+        ([".github/workflows/changelog.yml", "Dockerfile"], (True, True)),
+        (["docs/cli.md", "compose.yaml"], (False, True)),
         (["docs/example.py"], (True, True)),
         (["new-file.md"], (True, True)),
         ([], (True, True)),
@@ -44,41 +58,9 @@ def test_scope_is_conservative(paths: list[str], expected: tuple[bool, bool]) ->
     assert classify(paths, "master") == (True, True)
 
 
-def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-c", "user.name=CI Test", "-c", "user.email=ci@example.invalid",
-         "-c", "commit.gpgsign=false", *args],
-        cwd=repo, check=True, capture_output=True, text=True, timeout=10,
-    ).stdout.strip()
-
-
-def _write(repo: Path, path: str, text: str = "content\n") -> None:
-    target = repo / path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text)
-
-
-def _commit(repo: Path) -> None:
-    _git(repo, "add", "--all")
-    _git(repo, "commit", "--allow-empty", "-m", "Test changes")
-
-
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    path = tmp_path / "repo"
-    path.mkdir()
-    _git(path, "init", "--initial-branch=dev")
-    _write(path, "src/original.py")
-    _write(path, "docs/original.md")
-    _commit(path)
-    _git(path, "checkout", "-b", "feature")
-    return path
-
-
-def _merge(repo: Path) -> None:
-    _commit(repo)
-    _git(repo, "checkout", "dev")
-    _git(repo, "merge", "--no-ff", "feature", "-m", "Pull request merge")
+    return repository(tmp_path, {"src/original.py": "content\n", "docs/original.md": "content\n"})
 
 
 def _run(repo: Path, base_ref: str = "dev") -> tuple[subprocess.CompletedProcess[str], str, str]:
@@ -100,6 +82,8 @@ def _run(repo: Path, base_ref: str = "dev") -> tuple[subprocess.CompletedProcess
         ("docs/original.md", "src/moved.py", "offline=true\ncompose=true\n"),
         ("docs/original.md", "tests/moved.md", "offline=true\ncompose=false\n"),
         ("docs/original.md", "docs/moved.md", "offline=false\ncompose=false\n"),
+        ("docs/original.md", "compose.yaml", "offline=false\ncompose=true\n"),
+        ("src/original.py", "compose.yaml", "offline=true\ncompose=true\n"),
     ],
 )
 def test_renames_consider_removed_and_added_paths(repo: Path, old: str, new: str, expected: str) -> None:
@@ -205,3 +189,10 @@ def test_depth_two_checkout_contains_enough_merge_history(repo: Path, tmp_path: 
     assert result.returncode == 0, result.stderr
     assert output == "offline=false\ncompose=false\n"
     assert "1 changed paths" in summary
+
+
+@pytest.mark.parametrize("base_ref", ["dev", "work/example", "master"])
+def test_mixed_scope_is_order_independent(base_ref: str) -> None:
+    classify = runpy.run_path(str(SCRIPT))["classify"]
+    assert classify(["compose.yaml", "tests/test_api.py"], base_ref) == (True, True)
+    assert classify(["tests/test_api.py", "compose.yaml"], base_ref) == (True, True)

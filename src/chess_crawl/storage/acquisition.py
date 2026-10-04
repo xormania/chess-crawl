@@ -3,24 +3,23 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass
 
-from chess_crawl.storage.db import atomic
+from chess_crawl.storage.db import Connection, atomic
 
 
-def run_game_ids(conn: sqlite3.Connection, crawl_run_id: int) -> set[int]:
+def run_game_ids(conn: Connection, crawl_run_id: int) -> set[int]:
     return {
         int(row["game_id"])
-        for row in conn.execute("SELECT game_id FROM run_games WHERE crawl_run_id = ?", (crawl_run_id,))
+        for row in conn.execute("SELECT game_id FROM run_games WHERE crawl_run_id = %s", (crawl_run_id,))
     }
 
 
-def payload_game_ids(conn: sqlite3.Connection, raw_payload_id: int) -> set[int]:
+def payload_game_ids(conn: Connection, raw_payload_id: int) -> set[int]:
     return {
         int(row["entity_id"])
         for row in conn.execute(
-            "SELECT entity_id FROM source_records WHERE entity_type = 'game' AND raw_payload_id = ?",
+            "SELECT entity_id FROM source_records WHERE entity_type = 'game' AND raw_payload_id = %s",
             (raw_payload_id,),
         )
     }
@@ -41,7 +40,7 @@ class RunGameBounds:
 
 
 def run_game_bounds(
-    conn: sqlite3.Connection,
+    conn: Connection,
     crawl_run_id: int,
     *,
     provider: str,
@@ -52,7 +51,7 @@ def run_game_bounds(
         """
         SELECT provider, params_json,
                (SELECT COUNT(*) FROM run_games WHERE crawl_run_id = crawl_runs.id) AS acquired
-          FROM crawl_runs WHERE id = ?
+          FROM crawl_runs WHERE id = %s
         """,
         (crawl_run_id,),
     ).fetchone()
@@ -74,13 +73,13 @@ def run_game_bounds(
 
 
 @atomic
-def associate_run_game(conn: sqlite3.Connection, crawl_run_id: int, game_id: int) -> bool:
+def associate_run_game(conn: Connection, crawl_run_id: int, game_id: int) -> bool:
     """Enforce provider, time window and capacity at the attribution write boundary."""
-    game = conn.execute("SELECT provider, ended_at FROM games WHERE id = ?", (game_id,)).fetchone()
+    game = conn.execute("SELECT provider, ended_at FROM games WHERE id = %s", (game_id,)).fetchone()
     if game is None:
         raise ValueError(f"Game not found: {game_id}")
     existing = conn.execute(
-        "SELECT 1 FROM run_games WHERE crawl_run_id = ? AND game_id = ?", (crawl_run_id, game_id),
+        "SELECT 1 FROM run_games WHERE crawl_run_id = %s AND game_id = %s", (crawl_run_id, game_id),
     ).fetchone()
     if existing is not None:
         return False
@@ -90,7 +89,7 @@ def associate_run_game(conn: sqlite3.Connection, crawl_run_id: int, game_id: int
     if bounds.remaining == 0:
         raise ValueError("The crawl run's game limit has been reached")
     cursor = conn.execute(
-        "INSERT INTO run_games(crawl_run_id, game_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+        "INSERT INTO run_games(crawl_run_id, game_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
         (crawl_run_id, game_id),
     )
     return cursor.rowcount == 1

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise the Compose API, worker, SQLite outbox, and real Mercure hub offline.
+"""Exercise the Compose API, worker, PostgreSQL outbox, and real Mercure hub offline.
 
 Run after scripts/bootstrap_dev.py and `docker compose up --build -d --wait`.
 The worker is stopped before submissions; synthetic completions never contact a
-chess provider. Use this only with the disposable development/CI archive.
+chess provider. Use this only with the disposable development/CI database.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
+import subprocess  # nosec B404 # Controls only the operator's disposable Compose stack.
 import time
 import uuid
 from collections.abc import Callable
@@ -24,7 +24,7 @@ from urllib.request import Request, urlopen
 
 
 def compose(*arguments: str, code: str | None = None) -> str:
-    result = subprocess.run(
+    result = subprocess.run(  # nosec B603, B607 # Repository-controlled Docker argv and trusted PATH; no shell.
         ["docker", "compose", *arguments],
         input=code, text=True, capture_output=True, check=False, timeout=90,
     )
@@ -65,7 +65,7 @@ class Api:
             headers["Content-Type"] = "application/json"
         request = Request(self.base_url + path, headers=headers, data=data)
         try:
-            with urlopen(request, timeout=5) as response:
+            with urlopen(request, timeout=5) as response:  # nosec B310 # Operator-selected disposable API endpoint.
                 return response.status, json.load(response)
         except HTTPError as response:
             return response.code, json.load(response)
@@ -75,7 +75,7 @@ def subscribe(hub_url: str, topic: str, token: str | None) -> HTTPResponse:
     headers = {"Accept": "text/event-stream"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    response = urlopen(Request(hub_url + "?" + urlencode({"topic": topic}), headers=headers), timeout=30)
+    response = urlopen(Request(hub_url + "?" + urlencode({"topic": topic}), headers=headers), timeout=30)  # nosec B310 # Operator-selected disposable Mercure endpoint.
     if response.status != 200 or "text/event-stream" not in response.headers.get("Content-Type", ""):
         response.close()
         raise RuntimeError("Mercure did not open an SSE subscription")
@@ -109,6 +109,8 @@ def read_job_event(stream: HTTPResponse, *, job_id: int, status: str) -> dict[st
 
 
 def main() -> int:
+    if not __debug__:
+        raise RuntimeError("Compose smoke requires assertions; disable -O and PYTHONOPTIMIZE")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-url", default="http://127.0.0.1:8000")
     parser.add_argument("--hub-url", default="http://127.0.0.1:3000/.well-known/mercure")
@@ -163,14 +165,14 @@ def main() -> int:
 import os
 from chess_crawl.jobs import state
 from chess_crawl.storage.db import connection, transaction
-with connection(os.environ['CHESS_CRAWL_DB'], mode='rw') as conn:
+with connection(os.environ['CHESS_CRAWL_DATABASE_URL'], mode='rw') as conn:
     with transaction(conn):
         for job_id in {submission['job_ids']!r}:
             state.mark_done(conn, job_id, reason='offline Compose smoke check')
         state.refresh_run_status(conn, {submission['run_id']!r})
-    assert conn.execute('SELECT COUNT(*) FROM fetch_logs').fetchone()[0] == 0
+    assert conn.execute('SELECT COUNT(*) FROM fetch_logs').fetchone()['count'] == 0
 print('No provider requests were performed')
-"""
+"""  # nosec B608 # This is Python fixture code; its SQL is literal, and IDs use repr.
         compose("exec", "-T", "api", "python", "-", code=completion_code)
         completed = read_job_event(stream, job_id=job_id, status="done")
         assert completed["event_id"] != pending["event_id"]
@@ -185,7 +187,28 @@ print('No provider requests were performed')
     assert status == 200 and run["status"] == "done"
     compose("start", "worker")
     wait_until(lambda: api.request("/v1/worker")[1].get("alive") is True, "restarted idle worker")
-    print("Compose smoke passed: authenticated API, idempotent queue, worker liveness, durable private Mercure events")
+    ownership_code = """
+import json
+import os
+from chess_crawl.jobs.locking import ExecutorBusy, executor_lock
+from chess_crawl.storage.db import connection
+held = {}
+with connection(os.environ['CHESS_CRAWL_DATABASE_URL'], mode='rw') as conn:
+    for purpose in ('worker', 'events'):
+        try:
+            with executor_lock(conn, purpose=purpose):
+                held[purpose] = False
+        except ExecutorBusy:
+            held[purpose] = True
+print(json.dumps(held))
+"""
+    wait_until(
+        lambda: json.loads(compose("exec", "-T", "api", "python", "-", code=ownership_code))
+        == {"worker": True, "events": True},
+        "exclusive PostgreSQL worker and publisher ownership",
+    )
+    print("Compose smoke passed: authenticated API, idempotent queue, worker liveness, "
+          "exclusive PostgreSQL ownership, durable private Mercure events")
     return 0
 
 

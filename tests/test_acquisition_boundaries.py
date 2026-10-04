@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chess_crawl.storage.db import require_row
+
 import json
 from pathlib import Path
 
@@ -42,9 +44,9 @@ def test_last_supported_day_is_acquired_and_preserved(initialized_conn, fixtures
     ).run(crawl_run_id=submission["run_id"])
     assert result.done == 2 and result.errors == 0
     assert len(requested) == 2
-    raw_id = initialized_conn.execute(
+    raw_id = require_row(initialized_conn.execute(
         "SELECT id FROM raw_payloads WHERE endpoint_type IN ('monthly_archive', 'user_games_stream')"
-    ).fetchone()[0]
+    ))[0]
     raw = read_raw_payload(initialized_conn, raw_id)
     if provider == "chess.com":
         assert requested[-1].path.endswith("/9999/12")

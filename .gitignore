@@ -7,8 +7,10 @@ __pycache__/
 .coverage
 coverage.xml
 htmlcov/
+.ci-performance/
 .venv/
 venv/
+.devbox/
 
 # build/package
 build/

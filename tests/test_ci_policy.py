@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +24,24 @@ def _job(job_id: str) -> str:
     return re.split(r"\n  [\w-]+:\n", job, maxsplit=1)[0]
 
 
+def _step(job_id: str, step_name: str) -> str:
+    return _job(job_id).split(f"      - name: {step_name}\n", 1)[1].split(
+        "\n      - ", 1,
+    )[0]
+
+
+def _shell_script(step: str) -> str:
+    script_block = step.split("        run: |\n", 1)[1]
+    script_lines = []
+    for line in script_block.splitlines():
+        if line and not line.startswith("          "):
+            break
+        script_lines.append(line[10:])
+    script = "\n".join(script_lines)
+    assert script.strip()
+    return script
+
+
 def _run_guard(
     job_id: str,
     step_name: str,
@@ -29,8 +51,8 @@ def _run_guard(
     # Extract the existing scalar blocks, not a second implementation of the
     # policy. Resolving its environment bindings also catches workflow wiring
     # errors (such as comparing the base repository with itself).
-    step = _job(job_id).split(f"      - name: {step_name}\n", 1)[1]
-    environment, script_block = step.split("        run: |\n", 1)
+    step = _step(job_id, step_name)
+    environment = step.split("        run: |\n", 1)[0]
     env = os.environ.copy()
     for line in environment.splitlines():
         if not line.startswith("          "):
@@ -46,15 +68,8 @@ def _run_guard(
         env[name] = str(value)
     if summary is not None:
         env["GITHUB_STEP_SUMMARY"] = str(summary)
-    script_lines = []
-    for line in script_block.splitlines():
-        if line and not line.startswith("          "):
-            break
-        script_lines.append(line[10:])
-    script = "\n".join(script_lines)
-    assert script.strip()
     return subprocess.run(
-        ["bash", "--noprofile", "--norc", "-e", "-c", script],
+        ["bash", "--noprofile", "--norc", "-e", "-c", _shell_script(step)],
         env=env, capture_output=True, text=True, timeout=5,
     )
 
@@ -234,3 +249,204 @@ def test_required_checks_reject_unsuccessful_master_promotion(
         promotion_result=promotion_result,
     )
     assert result.returncode != 0, result.stdout + result.stderr
+
+
+def _compose_files() -> str:
+    header = _job("compose-smoke").split("    steps:\n", 1)[0]
+    values = re.findall(r"^      COMPOSE_FILE: (.+)$", header, flags=re.MULTILINE)
+    assert values == ["compose.yaml:.github/compose.ci.yaml"]
+    return values[0]
+
+
+def test_compose_overlay_applies_to_the_whole_job() -> None:
+    assert _compose_files() == "compose.yaml:.github/compose.ci.yaml"
+    # A step override could make validation, startup or cleanup operate on a
+    # different stack than the measured build.
+    assert len(re.findall(r"^\s+COMPOSE_FILE:", _job("compose-smoke"), re.MULTILINE)) == 1
+    assert "COMPOSE_FILE=" not in _job("compose-smoke")
+
+
+@pytest.mark.parametrize(
+    ("build_status", "pull_status"),
+    [(0, 0), (7, 0), (0, 9), (7, 9)],
+    ids=["both-succeed", "build-fails", "pull-fails", "both-fail"],
+)
+def test_parallel_image_preparation_waits_for_both_and_preserves_failure(
+    build_status: int, pull_status: int, tmp_path: Path,
+) -> None:
+    fake_python = tmp_path / "python"
+    fake_python.write_text(f"#!{sys.executable}\n" + '''
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+directory = Path(os.environ["TEST_PARALLEL_DIR"])
+arguments = sys.argv[1:]
+assert arguments[:2] == [".github/scripts/ci_performance.py", "measure"]
+label = arguments[arguments.index("--label") + 1]
+commands = {
+    "image-build": ("build", ["docker", "compose", "build", "api"]),
+    "mercure-pull": ("pull", ["docker", "compose", "pull", "mercure", "postgres"]),
+}
+role, expected = commands[label]
+command = arguments[arguments.index("--") + 1:]
+assert command == expected, command
+assert arguments[arguments.index("--output-dir") + 1] == os.environ["CI_PERFORMANCE_DIR"]
+record = {"command": command, "compose_files": os.environ.get("COMPOSE_FILE")}
+(directory / f"{role}-started.json").write_text(json.dumps(record))
+
+def wait_for(name):
+    deadline = time.monotonic() + 5
+    while not (directory / name).exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Timed out waiting for {name}")
+        time.sleep(0.01)
+
+# Serial execution cannot satisfy this handshake: both commands must start
+# before either completes.
+wait_for("pull-started.json" if role == "build" else "build-started.json")
+if role == "pull":
+    wait_for("release-pull")
+status = int(os.environ[f"TEST_{role.upper()}_STATUS"])
+(directory / f"{role}-finished.json").write_text(json.dumps({"status": status}))
+raise SystemExit(status)
+''')
+    fake_python.chmod(0o755)
+    environment = os.environ | {
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
+        "TEST_PARALLEL_DIR": str(tmp_path),
+        "TEST_BUILD_STATUS": str(build_status),
+        "TEST_PULL_STATUS": str(pull_status),
+        "CI_PERFORMANCE_DIR": str(tmp_path / "measurements"),
+        "COMPOSE_FILE": _compose_files(),
+    }
+    script = _shell_script(_step(
+        "compose-smoke", "Build application and pull infrastructure concurrently",
+    ))
+    log = tmp_path / "shell.log"
+    with log.open("w") as output:
+        process = subprocess.Popen(
+            ["bash", "--noprofile", "--norc", "-e", "-c", script],
+            env=environment, stdout=output, stderr=subprocess.STDOUT, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not (tmp_path / "build-finished.json").exists():
+                assert process.poll() is None, log.read_text()
+                assert time.monotonic() < deadline, log.read_text()
+                time.sleep(0.01)
+            # Build has exited, including in its failure cases. The shell must
+            # remain waiting for the still-blocked pull. This is a bounded
+            # synchronization check, not a runner-speed performance assertion.
+            with pytest.raises(subprocess.TimeoutExpired):
+                process.wait(timeout=0.1)
+        finally:
+            (tmp_path / "release-pull").touch()
+            process.wait(timeout=5)
+    assert (process.returncode == 0) is (build_status == pull_status == 0), log.read_text()
+    for role, status in (("build", build_status), ("pull", pull_status)):
+        started = json.loads((tmp_path / f"{role}-started.json").read_text())
+        assert started["compose_files"] == "compose.yaml:.github/compose.ci.yaml"
+        assert json.loads((tmp_path / f"{role}-finished.json").read_text()) == {"status": status}
+
+
+@pytest.mark.parametrize("case", ["clean", "findings", "syntax-error", "missing-directory", "excluded-file"])
+def test_bandit_step_scans_all_targets_and_preserves_failure(case: str, tmp_path: Path) -> None:
+    """Execute the workflow command with the real scanner, configuration and timer."""
+    root = Path(__file__).resolve().parents[1]
+    project = tmp_path / "project"
+    targets = ("src", "scripts", "docker", ".github/scripts")
+    for target in targets:
+        directory = project / target
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "probe.py").write_text('"""Harmless fixture."""\n')
+    for path in ("pyproject.toml", ".github/scripts/check_bandit.py", ".github/scripts/ci_performance.py"):
+        shutil.copyfile(root / path, project / path)
+    smoke = project / "scripts/compose_smoke.py"
+    smoke.write_text("assert True\n")
+    if case == "findings":
+        for target in targets:
+            (project / target / "probe.py").write_text("eval(input())\n")
+        # Only B101 in this exact executable test is exempt. Other rules and
+        # application assertions/SQL must still be reported.
+        smoke.write_text("assert True\neval(input())\n")
+        (project / "src/unsafe.py").write_text(
+            'assert True\ndef query(conn, value):\n'
+            '    return conn.execute(f"SELECT id FROM users WHERE name = {value}")\n',
+        )
+    elif case == "syntax-error":
+        (project / "src/probe.py").write_text("def broken(\n")
+    elif case == "missing-directory":
+        shutil.rmtree(project / "docker")
+    elif case == "excluded-file":
+        with (project / "pyproject.toml").open("a") as config:
+            config.write('\n[tool.bandit]\nexclude_dirs = ["src"]\n')
+    step = _step("offline-checks", "Bandit")
+    assert "continue-on-error" not in step
+    assert "if: steps.scope.outputs.offline == 'true' && matrix.python-version == '3.11'\n" in step
+    command = step.split("        run: ", 1)[1].strip()
+    evidence = tmp_path / "evidence"
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-c", command], cwd=project,
+        env=os.environ | {
+            "CI_PERFORMANCE_DIR": str(evidence), "UV_OFFLINE": "1",
+            "UV_PROJECT_ENVIRONMENT": sys.prefix,
+        },
+        capture_output=True, text=True, timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert (result.returncode == 0) is (case == "clean"), output
+    sample = json.loads(next(evidence.glob("bandit-*.json")).read_text())
+    assert sample["returncode"] == result.returncode
+    assert sample["status"] == ("success" if case == "clean" else "failure")
+    if case == "findings":
+        for target in targets:
+            assert f"{target}/probe.py:1: B307" in output
+        assert "scripts/compose_smoke.py:2: B307" in output
+        assert "scripts/compose_smoke.py:1: B101" not in output
+        assert "src/unsafe.py:1: B101" in output
+        assert "src/unsafe.py:3: B608" in output
+    elif case == "syntax-error":
+        assert "Unscanned file: src/probe.py" in output
+    elif case == "missing-directory":
+        assert "Missing scan directory: docker" in output
+    elif case == "excluded-file":
+        assert "Bandit did not scan exactly the expected Python files" in output
+    else:
+        assert "0 findings" in output
+
+
+@pytest.mark.parametrize("optimization", ["flag", "environment"])
+def test_compose_smoke_rejects_disabled_assertions(optimization: str) -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts/compose_smoke.py"
+    command = [sys.executable, *(["-O"] if optimization == "flag" else []), str(script)]
+    result = subprocess.run(
+        command, env=os.environ | {"PYTHONOPTIMIZE": "1" if optimization == "environment" else ""},
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode != 0
+    assert "Compose smoke requires assertions" in result.stderr
+    assert "FileNotFoundError" not in result.stderr  # Fail before reading credentials or contacting Docker.
+
+
+@pytest.mark.parametrize(("step_name", "condition", "phase"), [
+    ("Start disposable PostgreSQL", "steps.scope.outputs.offline == 'true'", "start"),
+    ("Remove disposable PostgreSQL", "always() && steps.scope.outputs.offline == 'true'", "stop"),
+])
+def test_postgres_lifecycle_respects_scope_and_failure_cleanup(step_name: str, condition: str, phase: str) -> None:
+    step = _step("offline-checks", step_name)
+    conditions = re.findall(r"^        if: (.+)$", step, flags=re.MULTILINE)
+    assert conditions == [condition]
+    assert f"-- python .github/scripts/test_postgres.py {phase}" in step
+    assert "continue-on-error" not in step
+
+
+def test_postgres_starts_after_scope_validation_and_has_no_unconditional_job_service() -> None:
+    job = _job("offline-checks")
+    header = job.split("    steps:\n", 1)[0]
+    assert "services:" not in header
+    assert job.index("Validate CI prerequisites") < job.index("Start disposable PostgreSQL")
+    assert job.index("Start disposable PostgreSQL") < job.index("Offline tests")
+    assert job.index("Offline tests") < job.index("Remove disposable PostgreSQL")

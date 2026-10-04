@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
-from chess_crawl.storage.db import atomic
+from chess_crawl.storage.db import Connection, atomic, require_row
 
 
 @dataclass(frozen=True)
@@ -26,11 +25,14 @@ class PendingEvent:
         return f"/{collection}/{self.resource_id}"
 
 
-def archive_id(conn: sqlite3.Connection) -> str:
-    return str(conn.execute("SELECT id FROM event_archive_identity WHERE singleton = 1").fetchone()["id"])
+def archive_id(conn: Connection) -> str:
+    row = conn.execute("SELECT id FROM event_archive_identity WHERE singleton = 1").fetchone()
+    if row is None:
+        raise RuntimeError("The archive event identity is missing")
+    return str(row["id"])
 
 
-def next_pending_event(conn: sqlite3.Connection) -> PendingEvent | None:
+def next_pending_event(conn: Connection) -> PendingEvent | None:
     """Read the oldest pending event even if its backoff has not expired.
 
     Skipping a delayed event would deliver newer revisions out of order. A
@@ -66,32 +68,32 @@ def next_pending_event(conn: sqlite3.Connection) -> PendingEvent | None:
 
 
 @atomic
-def acknowledge_event(conn: sqlite3.Connection, outbox_id: int, *, now: float) -> None:
+def acknowledge_event(conn: Connection, outbox_id: int, *, now: float) -> None:
     conn.execute(
         """UPDATE event_outbox
-              SET delivered_at = ?, attempts = attempts + 1, last_error = NULL
-            WHERE id = ? AND delivered_at IS NULL""",
+              SET delivered_at = %s, attempts = attempts + 1, last_error = NULL
+            WHERE id = %s AND delivered_at IS NULL""",
         (now, outbox_id),
     )
 
 
 @atomic
 def defer_event(
-    conn: sqlite3.Connection, outbox_id: int, *, next_attempt_at: float, error: str,
+    conn: Connection, outbox_id: int, *, next_attempt_at: float, error: str,
 ) -> None:
     conn.execute(
         """UPDATE event_outbox
-              SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?
-            WHERE id = ? AND delivered_at IS NULL""",
+              SET attempts = attempts + 1, next_attempt_at = %s, last_error = %s
+            WHERE id = %s AND delivered_at IS NULL""",
         (next_attempt_at, error, outbox_id),
     )
 
 
-def delivery_health(conn: sqlite3.Connection) -> dict[str, Any]:
-    row = conn.execute(
+def delivery_health(conn: Connection) -> dict[str, Any]:
+    row = require_row(conn.execute(
         """SELECT COUNT(*) AS pending,
                   MIN(occurred_at) AS oldest_pending_at,
                   MAX(attempts) AS highest_attempts
              FROM event_outbox WHERE delivered_at IS NULL"""
-    ).fetchone()
+    ))
     return dict(row)
