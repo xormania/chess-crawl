@@ -41,6 +41,8 @@ bodies and positions inside those bodies. An identical revision is reused on
 replay. Changed native metadata, clocks, or notation creates another revision.
 The current revision follows fetch evidence, including a previously seen body
 returning later. Old source replay cannot overwrite more recent game metadata.
+An already acquired game still refreshes when that previously stored body is
+observed again as current; this does not consume another run/game allowance.
 Database triggers reject updates to normalized revisions and their move, token,
 or observed clock contents. Individual evidence deletion is also rejected.
 Their initial evidence must be inserted in the version creation transaction;

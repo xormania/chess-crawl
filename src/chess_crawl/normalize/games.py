@@ -12,7 +12,7 @@ from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
 from chess_crawl.storage.acquisition import associate_run_game, payload_game_ids, run_game_bounds, run_game_ids
 from chess_crawl.storage.db import Connection, transaction
-from chess_crawl.storage.game_evidence import is_latest_game_source, store_game_evidence
+from chess_crawl.storage.game_evidence import game_source_needs_refresh, is_latest_game_source, store_game_evidence
 from chess_crawl.storage.raw import insert_source_record, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import (
     find_existing_game,
@@ -91,12 +91,17 @@ def normalize_games_payload(
                 complete = complete and existing_id in processed
                 continue
             already_acquired = existing_id in acquired
-            if already_acquired and existing_id in processed:
+            refresh_current = (
+                crawl_run_id is not None and existing_id is not None and existing_id in processed
+                and game_source_needs_refresh(conn, existing_id, raw_payload_id)
+            )
+            if already_acquired and existing_id in processed and not refresh_current:
                 continue
             if not already_acquired and remaining == 0:
                 complete = complete and existing_id in processed
                 continue
-            if crawl_run_id is not None and existing_id is not None and existing_id in processed:
+            if (crawl_run_id is not None and existing_id is not None
+                    and existing_id in processed and not refresh_current):
                 game_id = existing_id
             else:
                 game_id = _normalize_game(

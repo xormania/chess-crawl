@@ -109,6 +109,21 @@ def is_latest_game_source(conn: Connection, game_id: int, raw_payload_id: int) -
     return row is not None and int(row["id"]) == raw_payload_id
 
 
+def game_source_needs_refresh(conn: Connection, game_id: int, raw_payload_id: int) -> bool:
+    """A previously processed source can become current through a new observation.
+
+    Reusing its normalized ID is safe while it already supplies the current
+    revision, or while a newer source still supersedes it. A recurring latest
+    body must refresh both the revision pointer and mutable game metadata.
+    """
+    current = conn.execute(
+        """SELECT 1 FROM games g JOIN game_version_sources s ON s.version_id = g.current_version_id
+             WHERE g.id = %s AND s.raw_payload_id = %s LIMIT 1""",
+        (game_id, raw_payload_id),
+    ).fetchone()
+    return current is None and is_latest_game_source(conn, game_id, raw_payload_id)
+
+
 def read_game_version(conn: Connection, game_id: int, version_id: int | None = None) -> dict[str, Any] | None:
     """Return a revision belonging to this game; decimal evidence stays exact."""
     row = conn.execute(

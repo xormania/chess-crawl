@@ -14,6 +14,8 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   replay fills the new records locally. Standard chess supports legal replay;
   Chess960/other variants retain notation and clocks with explicit unsupported
   board interpretation. PGN exports can be reconstructed from the database.
+  Recurring source bodies refresh the current revision and game metadata even
+  when the same run already acquired the game and has exhausted its allowance.
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
   project's `.venv`; Docker Compose continues to own the application services.

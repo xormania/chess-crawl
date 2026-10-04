@@ -13,6 +13,8 @@ from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.providers.lichess.parser import parse_game
 from chess_crawl.storage.db import Connection, require_row, transaction
+from chess_crawl.jobs import state
+from chess_crawl.storage.acquisition import run_game_ids
 from chess_crawl.storage.game_evidence import export_game_version_pgn, read_game_version
 from chess_crawl.storage.migrations import _execute_schema, initialize, migration_resources
 from chess_crawl.storage.raw import insert_fetch_log, read_raw_payload, store_raw_payload
@@ -117,6 +119,55 @@ def test_repeated_old_body_can_be_current_through_new_fetch_evidence(initialized
     normalize_games_payload(conn, old_raw)
     assert first is not None and read_game_version(conn, game_id)["id"] == first["id"]  # type: ignore[index]
     assert require_row(conn.execute("SELECT COUNT(*) FROM game_versions"))[0] == 2
+
+
+@pytest.mark.parametrize("status_code", [200, 304], ids=["deduplicated-200", "cached-304"])
+def test_same_run_recurring_body_refreshes_current_inputs_without_consuming_capacity(
+    initialized_conn: Connection, status_code: int,
+) -> None:
+    conn = initialized_conn
+    run_id = state.create_crawl_run(conn, provider="lichess", seed_spec="alice", params={"max_games": 1})
+    source = "https://lichess.org/api/game/evidence"
+    original = _data("1. e4 {[%clk 0:04:59]} *", status="started", clocks=[29900])
+
+    def observe(data: dict, observed_at: int, *, http_status: int = 200) -> int:
+        raw_id = store_raw_payload(conn, RawRecord(
+            provider="lichess", endpoint_type="game", request_url=source,
+            canonical_source_key="lichess/game/evidence", fetched_at=observed_at,
+            body=json.dumps(data).encode(), media_type="application/json",
+        ))
+        insert_fetch_log(conn, provider="lichess", url=source, endpoint_type="game",
+                         attempted_at=observed_at, status_code=http_status, raw_payload_id=raw_id,
+                         crawl_run_id=run_id)
+        return raw_id
+
+    first_raw = observe(original, 100)
+    game_id = normalize_games_payload(conn, first_raw, crawl_run_id=run_id, max_games=1)[0]
+    first = read_game_version(conn, game_id)
+    assert first is not None
+    second_raw = observe(_data("1. e4 e5 *", status="resign", winner="white", clocks=[25000, 20000]), 200)
+    assert normalize_games_payload(conn, second_raw, crawl_run_id=run_id, max_games=0) == []
+    second = read_game_version(conn, game_id)
+    assert second is not None and second["id"] != first["id"]
+    # Offline replay supplies no new observation and must preserve the later B.
+    assert normalize_games_payload(conn, first_raw, crawl_run_id=run_id, max_games=0) == []
+    assert read_game_version(conn, game_id)["id"] == second["id"]  # type: ignore[index]
+    assert require_row(conn.execute("SELECT status_raw FROM games WHERE id=%s", (game_id,)))[0] == "resign"
+    if status_code == 200:
+        assert observe(original, 300) == first_raw
+    else:
+        insert_fetch_log(conn, provider="lichess", url=source, endpoint_type="game",
+                         attempted_at=300, status_code=304, raw_payload_id=first_raw,
+                         crawl_run_id=run_id)
+    assert normalize_games_payload(conn, first_raw, crawl_run_id=run_id, max_games=0) == []
+    current = read_game_version(conn, game_id)
+    assert current is not None and current["id"] == first["id"]
+    assert current["clocks"] == first["clocks"]
+    row = require_row(conn.execute("SELECT status_raw,outcome,ply_count FROM games WHERE id=%s", (game_id,)))
+    assert tuple(row.values()) == ("started", None, 1)
+    assert run_game_ids(conn, run_id) == {game_id}
+    assert require_row(conn.execute("SELECT COUNT(*) FROM game_versions"))[0] == 2
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 2
 
 
 @pytest.mark.parametrize("variant", ["chess960", "atomic", "crazyhouse", "bughouse"])
