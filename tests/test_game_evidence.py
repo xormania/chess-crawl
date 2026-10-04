@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+import psycopg
 
 from chess_crawl.normalize.game_evidence import parse_game_evidence
 from chess_crawl.normalize.games import normalize_games_payload
@@ -148,7 +149,7 @@ def test_provider_moves_without_pgn_and_unmapped_extra_clocks() -> None:
     data = _data("", moves="e4 e5", clocks=[30000, 29999, 100], initialFen=INITIAL_FEN)
     evidence = parse_game_evidence(parse_game(data))
     assert evidence.parse_status == "complete"
-    assert evidence.source_metadata["_move_text_origin"] == "provider.moves"
+    assert evidence.move_text_origin == "provider.moves"
     assert evidence.played_ply_count == 2
     assert evidence.clocks[-1].node_index is None and evidence.clocks[-1].status == "unmapped"
 
@@ -162,6 +163,95 @@ def test_malformed_and_unknown_tokens_are_queryable_and_never_certified_complete
     assert "nonsense" in "".join(tokens)
     assert "[%custom unchanged]" in export_game_version_pgn(initialized_conn, game_id, allow_partial=True)
     assert version["parse_issues"]
+
+
+def test_decimal_clock_precision_is_not_limited_by_python_decimal_context(initialized_conn: Connection) -> None:
+    value = "0.12345678901234567890123456789012345678901234567890"
+    _, game_id = _store(initialized_conn, _data(f"1. e4 {{[%clk 0:00:00.{value.split('.')[1]}]}} *"))
+    revision = read_game_version(initialized_conn, game_id)
+    assert revision is not None
+    assert revision["clocks"][0]["seconds"] == value
+    assert Decimal(revision["clocks"][0]["precision_seconds"]) == Decimal("1E-50")
+
+
+def test_utf8_bom_and_native_origin_key_do_not_lose_source_evidence(initialized_conn: Connection) -> None:
+    pgn = '\ufeff[Event "BOM"]\n\n1. e4 *'
+    _, game_id = _store(initialized_conn, _data(pgn, _move_text_origin="provider-supplied-value"))
+    revision = read_game_version(initialized_conn, game_id)
+    assert revision is not None and revision["parse_status"] == "complete"
+    assert revision["source_metadata"]["_move_text_origin"] == "provider-supplied-value"
+    assert export_game_version_pgn(initialized_conn, game_id).startswith('\ufeff[Event "BOM"]')
+
+
+def test_clocks_without_any_move_text_are_preserved_as_unmapped(initialized_conn: Connection) -> None:
+    _, game_id = _store(initialized_conn, _data("", clocks=[30000, 0, None], unfamiliar="retained"))
+    revision = read_game_version(initialized_conn, game_id)
+    assert revision is not None and revision["parse_status"] == "unavailable"
+    assert [item["seconds"] for item in revision["clocks"]] == ["300", "0", None]
+    assert [item["status"] for item in revision["clocks"]] == ["unmapped", "unmapped", "invalid"]
+    assert all(item["node_index"] is None for item in revision["clocks"])
+    assert revision["source_metadata"]["clocks"] == [30000, 0, None]
+
+
+def test_grammar_gaps_and_trailing_fragments_survive_database_export(
+    initialized_conn: Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import chess_crawl.normalize.game_evidence as module
+    grammar = module.import_format
+
+    class FutureGrammar:
+        # Exercise preservation if a dependency revision stops recognizing
+        # a source fragment. Legality is still checked by the real parser.
+        @staticmethod
+        def finditer(text: str, start: int = 0):
+            return (match for match in grammar.finditer(text, start)
+                    if match.group().strip() not in {"UNHANDLED", "TRAILING"})
+
+    monkeypatch.setattr(module, "import_format", FutureGrammar())
+    _, game_id = _store(initialized_conn, _data("1. e4 UNHANDLED e5 * TRAILING"))
+    revision = read_game_version(initialized_conn, game_id)
+    assert revision is not None and revision["parse_status"] == "partial"
+    exported = export_game_version_pgn(initialized_conn, game_id, allow_partial=True)
+    assert "UNHANDLED" in exported and "TRAILING" in exported
+    gaps = list(initialized_conn.execute(
+        "SELECT kind,token_text FROM game_pgn_tokens WHERE kind IN ('unknown_gap','unknown_tail') ORDER BY token_index"))
+    assert [row["kind"] for row in gaps] == ["unknown_gap", "unknown_tail"]
+    assert "UNHANDLED" in gaps[0]["token_text"] and "TRAILING" in gaps[1]["token_text"]
+
+
+@pytest.mark.parametrize("statement", [
+    "UPDATE game_versions SET headers = '{}'",
+    "UPDATE game_move_nodes SET move_san = 'faked'",
+    "UPDATE game_clock_observations SET seconds = 123",
+    "UPDATE game_pgn_tokens SET token_text = 'changed'",
+    "DELETE FROM game_clock_observations",
+    "DELETE FROM game_pgn_tokens",
+])
+def test_evidence_is_physically_immutable(initialized_conn: Connection, statement: str) -> None:
+    _store(initialized_conn, _data("1. e4 {[%clk 0:05:00]} *"))
+    with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+        with transaction(initialized_conn):
+            initialized_conn.execute(statement)
+    assert require_row(initialized_conn.execute("SELECT seconds FROM game_clock_observations"))[0] == 300
+
+
+def test_unreferenced_version_removal_can_cascade(initialized_conn: Connection) -> None:
+    _, game_id = _store(initialized_conn, _data("1. e4 {[%clk 0:05:00]} *"))
+    with transaction(initialized_conn):
+        initialized_conn.execute("UPDATE games SET current_version_id = NULL WHERE id = %s", (game_id,))
+        initialized_conn.execute("DELETE FROM game_versions WHERE game_id = %s", (game_id,))
+    assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM game_versions"))[0] == 0
+
+
+def test_committed_evidence_cannot_gain_extra_tokens(initialized_conn: Connection) -> None:
+    _, game_id = _store(initialized_conn, _data("1. e4 *"))
+    version = read_game_version(initialized_conn, game_id)
+    assert version is not None
+    with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+        with transaction(initialized_conn):
+            initialized_conn.execute(
+                "INSERT INTO game_pgn_tokens(version_id,token_index,kind,token_text,start_offset,end_offset,interpretation_status) "
+                "VALUES (%s,999,'unknown','new evidence',0,0,'preserved')", (version["id"],))
 
 
 def test_upgrade_populated_v5_archive_then_replay_without_network(uninitialized_database_url: str) -> None:

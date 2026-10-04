@@ -6,6 +6,7 @@ import time
 from typing import TypedDict
 
 from chess_crawl.normalize.codes import map_variant
+from chess_crawl.normalize.game_evidence import GameEvidence
 from chess_crawl.providers.base import NormalizedGame, NormalizedParticipant
 from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
@@ -140,6 +141,7 @@ def _normalize_game(
     source_key: str,
     json_pointer: str,
     fetched_at: int,
+    evidence: GameEvidence | None = None,
 ) -> int:
     canonical_variant, mapped = map_variant(game.provider, game.variant_raw)
     variant_id = get_or_create_variant(
@@ -184,7 +186,7 @@ def _normalize_game(
         first_seen_at=fetched_at,
     )
     store_game_evidence(conn, game_id=game_id, game=game, raw_payload_id=raw_payload_id,
-                        json_pointer=json_pointer, fetched_at=fetched_at)
+                        json_pointer=json_pointer, fetched_at=fetched_at, evidence=evidence)
     if update_current:
         _normalize_participant(conn, game_id, game.provider, game.white, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
         _normalize_participant(conn, game_id, game.provider, game.black, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)

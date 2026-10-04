@@ -12,7 +12,8 @@ items (including duplicate tags), starting position, time-control periods,
 normalization version, interpretation status, and issues. The PGN text itself
 is represented by ordered lexical records in `game_pgn_tokens`, rather than
 another standalone PGN copy. Native `moves` strings are converted to the same
-records; `_move_text_origin` distinguishes their origin from supplied PGN.
+records; `move_text_origin` distinguishes their origin from supplied PGN without
+overwriting any native metadata key.
 
 `game_move_nodes` preserves a tree of occurrences. Node zero is the starting
 position. Parent and variation indices distinguish alternatives from the
@@ -40,6 +41,14 @@ bodies and positions inside those bodies. An identical revision is reused on
 replay. Changed native metadata, clocks, or notation creates another revision.
 The current revision follows fetch evidence, including a previously seen body
 returning later. Old source replay cannot overwrite more recent game metadata.
+Database triggers reject updates to normalized revisions and their move, token,
+or observed clock contents. Individual evidence deletion is also rejected.
+Their initial evidence must be inserted in the version creation transaction;
+later inserts cannot silently change a committed version's contents.
+An explicitly removed, unreferenced version can cascade to its contents;
+downstream working-set references are responsible for protecting selected
+versions from removal. Additional source associations and derived results use
+separate records.
 
 ## Parser and interpretation boundaries
 

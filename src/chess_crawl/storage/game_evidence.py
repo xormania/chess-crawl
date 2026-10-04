@@ -29,11 +29,11 @@ def store_game_evidence(
         parsed = evidence or parse_game_evidence(game)
         row = require_row(conn.execute(
             """INSERT INTO game_versions(game_id,content_hash,parser_version,first_seen_at,
-                   headers,header_items,source_metadata,starting_fen,variant,parse_status,
+                   headers,header_items,source_metadata,move_text_origin,starting_fen,variant,parse_status,
                    parse_issues,played_ply_count,time_control_rules)
-                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (game_id, revision_hash, EVIDENCE_VERSION, fetched_at, Jsonb(parsed.headers),
-             Jsonb(parsed.header_items), Jsonb(parsed.source_metadata), parsed.starting_fen,
+             Jsonb(parsed.header_items), Jsonb(parsed.source_metadata), parsed.move_text_origin, parsed.starting_fen,
              parsed.variant, parsed.parse_status, Jsonb(parsed.parse_issues), parsed.played_ply_count,
              Jsonb(parsed.time_control_rules)),
         ))
@@ -156,7 +156,9 @@ def export_game_version_pgn(
     in_headers = True
     for token in tokens:
         kind, text = token["kind"], str(token["token_text"])
-        if kind == "header":
+        if kind == "byte_order_mark":
+            output.append(text)
+        elif kind == "header":
             output.append(text + "\n")
         else:
             if in_headers:

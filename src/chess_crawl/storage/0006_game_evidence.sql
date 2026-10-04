@@ -6,9 +6,11 @@ CREATE TABLE game_versions (
   content_hash TEXT NOT NULL,
   parser_version TEXT NOT NULL,
   first_seen_at BIGINT NOT NULL,
+  created_transaction BIGINT NOT NULL DEFAULT txid_current(),
   headers JSONB NOT NULL DEFAULT '{}'::jsonb,
   header_items JSONB NOT NULL DEFAULT '[]'::jsonb,
   source_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  move_text_origin TEXT NOT NULL CHECK (move_text_origin IN ('pgn','provider.moves','unavailable')),
   starting_fen TEXT,
   variant TEXT NOT NULL,
   parse_status TEXT NOT NULL CHECK (parse_status IN ('complete','partial','unavailable','unsupported')),
@@ -109,3 +111,35 @@ CREATE TABLE game_derived_timings (
   PRIMARY KEY(version_id, node_index, method_version),
   FOREIGN KEY(version_id,node_index) REFERENCES game_move_nodes(version_id,node_index)
 );
+
+CREATE FUNCTION protect_game_evidence() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NOT EXISTS (SELECT 1 FROM game_versions
+                    WHERE id = NEW.version_id AND created_transaction = txid_current()) THEN
+      RAISE EXCEPTION 'Game evidence must be populated in its version creation transaction'
+        USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    RAISE EXCEPTION 'Normalized game evidence is immutable; create a new version'
+      USING ERRCODE = '55000';
+  END IF;
+  -- A cascading deletion of an unreferenced version can remove its contents.
+  -- Individual deletion while the version survives would corrupt its inputs.
+  IF EXISTS (SELECT 1 FROM game_versions WHERE id = OLD.version_id) THEN
+    RAISE EXCEPTION 'Game evidence cannot be removed while its version exists'
+      USING ERRCODE = '55000';
+  END IF;
+  RETURN OLD;
+END;
+$$;
+CREATE TRIGGER immutable_game_version BEFORE UPDATE ON game_versions
+  FOR EACH ROW EXECUTE FUNCTION protect_game_evidence();
+CREATE TRIGGER immutable_game_move BEFORE INSERT OR UPDATE OR DELETE ON game_move_nodes
+  FOR EACH ROW EXECUTE FUNCTION protect_game_evidence();
+CREATE TRIGGER immutable_game_token BEFORE INSERT OR UPDATE OR DELETE ON game_pgn_tokens
+  FOR EACH ROW EXECUTE FUNCTION protect_game_evidence();
+CREATE TRIGGER immutable_game_clock BEFORE INSERT OR UPDATE OR DELETE ON game_clock_observations
+  FOR EACH ROW EXECUTE FUNCTION protect_game_evidence();

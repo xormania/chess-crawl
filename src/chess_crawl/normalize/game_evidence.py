@@ -7,8 +7,9 @@ without inventing board positions, UCI moves, or legality claims.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -75,6 +76,7 @@ class GameEvidence:
     headers: dict[str, str]
     header_items: list[dict[str, str]]
     source_metadata: dict[str, Any]
+    move_text_origin: str
     starting_fen: str | None
     variant: str
     parse_status: str
@@ -99,14 +101,17 @@ def parse_game_evidence(game: NormalizedGame) -> GameEvidence:
         # are parser context, not falsely represented as supplied PGN tags.
         text = native["moves"] + " *"
     metadata = {key: value for key, value in native.items() if key not in {"pgn", "moves"}}
-    metadata["_move_text_origin"] = "provider.moves" if moves_only else "pgn" if text else "unavailable"
+    origin = "provider.moves" if moves_only else "pgn" if text else "unavailable"
     if not text:
-        return GameEvidence({}, [], metadata, _initial_fen({}, native), game.variant_key,
-                            "unavailable", [{"kind": "moves_unavailable"}],
-                            parse_clock_rules(game.time_control_raw, native),
-                            [MoveNode(0, None, 0, 0, True)], [], [])
+        unavailable = GameEvidence({}, [], metadata, origin, _initial_fen({}, native), game.variant_key,
+                                   "unavailable", [{"kind": "moves_unavailable"}],
+                                   parse_clock_rules(game.time_control_raw, native),
+                                   [MoveNode(0, None, 0, 0, True)], [], [])
+        _provider_observations(unavailable, native)
+        return unavailable
 
-    matches = list(import_format.finditer(text))
+    bom = text.startswith("\ufeff")
+    matches = list(import_format.finditer(text, 1 if bom else 0))
     headers: dict[str, str] = {}
     header_items: list[dict[str, str]] = []
     for match in matches:
@@ -120,7 +125,7 @@ def parse_game_evidence(game: NormalizedGame) -> GameEvidence:
     supported = variant in {"standard", "chess", "fromposition"} and game.variant_key in {"standard", "fromposition"}
     start_fen = _initial_fen(headers, native)
     root = MoveNode(0, None, 0, 0, True, fen_after=start_fen if supported else None)
-    evidence = GameEvidence(headers, header_items, metadata, start_fen, game.variant_key,
+    evidence = GameEvidence(headers, header_items, metadata, origin, start_fen, game.variant_key,
                             "complete" if supported else "unsupported", [],
                             parse_clock_rules(headers.get("TimeControl", game.time_control_raw), native),
                             [root], [], [])
@@ -151,14 +156,21 @@ def parse_game_evidence(game: NormalizedGame) -> GameEvidence:
     pending_comments: list[str] = []
     at_variation_start = False
     terminated = False
-    previous_end = 0
-    for index, match in enumerate(matches):
+    previous_end = 1 if bom else 0
+    if bom:
+        evidence.tokens.append({"token_index": len(evidence.tokens), "kind": "byte_order_mark", "token_text": text[:1],
+                                "start_offset": 0, "end_offset": 1, "interpretation_status": "parsed"})
+    for match in matches:
         group = match.lastindex
         token = match.group()
         kind = "move" if group in _MOVES else _KINDS.get(group, "unknown")
         if text[previous_end:match.start()].strip():
             evidence.parse_issues.append({"kind": "unrecognized_gap", "start": previous_end, "end": match.start()})
+            evidence.tokens.append({"token_index": len(evidence.tokens), "kind": "unknown_gap",
+                                    "token_text": text[previous_end:match.start()], "start_offset": previous_end,
+                                    "end_offset": match.start(), "interpretation_status": "preserved"})
         previous_end = match.end()
+        index = len(evidence.tokens)
         lexical = {"token_index": index, "kind": kind, "token_text": token,
                    "start_offset": match.start(), "end_offset": match.end(),
                    "interpretation_status": "parsed" if supported else "preserved"}
@@ -224,6 +236,9 @@ def parse_game_evidence(game: NormalizedGame) -> GameEvidence:
             evidence.parse_issues.append({"kind": "uninterpreted_token", "token": index, "text": token})
     if text[previous_end:].strip():
         evidence.parse_issues.append({"kind": "unrecognized_tail", "start": previous_end})
+        evidence.tokens.append({"token_index": len(evidence.tokens), "kind": "unknown_tail",
+                                "token_text": text[previous_end:], "start_offset": previous_end,
+                                "end_offset": len(text), "interpretation_status": "preserved"})
     if rav:
         evidence.parse_issues.append({"kind": "unclosed_variation", "depth": len(rav)})
     if not terminated:
@@ -298,14 +313,25 @@ def _comment_observations(evidence: GameEvidence, node_index: int | None, commen
 def _parse_clock(value: str) -> tuple[Decimal | None, Decimal | None]:
     # PGN clock/elapsed extension is hours:minutes:seconds, optionally with a
     # decimal second part. Never use float for observed timing evidence.
-    match = re.fullmatch(r"(\d+):(\d{2}):(\d{2})(?:\.(\d+))?", value)
+    match = re.fullmatch(r"([0-9]+):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?", value)
     if not match or int(match[2]) >= 60 or int(match[3]) >= 60:
         return None, None
     fraction = match[4] or ""
-    seconds = Decimal(int(match[1]) * 3600 + int(match[2]) * 60 + int(match[3]))
-    if fraction:
-        seconds += Decimal("0." + fraction)
-    return seconds, Decimal(1).scaleb(-len(fraction))
+    # PostgreSQL unconstrained NUMERIC supports at most 16,383 fractional
+    # digits. Out-of-range values remain textual invalid observations.
+    if len(fraction) > 16383:
+        return None, None
+    try:
+        with localcontext() as context:
+            context.prec = max(28, len(match[1]) + len(fraction) + 10)
+            seconds = Decimal(match[1]) * 3600 + Decimal(match[2]) * 60 + Decimal(match[3])
+            if fraction:
+                seconds += Decimal("0." + fraction)
+            if seconds.adjusted() > 131071:
+                return None, None
+            return seconds, Decimal(1).scaleb(-len(fraction))
+    except InvalidOperation:
+        return None, None
 
 
 def _provider_observations(evidence: GameEvidence, native: dict[str, Any]) -> None:
@@ -315,15 +341,19 @@ def _provider_observations(evidence: GameEvidence, native: dict[str, Any]) -> No
         for index, value in enumerate(clocks):
             seconds = None
             try:
-                if not isinstance(value, bool) and value is not None:
-                    candidate = Decimal(str(value)) / 100
+                if isinstance(value, int) and not isinstance(value, bool):
+                    # The documented provider representation is integer
+                    # centiseconds. Reject other shapes, preserving their JSON.
+                    with localcontext() as context:
+                        context.prec = max(28, len(str(value)) + 4)
+                        candidate = Decimal(value) / 100
                     if candidate.is_finite() and candidate >= 0:
                         seconds = candidate
             except InvalidOperation:
                 pass
             node_index = played[index].node_index if index < len(played) else None
             evidence.clocks.append(ClockObservation(
-                node_index, "remaining", "provider", f"/clocks/{index}", str(value), seconds,
+                node_index, "remaining", "provider", f"/clocks/{index}", json.dumps(value, separators=(",", ":")), seconds,
                 "centiseconds", Decimal("0.01"), "invalid" if seconds is None else "parsed" if node_index else "unmapped",
                 "after_move" if node_index else "unknown",
             ))
