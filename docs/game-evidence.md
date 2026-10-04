@@ -11,9 +11,12 @@ are separate operations so migrating an archive never depends on a provider.
 items (including duplicate tags), starting position, time-control periods,
 normalization version, interpretation status, and issues. The PGN text itself
 is represented by ordered lexical records in `game_pgn_tokens`, rather than
-another standalone PGN copy. Native `moves` strings are converted to the same
-records; `move_text_origin` distinguishes their origin from supplied PGN without
-overwriting any native metadata key.
+another standalone PGN copy. Native `moves` strings supply those records when
+PGN is unavailable. When PGN is supplied, parallel native `moves` values remain
+unchanged in `source_metadata`, including differences from the PGN line and
+uninterpretable values. `move_text_origin` identifies the tokenized source.
+Evidence parser v2 repairs earlier omitted native moves through offline replay
+into a new immutable revision; prior revisions remain available.
 
 `game_move_nodes` preserves a tree of occurrences. Node zero is the starting
 position. Parent and variation indices distinguish alternatives from the

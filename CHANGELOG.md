@@ -101,6 +101,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Preserve unused native move data alongside PGN-derived tokens, including
+  conflicting notation and nontext native values. Evidence parser v2 repairs
+  previous omissions through local replay into a new immutable revision.
+
 - Read game revisions and reconstruct PGN from one complete database snapshot,
   including when a concurrent writer replaces and removes an old unreferenced
   version. Read/export helpers remain coherent inside READ COMMITTED callers
