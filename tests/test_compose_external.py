@@ -75,13 +75,18 @@ def test_external_compose_excludes_unused_database_and_preserves_migration_and_h
     render_compose: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
     services = parsed(render_compose(external=True))["services"]
-    assert set(services) == {"init", "api", "worker", "events", "mercure"}
+    assert set(services) == {"archive-init", "init", "api", "worker", "events", "mercure"}
     assert services["init"].get("depends_on", {}) == {}
     for name in ("api", "worker", "events"):
         assert services[name]["depends_on"]["init"] == {"condition": "service_completed_successfully", "required": True}
     assert services["events"]["depends_on"]["mercure"] == {"condition": "service_healthy", "required": True}
     assert "mercure" not in services["api"]["depends_on"]
     assert "mercure" not in services["worker"]["depends_on"]
+    for name in ("api", "worker"):
+        assert services[name]["depends_on"]["archive-init"] == {
+            "condition": "service_completed_successfully", "required": True,
+        }
+    assert services["archive-init"].get("depends_on", {}) == {}
 
 
 def test_external_compose_enforces_verified_transport_and_mounts_ca_on_every_database_client(
