@@ -40,19 +40,13 @@ def prepare_archive_object(body: bytes, *, store: ObjectStore) -> PreparedArchiv
 
 
 def prepare_or_reuse_archive_object(conn: Connection, body: bytes, *, store: ObjectStore) -> PreparedArchiveObject:
-    """Reuse a previously verified registration without contacting its backend."""
+    """Publish or reverify immutable bytes before registering another reference."""
     if conn.in_transaction:
         raise ValueError("External archive writes in a transaction require a prepared object")
-    existing = conn.execute(
-        """SELECT * FROM archive_objects WHERE backend=%s AND location=%s AND body_hash=%s
-             AND body_bytes=%s ORDER BY id LIMIT 1""",
-        (store.backend, store.location, digest(body), len(body)),
-    ).fetchone()
-    if existing is not None:
-        return PreparedArchiveObject(
-            existing["backend"], existing["location"], existing["object_key"], existing["body_hash"],
-            existing["stored_hash"], int(existing["body_bytes"]), int(existing["stored_bytes"]),
-        )
+    # A registered location can be missing or corrupt despite an earlier verified
+    # write. Reuse must satisfy today's publication/readback checks too, before
+    # relocation releases the remaining valid inline source bytes. Adapters can
+    # restore a missing object but must never overwrite conflicting evidence.
     return prepare_archive_object(body, store=store)
 
 

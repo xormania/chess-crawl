@@ -190,23 +190,35 @@ def test_existing_raw_payload_deduplication_avoids_object_io(initialized_conn, t
     assert require_row(conn.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == 2
 
 
-def test_verified_shared_objects_are_reused_across_imports_and_sources(initialized_conn, tmp_path, monkeypatch) -> None:
+def test_shared_objects_are_reverified_across_imports_and_sources(initialized_conn, tmp_path, monkeypatch) -> None:
     conn = initialized_conn
     store = LocalObjectStore(str(tmp_path))
     body = b"shared evidence"
     archive_id = store_archive_object(conn, body, store=store)
 
-    def forbidden(*args, **kwargs):
-        pytest.fail("Previously registered immutable objects must not perform duplicate I/O")
+    original_read = LocalObjectStore.read
+    reads: list[str] = []
 
-    monkeypatch.setattr(LocalObjectStore, "put", forbidden)
-    monkeypatch.setattr(LocalObjectStore, "read", forbidden)
+    def read(self, key, *, expected_size):
+        assert not conn.in_transaction
+        reads.append(key)
+        return original_read(self, key, expected_size=expected_size)
+
+    monkeypatch.setattr(LocalObjectStore, "read", read)
     assert store_archive_object(conn, body, store=store) == archive_id
+    assert reads
+    reads.clear()
     store_import_backup(conn, body, workspace_id="a", source_name="study.pgn", store=store)
+    assert reads
+    reads.clear()
     store_import_backup(conn, body, workspace_id="b", source_name="study.pgn", store=store)
+    assert reads
+    reads.clear()
     store_raw_payload(conn, record(body), store=store)
+    assert reads
     assert require_row(conn.execute("SELECT COUNT(*) FROM archive_objects"))[0] == 1
     assert require_row(conn.execute("SELECT COUNT(*) FROM archive_imports"))[0] == 2
+    assert len(list(tmp_path.rglob("*.gz"))) == 1
 
 
 def test_failed_publication_never_releases_inline_body(initialized_conn, tmp_path, monkeypatch) -> None:

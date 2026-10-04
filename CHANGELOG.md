@@ -97,6 +97,12 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Object reuse rechecks publication and readback before relocation releases an
+  inline backup, restoring missing objects and retaining inline evidence on
+  corruption. Archive settings currently apply to source-run clients and
+  operational helpers; the existing Compose stack continues inline storage.
+
+
 - Object publication and verification run before database write transactions,
   keeping API/job mutations responsive during slow archive storage. Raw-response
   deduplication skips object I/O; callers owning outer transactions must prepare

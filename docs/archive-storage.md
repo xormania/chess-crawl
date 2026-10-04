@@ -11,6 +11,14 @@ to send new bodies to object storage. The schema migration adds references witho
 moving any bytes or contacting AWS. Reads use the location saved with each object,
 independently of the backend configured for new writes.
 
+These settings currently configure source-run clients and operational helpers.
+The checked-in standalone Compose stack continues using inline database storage:
+it does not forward `CHESS_CRAWL_ARCHIVE_*` settings, provide a shared local
+archive mount, or install the optional S3 SDK. Setting these variables in its
+`.env` alone has no effect. An external backend in containers requires deployment
+configuration that forwards the settings and provides either a durable archive
+mount at the same path in every service or the S3 extra and AWS credentials.
+
 ## Local storage
 
 ```bash
@@ -104,3 +112,7 @@ objects must remain at the recorded absolute directory; moving directories or
 changing buckets requires a separate verified relocation implementation. This
 helper currently moves inline bodies only and intentionally performs no garbage
 collection. Inspect missing/corrupt objects against the last independent backup.
+When another source or import reuses the same object bytes, publication and
+readback are verified again outside the database transaction. A registered row
+alone cannot justify discarding an inline backup. Missing objects can be restored
+from that backup; conflicting or corrupt objects fail without releasing it.

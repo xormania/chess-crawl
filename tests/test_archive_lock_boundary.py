@@ -180,3 +180,32 @@ def test_prepared_object_cannot_be_attached_to_different_body(initialized_conn, 
     with pytest.raises(ValueError, match="does not match"):
         store_raw_payload(initialized_conn, different, prepared_object=published)
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 0
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_relocation_reverifies_registered_object_before_releasing_inline_copy(
+    initialized_conn, tmp_path, damage,
+):
+    conn = initialized_conn
+    store = LocalObjectStore(str(tmp_path))
+    original = sample_record()
+    store_raw_payload(conn, original, store=store)
+    inline_record = RawRecord(
+        provider=original.provider, endpoint_type=original.endpoint_type, canonical_source_key="inline-backup",
+        body=original.body, fetched_at=124, request_url=original.request_url,
+    )
+    inline_id = store_raw_payload(conn, inline_record)
+    path = next(tmp_path.rglob("*.gz"))
+    if damage == "missing":
+        path.unlink()
+        # The valid inline copy can restore a missing immutable object.
+        assert relocate_raw_payloads(conn, store=store).moved == 1
+        assert path.exists()
+    else:
+        path.write_bytes(b"corrupted source backup")
+        with pytest.raises(ValueError):
+            relocate_raw_payloads(conn, store=store)
+        row = require_row(conn.execute("SELECT raw_body, archive_object_id FROM raw_payloads WHERE id=%s", (inline_id,)))
+        assert row["raw_body"] == original.body
+        assert row["archive_object_id"] is None
+    assert read_raw_payload(conn, inline_id).body == original.body
