@@ -7,6 +7,13 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Immutable game evidence revisions, queryable PGN move/variation trees,
+  headers, comments, NAGs, provider metadata and lexical tokens. Precise clock
+  and reported elapsed observations retain conflicting sources, malformed
+  values, and decimal resolution. Migration 0006 preserves existing archives;
+  replay fills the new records locally. Standard chess supports legal replay;
+  Chess960/other variants retain notation and clocks with explicit unsupported
+  board interpretation. PGN exports can be reconstructed from the database.
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
   project's `.venv`; Docker Compose continues to own the application services.

@@ -11,6 +11,7 @@ from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
 from chess_crawl.storage.acquisition import associate_run_game, payload_game_ids, run_game_bounds, run_game_ids
 from chess_crawl.storage.db import Connection, transaction
+from chess_crawl.storage.game_evidence import is_latest_game_source, store_game_evidence
 from chess_crawl.storage.raw import insert_source_record, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import (
     find_existing_game,
@@ -23,7 +24,7 @@ from chess_crawl.storage.repository import (
 )
 
 
-PARSER_VERSION = "games-normalizer-v2"
+PARSER_VERSION = "games-normalizer-v3"
 
 
 class TimeControlArgs(TypedDict):
@@ -80,8 +81,6 @@ def normalize_games_payload(
         complete = True
         supported = False
         for index, game in enumerate(games):
-            if game.variant_key == "bughouse":
-                continue
             supported = True
             existing = find_existing_game(
                 conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash,
@@ -105,7 +104,8 @@ def normalize_games_payload(
                     raw_payload_id=raw_payload_id,
                     endpoint_type=raw.endpoint_type,
                     source_key=raw.canonical_source_key,
-                    json_pointer=f"/games/{index}" if raw.endpoint_type == "monthly_archive" else f"/{index}",
+                    json_pointer=(f"/games/{index}" if raw.endpoint_type == "monthly_archive"
+                                  else "" if raw.endpoint_type == "game" else f"/{index}"),
                     fetched_at=raw.fetched_at,
                 )
                 processed.add(game_id)
@@ -151,6 +151,8 @@ def _normalize_game(
     )
     clock = parse_time_control(game.time_control_raw, game.time_class)
     time_control_id = get_or_create_time_control(conn, **clock)
+    existing = find_existing_game(conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash)
+    update_current = existing is None or is_latest_game_source(conn, int(existing["id"]), raw_payload_id)
     game_id = upsert_game(
         conn,
         provider=game.provider,
@@ -169,7 +171,7 @@ def _normalize_game(
         opening_name=game.opening_name,
         opening_ply=game.opening_ply,
         now=fetched_at,
-    )
+    ) if update_current else int(existing["id"])  # type: ignore[index]
     insert_source_record(
         conn,
         entity_type="game",
@@ -181,8 +183,11 @@ def _normalize_game(
         raw_payload_id=raw_payload_id,
         first_seen_at=fetched_at,
     )
-    _normalize_participant(conn, game_id, game.provider, game.white, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
-    _normalize_participant(conn, game_id, game.provider, game.black, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
+    store_game_evidence(conn, game_id=game_id, game=game, raw_payload_id=raw_payload_id,
+                        json_pointer=json_pointer, fetched_at=fetched_at)
+    if update_current:
+        _normalize_participant(conn, game_id, game.provider, game.white, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
+        _normalize_participant(conn, game_id, game.provider, game.black, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
     return game_id
 
 
@@ -239,7 +244,7 @@ def _normalize_participant(
 
 def parse_time_control(raw_label: str | None, time_class: str) -> TimeControlArgs:
     label = raw_label or time_class
-    if "/" in label:
+    if "/" in label and time_class == "correspondence":
         try:
             _, seconds = label.split("/", 1)
             days = max(1, int(int(seconds) / 86400))
@@ -265,12 +270,13 @@ def parse_time_control(raw_label: str | None, time_class: str) -> TimeControlArg
     initial: int | None = None
     increment: int | None = 0
     try:
-        if "+" in label:
-            base, inc = label.split("+", 1)
+        first_period = label.split(":", 1)[0].split("/", 1)[-1]
+        if "+" in first_period:
+            base, inc = first_period.split("+", 1)
             initial = int(base)
             increment = int(inc)
         else:
-            initial = int(label)
+            initial = int(first_period)
     except (TypeError, ValueError):
         initial = None
         increment = None
