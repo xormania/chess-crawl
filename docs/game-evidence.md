@@ -43,6 +43,14 @@ The current revision follows fetch evidence, including a previously seen body
 returning later. Old source replay cannot overwrite more recent game metadata.
 An already acquired game still refreshes when that previously stored body is
 observed again as current; this does not consume another run/game allowance.
+Current time and opening facts replace prior values when their native fields
+are explicitly supplied, including reported nulls. Omitted fields remain sparse
+and preserve known values; malformed time/opening values remain in source
+evidence without being treated as explicit nulls. A known live state clears a
+stale completion time when no end is supplied; supplied result evidence clears stale
+participant wins/losses. The `games-normalizer-v5` identity permits an offline
+upgrade to repair these current facts without changing immutable evidence
+versions or fetching source bodies again.
 Database triggers reject updates to normalized revisions and their move, token,
 or observed clock contents. Individual evidence deletion is also rejected.
 Their initial evidence must be inserted in the version creation transaction;

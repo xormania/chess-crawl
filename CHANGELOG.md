@@ -101,6 +101,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Restore explicitly null current game times, opening facts, and participant
+  results when a previously observed body becomes current again. Sparse omitted
+  facts remain preserved; known live observations cannot retain a stale completed
+  end time. The v5 game normalizer can repair existing facts by offline replay.
 - Reconcile renamed accounts with username-only placeholders while preserving
   their game, snapshot, source, and discovery history. Conflicting stable
   provider account IDs produce an explicit error instead of overwriting identity.

@@ -128,7 +128,8 @@ def test_same_run_recurring_body_refreshes_current_inputs_without_consuming_capa
     conn = initialized_conn
     run_id = state.create_crawl_run(conn, provider="lichess", seed_spec="alice", params={"max_games": 1})
     source = "https://lichess.org/api/game/evidence"
-    original = _data("1. e4 {[%clk 0:04:59]} *", status="started", clocks=[29900])
+    original = _data("1. e4 {[%clk 0:04:59]} *", status="started", clocks=[29900],
+                     createdAt=None, lastMoveAt=None, opening={"eco": None, "name": None, "ply": None})
 
     def observe(data: dict, observed_at: int, *, http_status: int = 200) -> int:
         raw_id = store_raw_payload(conn, RawRecord(
@@ -145,7 +146,9 @@ def test_same_run_recurring_body_refreshes_current_inputs_without_consuming_capa
     game_id = normalize_games_payload(conn, first_raw, crawl_run_id=run_id, max_games=1)[0]
     first = read_game_version(conn, game_id)
     assert first is not None
-    second_raw = observe(_data("1. e4 e5 *", status="resign", winner="white", clocks=[25000, 20000]), 200)
+    second_raw = observe(_data("1. e4 e5 *", status="resign", winner="white", clocks=[25000, 20000],
+                               createdAt=1000, lastMoveAt=2000,
+                               opening={"eco": "C20", "name": "King's Pawn Game", "ply": 2}), 200)
     assert normalize_games_payload(conn, second_raw, crawl_run_id=run_id, max_games=0) == []
     second = read_game_version(conn, game_id)
     assert second is not None and second["id"] != first["id"]
@@ -153,6 +156,7 @@ def test_same_run_recurring_body_refreshes_current_inputs_without_consuming_capa
     assert normalize_games_payload(conn, first_raw, crawl_run_id=run_id, max_games=0) == []
     assert read_game_version(conn, game_id)["id"] == second["id"]  # type: ignore[index]
     assert require_row(conn.execute("SELECT status_raw FROM games WHERE id=%s", (game_id,)))[0] == "resign"
+    assert require_row(conn.execute("SELECT ended_at FROM games WHERE id=%s", (game_id,)))[0] == 2
     if status_code == 200:
         assert observe(original, 300) == first_raw
     else:
@@ -163,11 +167,83 @@ def test_same_run_recurring_body_refreshes_current_inputs_without_consuming_capa
     current = read_game_version(conn, game_id)
     assert current is not None and current["id"] == first["id"]
     assert current["clocks"] == first["clocks"]
-    row = require_row(conn.execute("SELECT status_raw,outcome,ply_count FROM games WHERE id=%s", (game_id,)))
-    assert tuple(row.values()) == ("started", None, 1)
+    row = require_row(conn.execute(
+        "SELECT status_raw,outcome,is_live,ply_count,created_at,ended_at,eco,opening_name,opening_ply "
+        "FROM games WHERE id=%s", (game_id,),
+    ))
+    assert tuple(row.values()) == ("started", None, 1, 1, None, None, None, None, None)
+    assert all(row["result_raw"] is None and row["is_winner"] is None for row in conn.execute(
+        "SELECT result_raw,is_winner FROM game_participants WHERE game_id=%s", (game_id,),
+    ))
     assert run_game_ids(conn, run_id) == {game_id}
     assert require_row(conn.execute("SELECT COUNT(*) FROM game_versions"))[0] == 2
     assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 2
+
+
+def test_sparse_current_observation_preserves_omitted_nullable_facts(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    _, game_id = _store(conn, _data("1. e4 e5 *", status="resign", winner="white",
+                                  createdAt=1000, lastMoveAt=2000,
+                                  opening={"eco": "C20", "name": "King's Pawn Game", "ply": 2}), 100)
+    _store(conn, _data("1. e4 e5 2. Nf3 *", status="resign", winner="white"), 200)
+    columns = "created_at,ended_at,eco,opening_name,opening_ply"
+    assert tuple(require_row(conn.execute(f"SELECT {columns} FROM games WHERE id=%s", (game_id,))).values()) == (
+        1, 2, "C20", "King's Pawn Game", 2,
+    )
+    _store(conn, _data("1. e4 e5 2. Nf3 Nc6 *", status="resign", winner="white",
+                      createdAt="unavailable", lastMoveAt="unavailable", opening={"ply": "unknown"}), 250)
+    assert tuple(require_row(conn.execute(f"SELECT {columns} FROM games WHERE id=%s", (game_id,))).values()) == (
+        1, 2, "C20", "King's Pawn Game", 2,
+    )
+    assert read_game_version(conn, game_id)["source_metadata"]["createdAt"] == "unavailable"  # type: ignore[index]
+    # Explicit nulls clear known fields; omitted opening members remain sparse.
+    _store(conn, _data("1. e4 e5 2. Nf3 Nc6 *", status="resign", winner="white",
+                      createdAt=None, lastMoveAt=None, opening={"eco": None}), 300)
+    assert tuple(require_row(conn.execute(f"SELECT {columns} FROM games WHERE id=%s", (game_id,))).values()) == (
+        None, None, None, "King's Pawn Game", 2,
+    )
+    _store(conn, _data("1. e4 e5 2. Nf3 Nc6 3. Bb5 *", status="resign", winner="white", opening=None), 400)
+    assert tuple(require_row(conn.execute(f"SELECT {columns} FROM games WHERE id=%s", (game_id,))).values()) == (
+        None, None, None, None, None,
+    )
+
+
+def test_live_observation_clears_stale_end_even_when_native_end_is_omitted(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    _, game_id = _store(conn, _data("1. e4 e5 *", status="resign", winner="white", lastMoveAt=2000), 100)
+    _store(conn, _data("1. e4 *", status="started"), 200)
+    row = require_row(conn.execute("SELECT is_live,ended_at FROM games WHERE id=%s", (game_id,)))
+    assert tuple(row.values()) == (1, None)
+
+
+def test_chesscom_recurring_null_fields_replace_completed_facts(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    original = {"uuid": "nullable", "url": "https://www.chess.com/game/live/nullable",
+                "rules": "chess", "pgn": "1. e4 *", "start_time": None, "end_time": None, "eco": None,
+                "white": {"username": "alice", "result": None}, "black": {"username": "bob", "result": None}}
+    completed = {**original, "pgn": "1. e4 e5 *", "start_time": 1, "end_time": 2, "eco": "C20",
+                 "white": {"username": "alice", "result": "win"}, "black": {"username": "bob", "result": "resigned"}}
+
+    def observe(data: dict, now: int) -> int:
+        raw = store_raw_payload(conn, RawRecord(
+            provider="chess.com", endpoint_type="monthly_archive",
+            request_url="https://api.chess.com/pub/player/alice/games/2024/01",
+            canonical_source_key="chess.com/player/alice/games/2024/01", fetched_at=now,
+            body=json.dumps({"games": [data]}).encode(), media_type="application/json",
+        ))
+        insert_fetch_log(conn, provider="chess.com", endpoint_type="monthly_archive", status_code=200,
+                         url="https://api.chess.com/pub/player/alice/games/2024/01",
+                         attempted_at=now, raw_payload_id=raw)
+        return normalize_games_payload(conn, raw)[0]
+
+    game_id = observe(original, 100)
+    assert observe(completed, 200) == game_id
+    assert observe(original, 300) == game_id
+    row = require_row(conn.execute("SELECT created_at,ended_at,eco FROM games WHERE id=%s", (game_id,)))
+    assert tuple(row.values()) == (None, None, None)
+    assert all(row["result_raw"] is None for row in conn.execute(
+        "SELECT result_raw FROM game_participants WHERE game_id=%s", (game_id,),
+    ))
 
 
 @pytest.mark.parametrize("variant", ["chess960", "atomic", "crazyhouse", "bughouse"])

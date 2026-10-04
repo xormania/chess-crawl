@@ -6,7 +6,7 @@ import time
 from typing import TypedDict
 
 from chess_crawl.normalize.codes import map_variant
-from chess_crawl.normalize.game_evidence import GameEvidence
+from chess_crawl.normalize.game_evidence import EVIDENCE_VERSION, GameEvidence
 from chess_crawl.providers.base import NormalizedGame, NormalizedParticipant
 from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
@@ -25,7 +25,7 @@ from chess_crawl.storage.repository import (
 )
 
 
-PARSER_VERSION = "games-normalizer-v3"
+PARSER_VERSION = "games-normalizer-v5/" + EVIDENCE_VERSION
 
 
 class TimeControlArgs(TypedDict):
@@ -178,6 +178,7 @@ def _normalize_game(
         opening_name=game.opening_name,
         opening_ply=game.opening_ply,
         now=fetched_at,
+        replace_nullable_fields=_supplied_nullable_facts(game),
     ) if update_current else int(existing["id"])  # type: ignore[index]
     insert_source_record(
         conn,
@@ -193,9 +194,41 @@ def _normalize_game(
     store_game_evidence(conn, game_id=game_id, game=game, raw_payload_id=raw_payload_id,
                         json_pointer=json_pointer, fetched_at=fetched_at, evidence=evidence)
     if update_current:
-        _normalize_participant(conn, game_id, game.provider, game.white, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
-        _normalize_participant(conn, game_id, game.provider, game.black, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
+        _normalize_participant(conn, game_id, game.provider, game.white, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at,
+                               replace_result_raw=_supplied_participant_result(game, game.white))
+        _normalize_participant(conn, game_id, game.provider, game.black, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at,
+                               replace_result_raw=_supplied_participant_result(game, game.black))
     return game_id
+
+
+def _supplied_nullable_facts(game: NormalizedGame) -> frozenset[str]:
+    """Replace native nulls without confusing omissions or malformed values with null."""
+    source = game.source_data
+    fields: set[str] = set()
+    native_times = {"created_at": "createdAt", "ended_at": "lastMoveAt"} if game.provider == "lichess" else {
+        "created_at": "start_time", "ended_at": "end_time",
+    }
+    fields.update(field for field, native in native_times.items() if native in source and source[native] is None)
+    if game.is_live:
+        # A known active state cannot inherit a previous completed state's end.
+        fields.add("ended_at")
+    if game.provider == "lichess" and "opening" in source:
+        opening = source["opening"]
+        opening_fields = {"eco": "eco", "opening_name": "name", "opening_ply": "ply"}
+        if opening is None:
+            fields.update(opening_fields)
+        elif isinstance(opening, dict):
+            fields.update(field for field, native in opening_fields.items() if native in opening and opening[native] is None)
+    elif game.provider == "chess.com" and "eco" in source and source["eco"] is None:
+        fields.add("eco")
+    return frozenset(fields)
+
+
+def _supplied_participant_result(game: NormalizedGame, participant: NormalizedParticipant) -> bool:
+    if game.provider == "lichess":
+        return game.is_live or game.outcome == "draw" or "winner" in game.source_data
+    native = game.source_data.get(participant.color)
+    return isinstance(native, dict) and "result" in native
 
 
 def _normalize_participant(
@@ -208,6 +241,8 @@ def _normalize_participant(
     endpoint_type: str,
     source_key: str,
     fetched_at: int,
+    *,
+    replace_result_raw: bool = False,
 ) -> None:
     user_id = None
     if participant.username_normalized:
@@ -228,6 +263,7 @@ def _normalize_participant(
         result_raw=participant.result_raw,
         is_winner=_is_winner(participant.color, outcome),
         is_ai=participant.is_ai,
+        replace_result_raw=replace_result_raw,
     )
     insert_source_record(
         conn,
