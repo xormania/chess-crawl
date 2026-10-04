@@ -24,8 +24,8 @@ from chess_crawl.storage.raw import (
     insert_fetch_log, latest_raw_payload_id, latest_validators,
     read_raw_payload, store_raw_payload, update_raw_payload_status,
 )
-from chess_crawl.storage.repository import insert_error, upsert_provider_user
-from chess_crawl.storage.player_profiles import record_resource_attempt
+from chess_crawl.storage.repository import insert_error
+from chess_crawl.storage.player_profiles import record_resource_attempt, resolve_capture_account
 from chess_crawl.providers.resources import resource_source_key
 
 
@@ -215,6 +215,7 @@ def _provider_client(provider: str, *, config, transport, sleeper, session):
 def replay_raw_payload(
     conn: Connection, raw_payload_id: int, *,
     crawl_run_id: int | None = None, max_games: int | None = None,
+    fetch_log_id: int | None = None,
 ) -> IngestResult:
     """Normalize a durable raw payload without making or fabricating a fetch.
 
@@ -224,9 +225,9 @@ def replay_raw_payload(
     raw = read_raw_payload(conn, raw_payload_id)
     normalized: list[int] | int | None
     if raw.endpoint_type in {"user_profile", "user_stats"}:
-        normalized = normalize_user_payload(conn, raw_payload_id)
+        normalized = normalize_user_payload(conn, raw_payload_id, fetch_log_id=fetch_log_id)
     elif raw.endpoint_type == "user_resource":
-        normalized = normalize_resource_payload(conn, raw_payload_id)
+        normalized = normalize_resource_payload(conn, raw_payload_id, fetch_log_id=fetch_log_id)
     elif raw.endpoint_type in {"monthly_archive", "user_games_stream", "game"}:
         normalized = normalize_games_payload(
             conn, raw_payload_id, crawl_run_id=crawl_run_id, max_games=max_games,
@@ -348,9 +349,12 @@ def _persist_response(
         provider_user_id = None
         if record.endpoint_type == "user_resource":
             provider_user_id = record_resource_attempt(conn, record, raw_payload_id)
-        elif record.endpoint_type == "user_stats" and record.target_username:
-            provider_user_id = upsert_provider_user(
-                conn, provider=record.provider, username=record.target_username, now=record.fetched_at,
+        elif (
+            record.endpoint_type == "user_stats" and record.target_username
+            and record.http_status in {200, 304} and raw_payload_id is not None
+        ):
+            provider_user_id = resolve_capture_account(
+                conn, provider=record.provider, username=record.target_username, observed_at=record.fetched_at,
             )
         fetch_log_id = _log_attempts(
             conn, record, raw_payload_id, provider_user_id=provider_user_id,

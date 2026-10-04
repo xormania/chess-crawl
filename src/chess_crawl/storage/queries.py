@@ -375,8 +375,8 @@ def archive_freshness(conn: Connection, *, provider: str | None = None) -> dict[
     row = require_row(conn.execute(
         """
         SELECT (SELECT MAX(f.attempted_at) FROM fetch_logs f
-                 LEFT JOIN raw_payloads checked_raw ON checked_raw.id = f.raw_payload_id
-                WHERE (f.raw_payload_id IS NULL OR checked_raw.owner_scope = 'public')
+                 JOIN raw_payloads checked_raw ON checked_raw.id = f.raw_payload_id
+                WHERE checked_raw.owner_scope = 'public'
                   AND (%s::text IS NULL OR f.provider = %s)
                   AND f.status_code IN (200, 304)) AS last_checked_at,
                MAX(fetched_at) AS last_fetched_at,

@@ -9,17 +9,13 @@ from datetime import date
 from chess_crawl.providers.resources import get_resource, resource_owner_scope
 from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.player_profiles import (
-    fetch_log_account,
-    record_alias,
-    resource_account,
-    resource_accounts,
-    store_resource_snapshot,
+    account_observation_times, captured_fetch_account, record_alias, resolve_capture_account,
+    resource_account, resource_accounts, store_resource_snapshot,
 )
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
-from chess_crawl.storage.repository import upsert_provider_user
 
 
-PARSER_VERSION = "player-resources-normalizer-v1"
+PARSER_VERSION = "player-resources-normalizer-v2"
 
 
 def normalize_resource_payload(
@@ -51,27 +47,32 @@ def normalize_resource_payload(
             note = f"{len(issues)} uninterpreted rating history element(s): " + "; ".join(issues[:5])
     with transaction(conn):
         observed_at = payload_observed_at(conn, raw_payload_id)
-        bound = None if fetch_log_id is None else fetch_log_account(conn, fetch_log_id, raw_payload_id)
-        if bound is not None:
-            account, observed_at = bound
+        captured_at = None
+        if fetch_log_id is not None:
+            account, captured_at = captured_fetch_account(conn, raw_payload_id, fetch_log_id)
+            if account is None:
+                raise ValueError("Player resource acquisition is missing its captured account")
             user_ids = [int(account["id"])]
         else:
             user_ids = resource_accounts(conn, raw_payload_id) if prefer_observed_identity else []
-        replaying_bound_accounts = bool(user_ids)
         if not user_ids:
             user_id = resource_account(
                 conn, raw.provider, username, raw_payload_id,
                 prefer_observed_identity=prefer_observed_identity,
             )
             if user_id is None:
-                user_id = upsert_provider_user(conn, provider=raw.provider, username=username, now=observed_at)
+                user_id = resolve_capture_account(
+                    conn, provider=raw.provider, username=username, observed_at=observed_at, owner_scope=owner_scope,
+                )
             user_ids = [user_id]
         snapshot_ids = []
         for user_id in user_ids:
-            if owner_scope == "public" and not replaying_bound_accounts:
+            first_at, last_at = ((captured_at, captured_at) if captured_at is not None
+                                 else account_observation_times(conn, raw_payload_id, user_id))
+            if owner_scope == "public":
                 record_alias(
-                    conn, user_id, username, observed_at=observed_at, raw_payload_id=raw_payload_id,
-                    first_observed_at=raw.fetched_at if prefer_observed_identity else observed_at,
+                    conn, user_id, username, observed_at=last_at, raw_payload_id=raw_payload_id,
+                    first_observed_at=first_at,
                 )
             snapshot_id = store_resource_snapshot(
                 conn, user_id=user_id, resource_key=resource_key, parameters=parameters, native_data=data,

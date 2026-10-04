@@ -117,6 +117,22 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Player resource/statistics parsing preserves the account and time bound to
+  its acquisition across intervening renames, conditional responses, and local
+  replay of bytes reused by multiple holders. Stable identity reconciliation
+  moves fetch bindings with the other evidence. Private collection preserves
+  public identity facts; private-only placeholders have null public dates until
+  a public observation supplies them. Replay uses user parser v7 and resource
+  parser v2 without downloading stored sources again.
+  Internal delayed replay can target its exact successful fetch occurrence;
+  the existing worker retains the same captured identity through parsing.
+  Private-only profile lookups remain invisible outside the owning scope;
+  public identities with supplied zero dates or game observations remain visible.
+
+- Failed Chess.com statistics requests retain request evidence without creating
+  or refreshing a player account. Local Lichess profile replay also populates
+  legacy first/last names while preserving explicit current names and native JSON.
+
 - Reconcile renamed accounts with username-only placeholders while preserving
   their game, snapshot, source, and discovery history. Conflicting stable
   provider account IDs produce an explicit error instead of overwriting identity.

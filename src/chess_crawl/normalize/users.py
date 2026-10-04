@@ -14,13 +14,12 @@ from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
 from chess_crawl.storage.player_profiles import (
-    fetch_log_account, publish_verified_legacy_profile, quarantine_unowned_profile, record_alias,
-    record_profile_observations,
-    stats_account, stats_accounts, store_profile_facts, store_rating_records,
+    publish_verified_legacy_profile, quarantine_unowned_profile, record_alias, record_profile_observations,
+    account_observation_times, captured_fetch_account, stats_account, stats_accounts, store_profile_facts, store_rating_records,
 )
 
 
-PARSER_VERSION = "users-normalizer-v5"
+PARSER_VERSION = "users-normalizer-v7"
 
 
 def normalize_user_payload(
@@ -53,13 +52,17 @@ def normalize_user_payload(
         if not isinstance(native_data, dict):
             raise ValueError("user profiles and statistics must be JSON objects")
         observed_at = payload_observed_at(conn, raw_payload_id)
+        captured_at = None
+        captured_account = None
+        if fetch_log_id is not None:
+            captured_account, captured_at = captured_fetch_account(conn, raw_payload_id, fetch_log_id)
         accounts: list[dict[str, Any] | None] = [None]
         if raw.endpoint_type == "user_stats":
             accounts = []
-            bound = None if fetch_log_id is None else fetch_log_account(conn, fetch_log_id, raw_payload_id)
-            if bound is not None:
-                bound_account, observed_at = bound
-                accounts.append(bound_account)
+            if captured_account is not None:
+                accounts.append(captured_account)
+            elif fetch_log_id is not None:
+                raise ValueError("Player statistics acquisition is missing its captured account")
             elif prefer_observed_identity:
                 accounts.extend(stats_accounts(conn, raw_payload_id))
             if not accounts:
@@ -69,6 +72,10 @@ def normalize_user_payload(
                 ))
         provider_user_ids = []
         for account in accounts:
+            first_at, account_at = ((captured_at, captured_at) if captured_at is not None else (
+                account_observation_times(conn, raw_payload_id, int(account["id"]))
+                if account is not None else (raw.fetched_at, observed_at)
+            ))
             provider_user_id = upsert_provider_user(
                 conn,
                 provider=user.provider,
@@ -77,14 +84,14 @@ def normalize_user_payload(
                 display_username=user.display_username if account is None else account["display_username"],
                 account_status=user.account_status_raw,
                 title=user.title,
-                now=observed_at,
+                now=account_at,
                 profile_raw_payload_id=raw_payload_id if raw.endpoint_type == "user_profile" else None,
             )
             provider_user_ids.append(provider_user_id)
             snapshot_id = upsert_user_snapshot(
                 conn,
                 provider_user_id=provider_user_id,
-                captured_at=observed_at,
+                captured_at=account_at,
                 observed_username=user.display_username,
                 status=user.account_status_raw,
                 title=user.title,
@@ -107,9 +114,9 @@ def normalize_user_payload(
             )
             if raw.endpoint_type == "user_profile":
                 record_alias(
-                    conn, provider_user_id, user.display_username, observed_at=observed_at,
+                    conn, provider_user_id, user.display_username, observed_at=account_at,
                     raw_payload_id=raw_payload_id,
-                    first_observed_at=raw.fetched_at if prefer_observed_identity else observed_at,
+                    first_observed_at=first_at,
                 )
             insert_source_record(
                 conn,
@@ -266,7 +273,7 @@ def _profile_facts(data: dict[str, Any], user: NormalizedUser) -> dict[str, Any]
     return {
         "created_at": user.created_at,
         "last_seen_at": user.last_seen_at,
-        "real_name": _string_or_none(data.get("name") if user.provider == "chess.com" else profile.get("realName")),
+        "real_name": _string_or_none(data.get("name")) if user.provider == "chess.com" else _lichess_real_name(profile),
         "location": _string_or_none(data.get("location") if user.provider == "chess.com" else profile.get("location")),
         "avatar_url": _string_or_none(data.get("avatar")),
         "profile_url": _string_or_none(data.get("url")),
@@ -275,6 +282,18 @@ def _profile_facts(data: dict[str, Any], user: NormalizedUser) -> dict[str, Any]
         # Chess.com's fide is a self-reported rating, never a federation ID.
         "fide_rating": _strict_integer(data.get("fide") if user.provider == "chess.com" else profile.get("fideRating")),
     }
+
+
+def _lichess_real_name(profile: dict[str, Any]) -> str | None:
+    # Lichess replaced firstName/lastName with realName in July 2024.
+    # An explicit current field takes precedence, including a cleared name.
+    if "realName" in profile:
+        return _string_or_none(profile["realName"])
+    names = [
+        value.strip() for key in ("firstName", "lastName")
+        if isinstance(value := profile.get(key), str) and value.strip()
+    ]
+    return " ".join(names) or None
 
 
 def _string_or_none(value: object) -> str | None:
