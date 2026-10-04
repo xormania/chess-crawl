@@ -5,6 +5,12 @@ to `full`, `incremental`, or `backfill` to use resumable collection rather than
 the legacy bounded fetch. Opening a profile or reading archived games never
 starts a collection request.
 
+Authenticated HTTP and CLI submissions require explicit `since` and `until`
+bounds in every mode. The configured maximum date span is a total acquisition
+budget for one import, including full, incremental, and backfill requests.
+Checkpointed units return to the back of their priority/depth queue after each
+attempt so one workspace's long import cannot monopolize equal-priority work.
+
 Each execution handles at most `batch_size` monthly archives (default 4, maximum
 100), one Lichess stream page, or `batch_size` preserved source pages or
 unfinished-game follow-ups. The

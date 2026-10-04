@@ -43,6 +43,9 @@ mutex is no longer the concurrency mechanism.
 Worker heartbeat state now has one record per worker. `/v1/worker` includes
 `workers` and `active_workers` while retaining the representative status fields.
 Heartbeat records measure liveness independently from execution ownership.
+The status response is capped at 100 records. Starting a worker removes expired
+records older than seven days and excess inactive history, so autoscaling and
+restart churn cannot grow the table or response without bound.
 
 ## Local execution and stages
 

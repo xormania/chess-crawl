@@ -303,7 +303,7 @@ def _store_and_normalize(
     if raw_payload_id is None:
         return _non_body_result(record)
     game_payload = record.endpoint_type in {"monthly_archive", "user_games_stream", "game"}
-    if record.http_status == 304 and not (game_payload and crawl_run_id is not None):
+    if record.http_status == 304 and not game_payload:
         if not _requires_normalization(conn, raw_payload_id):
             if record.endpoint_type in {"user_profile", "user_stats"}:
                 refresh_profile_observations(conn, raw_payload_id)

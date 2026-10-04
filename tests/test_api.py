@@ -113,6 +113,39 @@ def test_invalid_submissions_never_open_database(tmp_path: Path, monkeypatch, bo
         assert response.json()["error"]["code"]
 
 
+@pytest.mark.parametrize("mode", ["bounded", "full", "incremental", "backfill"])
+def test_every_http_import_mode_requires_an_operator_bounded_date_window(
+    tmp_path: Path, monkeypatch, mode: str,
+) -> None:
+    def forbidden(*args, **kwargs):
+        pytest.fail("Unbounded imports must be rejected before connecting to PostgreSQL")
+
+    monkeypatch.setattr(db, "connect", forbidden)
+    body = {**IMPORT, "collection_mode": mode, "since": None, "until": None}
+    with TestClient(create_app("postgresql://test@127.0.0.1:1/unavailable", TOKEN), headers=AUTH) as client:
+        response = client.post("/v1/imports", json=body, headers={"Idempotency-Key": f"unbounded-{mode}"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_date_window"
+
+
+@pytest.mark.parametrize("mode", ["full", "incremental", "backfill"])
+def test_history_import_modes_share_the_configured_total_date_budget(
+    tmp_path: Path, monkeypatch, mode: str,
+) -> None:
+    def forbidden(*args, **kwargs):
+        pytest.fail("Over-budget imports must be rejected before connecting to PostgreSQL")
+
+    monkeypatch.setattr(db, "connect", forbidden)
+    body = {**IMPORT, "collection_mode": mode, "until": 1704067200 + 3 * 86400}
+    limits = Limits(max_date_span_days=2)
+    with TestClient(
+        create_app("postgresql://test@127.0.0.1:1/unavailable", TOKEN, limits=limits), headers=AUTH,
+    ) as client:
+        response = client.post("/v1/imports", json=body, headers={"Idempotency-Key": f"over-budget-{mode}"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_date_window"
+
+
 @pytest.mark.parametrize("key", [None, "", " ", "a" * 129])
 def test_submission_requires_valid_idempotency_key(api: TestClient, database_url: str, key: str | None) -> None:
     response = api.post("/v1/imports", json=IMPORT, headers={} if key is None else {"Idempotency-Key": key})
@@ -176,6 +209,31 @@ def test_worker_status_distinguishes_absent_alive_and_stale(api: TestClient, dat
     assert alive["heartbeat_at"] == 100
     monkeypatch.setattr(state.time, "time", lambda: 121)
     assert api.get("/v1/worker").json()["alive"] is False
+
+
+def test_worker_status_and_retained_history_are_bounded(database_url: str) -> None:
+    with db.connection(database_url, mode="rw") as conn:
+        for index in range(140):
+            conn.execute(
+                """INSERT INTO executor_heartbeats(
+                       worker_id,started_at,heartbeat_at,heartbeat_expires_at,stopped_at,status
+                   ) VALUES(%s,%s,%s,%s,%s,'stopped')""",
+                (f"old-{index}", 0, index, index, index),
+            )
+        with executor_lock(conn) as lease:
+            state.start_worker(conn, "current", lease=lease, max_age=20, now=1_000_000)
+        assert require_row(conn.execute("SELECT COUNT(*) FROM executor_heartbeats"))[0] == 1
+        for index in range(140):
+            conn.execute(
+                """INSERT INTO executor_heartbeats(
+                       worker_id,started_at,heartbeat_at,heartbeat_expires_at,stopped_at,status
+                   ) VALUES(%s,%s,%s,%s,%s,'stopped')""",
+                (f"recent-{index}", 999_000, 999_000+index, 999_000+index, 999_000+index),
+            )
+        snapshot = state.worker_status(conn, now=1_000_000)
+    assert snapshot["active_workers"] == 1
+    assert len(snapshot["workers"]) == state.WORKER_HISTORY_LIMIT
+    assert snapshot["workers"][0]["worker_id"] == "current"
 
 
 def test_archive_queries_are_provider_scoped_and_paginated(seeded_database_url: str) -> None:

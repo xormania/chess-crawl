@@ -20,6 +20,8 @@ from chess_crawl.storage.discovery import discovery_edge_count
 
 
 LIVE_STATES = ("pending", "in_progress", "blocked")
+WORKER_HISTORY_LIMIT = 100
+WORKER_HISTORY_RETENTION_SECONDS = 7 * 24 * 60 * 60
 TERMINAL_STATES = ("done", "error", "skipped")
 _RUN_ALLOWS_WORK = """
     NOT EXISTS (
@@ -236,10 +238,11 @@ def mark_job(
            SET state = %s,
                done_at = %s,
                next_attempt_at = NULL,
-               reason = %s
+               reason = %s,
+               enqueued_at = CASE WHEN %s = 'pending' THEN %s ELSE enqueued_at END
          WHERE id = %s
         """,
-        (state, done_at, reason, job_id),
+        (state, done_at, reason, state, int(timestamp), job_id),
     )
 
 
@@ -574,6 +577,18 @@ def start_worker(
     lease.require(conn)
     timestamp = time.time() if now is None else now
     conn.execute(
+        """DELETE FROM executor_heartbeats
+             WHERE worker_id <> %s
+               AND (heartbeat_expires_at < %s OR worker_id IN (
+                    SELECT worker_id FROM executor_heartbeats
+                     WHERE worker_id <> %s
+                       AND NOT(status IN ('running','stopping') AND heartbeat_expires_at > %s)
+                     ORDER BY heartbeat_at DESC,worker_id
+                     OFFSET %s
+               ))""",
+        (worker_id, timestamp-WORKER_HISTORY_RETENTION_SECONDS, worker_id, timestamp, WORKER_HISTORY_LIMIT),
+    )
+    conn.execute(
         """INSERT INTO executor_heartbeats(worker_id,started_at,heartbeat_at,heartbeat_expires_at,status)
            VALUES(%s,%s,%s,%s,'running') ON CONFLICT(worker_id) DO UPDATE SET
            started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at,
@@ -608,7 +623,18 @@ def stop_worker(conn: Connection, worker_id: str, *, failed: bool = False, now: 
 
 def worker_status(conn: Connection, *, now: float | None = None, max_age: float | None = None) -> dict[str, Any]:
     timestamp = time.time() if now is None else now
-    rows = conn.execute("SELECT * FROM executor_heartbeats ORDER BY heartbeat_at DESC,worker_id").fetchall()
+    active = int(require_row(conn.execute(
+        """SELECT COUNT(*) FROM executor_heartbeats
+             WHERE status IN ('running','stopping') AND heartbeat_expires_at > %s
+               AND (%s::double precision IS NULL OR heartbeat_at + %s > %s)""",
+        (timestamp, max_age, max_age, timestamp),
+    ))[0])
+    rows = conn.execute(
+        """SELECT * FROM executor_heartbeats
+             ORDER BY (status IN ('running','stopping') AND heartbeat_expires_at > %s) DESC,
+                      heartbeat_at DESC,worker_id
+             LIMIT %s""", (timestamp, WORKER_HISTORY_LIMIT),
+    ).fetchall()
     if not rows:
         return {"alive":False,"status":"absent","worker_id":None,"heartbeat_at":None,"age_seconds":None,
                 "active_workers":0,"workers":[]}
@@ -622,7 +648,7 @@ def worker_status(conn: Connection, *, now: float | None = None, max_age: float 
         result['alive'] = row['status'] in {'running','stopping'} and timestamp<expires
         workers.append(result)
     representative = next((worker for worker in workers if worker['alive']),workers[0])
-    return {**representative,'active_workers':sum(bool(w['alive']) for w in workers),'workers':workers}
+    return {**representative,'active_workers':active,'workers':workers}
 
 
 def get_job(conn: Connection, job_id: int) -> DiscoveryJob | None:

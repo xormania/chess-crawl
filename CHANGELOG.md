@@ -195,6 +195,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   end time. The v5 game normalizer can repair existing facts by offline replay.
 - SQS workers poll durable database jobs after missing or unclaimable delivery
   hints, preventing expired or dead-lettered messages from stranding runnable work.
+- Require a configured total date window for every submitted import mode and
+  rotate checkpointed jobs behind equal-priority work. Refresh standalone game
+  state after 304 revalidation, bound retained worker heartbeat history, and
+  authorize workspace-scoped Mercure topics in generated development credentials.
 
 - Rejected offline upgrade identities preserve another job's progress; failure
   reporting updates only the requesting job's provider and ownership scope.

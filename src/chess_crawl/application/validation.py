@@ -75,9 +75,11 @@ def validate_crawl(request: CrawlRequest, *, limits: Limits = Limits()) -> Crawl
 def _validate_common(request: ImportRequest | CrawlRequest, limits: Limits) -> tuple[str, str]:
     provider = validate_provider(request.provider)
     username = validate_username(request.username)
-    mode = getattr(request,"collection_mode","bounded")
-    if mode == "bounded" and (request.since is None or request.until is None):
-        raise ValidationError("Bounded collection requires since and until",code="invalid_date_window")
+    if isinstance(request, ImportRequest) and (request.since is None or request.until is None):
+        raise ValidationError(
+            "HTTP and CLI imports require since and until in every collection mode",
+            code="invalid_date_window",
+        )
     if request.since is not None:
         validate_integer(request.since, "since", minimum=0, maximum=_MAX_TIMESTAMP - 1)
     if request.until is not None:
@@ -85,7 +87,7 @@ def _validate_common(request: ImportRequest | CrawlRequest, limits: Limits) -> t
     if request.since is not None and request.until is not None:
         if request.since >= request.until:
             raise ValidationError("since must be earlier than the exclusive until timestamp",code="invalid_date_window")
-        if mode == "bounded" and request.until-request.since > limits.max_date_span_days*86400:
+        if request.until-request.since > limits.max_date_span_days*86400:
             raise ValidationError("Date window exceeds the configured maximum span",code="invalid_date_window")
     validate_integer(request.max_games, "max_games", minimum=1, maximum=limits.max_games)
     return provider, username

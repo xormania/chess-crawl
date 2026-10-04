@@ -73,7 +73,10 @@ def main() -> int:
     _persistent_secret(args.directory / "postgres_password")
     _persistent_secret(args.directory / "api_token")
     key = _persistent_secret(args.directory / "mercure_signing_key")
-    topics = [f"{prefix}/jobs/{{id}}", f"{prefix}/runs/{{id}}"]
+    topics = [
+        f"{prefix}/workspaces/{{workspace}}/jobs/{{id}}",
+        f"{prefix}/workspaces/{{workspace}}/runs/{{id}}",
+    ]
     _write_secret(args.directory / "mercure_publisher_jwt", _jwt(key, "publish", topics))
     _write_secret(args.directory / "mercure_subscriber_jwt", _jwt(key, "subscribe", topics))
     print(f"Development credentials ready in {args.directory}; existing database, API and signing keys were retained.")
