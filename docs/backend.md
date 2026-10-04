@@ -31,6 +31,10 @@ are ignored by Git and excluded from image builds. It preserves
 `mercure_publisher_jwt` and `mercure_subscriber_jwt` files. The subscriber token
 stays on the host for integration clients. These development JWTs have no expiry;
 deployment and end-user token issuance belong to the deploying application.
+Development grants are confined to workspace `local`, matching the single API
+token. To replace older topic grants, rerun the bootstrap and recreate `events`
+with `docker compose up -d --force-recreate events`; master credentials remain
+unchanged.
 
 | Service | Responsibility |
 | --- | --- |
@@ -488,12 +492,10 @@ with spreadsheet formula characters are escaped in CSV. Raw payload catalog page
 also exclude unassigned legacy evidence. Worker recovery and execution remain
 dedicated operator functions; HTTP reads and submissions do not run the worker.
 
-Imports retain bounded mode by default. Every HTTP or CLI import mode requires
-explicit `since` and `until` bounds and enforces the operator-configured maximum
-date span before a database connection or provider request is opened. Optional
-`collection_mode` values `full`, `incremental`, and `backfill` use `max_games` as
-a page budget inside that total date budget, and `batch_size` (1–12) controls
-bounded execution units. Provider
+Imports retain bounded mode by default. Optional `collection_mode` values
+`full`, `incremental`, and `backfill` use `max_games` as a page budget, not a total
+history cap, and `batch_size` (1–12) controls bounded execution units. These modes
+can cover a window larger than the bounded-import date-span limit. Provider
 timestamps remain inclusive `since` and exclusive `until`. These bounds are optional
 for full/incremental/backfill; omit `since` for an incremental watermark refresh.
 Lichess history modes select using the provider's native creation timestamp,

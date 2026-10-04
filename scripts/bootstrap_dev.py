@@ -73,10 +73,10 @@ def main() -> int:
     _persistent_secret(args.directory / "postgres_password")
     _persistent_secret(args.directory / "api_token")
     key = _persistent_secret(args.directory / "mercure_signing_key")
-    topics = [
-        f"{prefix}/workspaces/{{workspace}}/jobs/{{id}}",
-        f"{prefix}/workspaces/{{workspace}}/runs/{{id}}",
-    ]
+    # The single development API credential resolves to workspace "local".
+    # Keep subscriber grants confined to that workspace; neither role uses a
+    # cross-workspace wildcard or a legacy unscoped topic selector.
+    topics = [f"{prefix}/workspaces/local/jobs/{{id}}", f"{prefix}/workspaces/local/runs/{{id}}"]
     _write_secret(args.directory / "mercure_publisher_jwt", _jwt(key, "publish", topics))
     _write_secret(args.directory / "mercure_subscriber_jwt", _jwt(key, "subscribe", topics))
     print(f"Development credentials ready in {args.directory}; existing database, API and signing keys were retained.")
