@@ -11,6 +11,8 @@ from typing import Any, Mapping
 
 from chess_crawl.storage.db import Connection, atomic
 from chess_crawl.providers.base import RawRecord
+from chess_crawl.storage.archives import read_archive_object, store_archive_object
+from chess_crawl.storage.object_store import ObjectStore, configured_store
 
 
 COMPRESSION_THRESHOLD_BYTES = 4096
@@ -45,11 +47,14 @@ def store_raw_payload(
     *,
     parser_version: str | None = None,
     normalization_status: str = "pending",
+    store: ObjectStore | None = None,
 ) -> int:
     if record.body is None:
         raise ValueError("raw payload storage requires body bytes")
 
-    body_hash = record.body_hash or compute_body_hash(record.body)
+    body_hash = compute_body_hash(record.body)
+    if record.body_hash is not None and record.body_hash != body_hash:
+        raise ValueError("Supplied raw payload body hash does not match its bytes")
     existing = conn.execute(
         """
         SELECT id FROM raw_payloads
@@ -61,7 +66,14 @@ def store_raw_payload(
     if existing is not None:
         return int(existing["id"])
 
-    compression, stored_body = _encode_body(record.body)
+    selected_store = store or configured_store()
+    archive_id = None
+    if selected_store is None:
+        compression, inline_body = _encode_body(record.body)
+        stored_body: bytes | None = inline_body
+    else:
+        archive_id = store_archive_object(conn, record.body, store=selected_store)
+        compression, stored_body = "gzip", None
     response_headers = dict(record.response_headers)
     if record.etag is not None:
         response_headers.setdefault("etag", record.etag)
@@ -74,9 +86,9 @@ def store_raw_payload(
           provider, endpoint_type, provider_url, canonical_source_key,
           request_params, response_status, response_headers, content_type,
           fetched_at, body_hash, body_compression, raw_body, body_bytes,
-          parser_version, normalization_status
+          parser_version, normalization_status, archive_object_id
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
@@ -95,6 +107,7 @@ def store_raw_payload(
             len(record.body),
             parser_version,
             normalization_status,
+            archive_id,
         ),
     )
     row = cursor.fetchone()
@@ -112,10 +125,16 @@ def read_raw_payload(conn: Connection, raw_payload_id: int) -> StoredRawPayload:
     if row is None:
         raise KeyError(f"raw payload not found: {raw_payload_id}")
 
-    body = _decode_body(row["raw_body"], row["body_compression"])
+    body = (
+        read_archive_object(conn, int(row["archive_object_id"]))
+        if row["archive_object_id"] is not None
+        else _decode_body(row["raw_body"], row["body_compression"])
+    )
     body_hash = compute_body_hash(body)
     if body_hash != row["body_hash"]:
         raise ValueError(f"raw payload hash mismatch for id {raw_payload_id}")
+    if len(body) != row["body_bytes"]:
+        raise ValueError(f"raw payload size mismatch for id {raw_payload_id}")
 
     return StoredRawPayload(
         id=int(row["id"]),
