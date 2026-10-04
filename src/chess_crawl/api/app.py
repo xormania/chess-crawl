@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import secrets
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Mapping
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from chess_crawl import __version__
 from chess_crawl import application
 from chess_crawl.jobs import state
+from chess_crawl.storage import workspaces
 from chess_crawl.storage.db import DatabaseError, connection
 from chess_crawl.storage.db import database_url as resolve_database_url
 from chess_crawl.storage.migrations import SCHEMA_VERSION, current_version
@@ -34,12 +36,20 @@ class ImportBody(BaseModel):
 
     provider: str
     username: str
+    since: int | None = None
+    until: int | None = None
+    max_games: int
+    collection_mode: Literal["bounded", "full", "incremental", "backfill"] = "bounded"
+    batch_size: int = 1
+
+
+class CrawlBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    provider: str
+    username: str
     since: int
     until: int
     max_games: int
-
-
-class CrawlBody(ImportBody):
     max_depth: int
     max_users: int
     max_jobs: int
@@ -58,7 +68,7 @@ class Page(BaseModel):
     freshness: dict[str, Any]
 
 
-class WorkerSnapshot(BaseModel):
+class WorkerStatus(BaseModel):
     alive: bool
     status: Literal["absent", "running", "stopping", "stopped", "failed"]
     worker_id: str | None
@@ -68,6 +78,11 @@ class WorkerSnapshot(BaseModel):
     stopped_at: float | None = None
     current_job_id: int | None = None
     age_seconds: float | None
+
+
+class WorkerSnapshot(WorkerStatus):
+    active_workers: int = 0
+    workers: list[WorkerStatus] = Field(default_factory=list)
 
 
 class ErrorDetail(BaseModel):
@@ -89,6 +104,7 @@ def create_app(
     api_token: str | None = None,
     *,
     limits: application.Limits | None = None,
+    workspace_tokens: Mapping[str, str] | None = None,
 ) -> FastAPI:
     """Build an API without opening or migrating an archive at startup.
 
@@ -103,10 +119,29 @@ def create_app(
         raise ValueError("Set either CHESS_CRAWL_API_TOKEN or CHESS_CRAWL_API_TOKEN_FILE, not both")
     if token_file:
         token = Path(token_file).read_text(encoding="utf-8").strip()
-    if not token or not token.strip():
+    workspace_file = os.getenv("CHESS_CRAWL_API_WORKSPACE_TOKENS_FILE")
+    if workspace_tokens is not None and workspace_file:
+        raise ValueError("Set workspace_tokens or CHESS_CRAWL_API_WORKSPACE_TOKENS_FILE, not both")
+    if workspace_file:
+        loaded = json.loads(Path(workspace_file).read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("Workspace credentials must be a JSON object")
+        workspace_tokens = loaded
+    if workspace_tokens is not None and (token or token_file):
+        raise ValueError("Set a single API token or workspace tokens, not both")
+    if workspace_tokens is None and (not token or not token.strip()):
         raise ValueError("CHESS_CRAWL_API_TOKEN must be set before starting the HTTP API")
     if any(character.isspace() for character in token):
         raise ValueError("The HTTP API bearer token must not contain whitespace")
+    credentials_by_workspace = dict(workspace_tokens) if workspace_tokens is not None else {"local": token}
+    if not credentials_by_workspace:
+        raise ValueError("At least one API workspace credential is required")
+    for workspace_id, credential in credentials_by_workspace.items():
+        workspaces.validate_workspace(workspace_id)
+        if not isinstance(credential, str) or not credential or any(char.isspace() for char in credential):
+            raise ValueError("Workspace bearer tokens must be nonempty strings without whitespace")
+    if len(set(credentials_by_workspace.values())) != len(credentials_by_workspace):
+        raise ValueError("Workspace bearer tokens must be unique")
     request_limits = limits or application.Limits.from_env()
     app = FastAPI(
         title="chess-crawl API",
@@ -115,12 +150,18 @@ def create_app(
     )
 
     def authenticate(
+        request: Request,
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
     ) -> None:
-        if credentials is None or not secrets.compare_digest(
-            credentials.credentials.encode("utf-8"), token.encode("utf-8"),
-        ):
+        supplied = "" if credentials is None else credentials.credentials
+        workspace_id = None
+        for candidate, credential in credentials_by_workspace.items():
+            if secrets.compare_digest(supplied.encode("utf-8"), credential.encode("utf-8")):
+                workspace_id = candidate
+        if workspace_id is None:
             raise HTTPException(status_code=401, detail="A valid bearer token is required")
+        # Ownership comes only from trusted server credential configuration.
+        request.state.workspace_id = workspace_id
 
     @app.exception_handler(application.ApplicationError)
     async def application_error(request: Request, exc: application.ApplicationError) -> JSONResponse:
@@ -176,17 +217,21 @@ def create_app(
         dependencies=[Depends(authenticate)],
         responses={code: {"model": ErrorResponse} for code in (401, 404, 409, 422, 503)},
     )
+    from chess_crawl.api.compat import register_compat_routes
+    # Literal lookup/status paths must precede numeric resource parameters.
+    register_compat_routes(router, archive, request_limits)
 
     @router.post("/imports", status_code=202, response_model=Submission, tags=["collection"])
     def submit_import(
         body: ImportBody,
         response: Response,
+        http_request: Request,
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128)],
     ) -> dict[str, Any]:
         request = application.validate_import(application.ImportRequest(**body.model_dump()), limits=request_limits)
         idempotency_key = application.validate_idempotency_key(idempotency_key)
         with connection(archive, mode="rw") as conn:
-            result = application.submit_import(conn, request, idempotency_key=idempotency_key, limits=request_limits)
+            result = application.submit_import(conn, request, idempotency_key=idempotency_key, limits=request_limits, workspace_id=http_request.state.workspace_id)
         response.headers["Location"] = f"/v1/runs/{result['run_id']}"
         return result
 
@@ -194,29 +239,30 @@ def create_app(
     def submit_crawl(
         body: CrawlBody,
         response: Response,
+        http_request: Request,
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128)],
     ) -> dict[str, Any]:
         request = application.validate_crawl(application.CrawlRequest(**body.model_dump()), limits=request_limits)
         idempotency_key = application.validate_idempotency_key(idempotency_key)
         with connection(archive, mode="rw") as conn:
-            result = application.submit_crawl(conn, request, idempotency_key=idempotency_key, limits=request_limits)
+            result = application.submit_crawl(conn, request, idempotency_key=idempotency_key, limits=request_limits, workspace_id=http_request.state.workspace_id)
         response.headers["Location"] = f"/v1/runs/{result['run_id']}"
         return result
 
     @router.get("/runs/{run_id}", tags=["jobs"])
-    def get_run(run_id: int) -> dict[str, Any]:
+    def get_run(run_id: int, request: Request) -> dict[str, Any]:
         with connection(archive) as conn:
-            return application.get_run(conn, run_id)
+            return application.get_run(conn, run_id, workspace_id=request.state.workspace_id)
 
     @router.get("/jobs/{job_id}", tags=["jobs"])
-    def get_job(job_id: int) -> dict[str, Any]:
+    def get_job(job_id: int, request: Request) -> dict[str, Any]:
         with connection(archive) as conn:
-            return application.get_job(conn, job_id)
+            return application.get_job(conn, job_id, workspace_id=request.state.workspace_id)
 
     @router.get("/worker", response_model=WorkerSnapshot, tags=["jobs"])
-    def worker() -> dict[str, Any]:
+    def worker(request: Request) -> dict[str, Any]:
         with connection(archive) as conn:
-            return state.worker_status(conn)
+            return workspaces.worker_snapshot(conn, state.worker_status(conn), request.state.workspace_id)
 
     @router.get("/games", response_model=Page, tags=["archive"])
     def games(
@@ -251,9 +297,11 @@ def create_app(
         return application.list_providers()
 
     @router.get("/summary", tags=["archive"])
-    def summary() -> dict[str, Any]:
+    def summary(request: Request) -> dict[str, Any]:
         with connection(archive) as conn:
-            return application.summary(conn)
+            return application.summary(conn,workspace_id=request.state.workspace_id)
 
+    from chess_crawl.api.archive import register_archive_routes
+    register_archive_routes(router, archive, request_limits)
     app.include_router(router)
     return app

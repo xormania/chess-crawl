@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, fields
+from typing import Literal
 
 
 @dataclass(frozen=True)
 class ImportRequest:
     provider: str
     username: str
-    since: int
-    until: int
+    since: int | None
+    until: int | None
     max_games: int
+    collection_mode: Literal["bounded", "full", "incremental", "backfill"] = "bounded"
+    batch_size: int = 1
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,7 @@ class Limits:
     max_jobs: int = 200
     page_size: int = 100
     max_date_span_days: int = 366
+    max_working_set_members: int = 10000
 
     def __post_init__(self) -> None:
         for field in fields(self):

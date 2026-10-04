@@ -7,6 +7,18 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Workspace-owned submissions, jobs, Mercure topics, immutable player working sets,
+  and exact-input analysis result reuse, with server-bound service credentials.
+- Rich archive APIs for profile/resource history, game evidence, clock precision,
+  coverage, offline upgrades, resource collection, and normalized PGN export.
+- Full/incremental/backfill import request contracts with optional date bounds and
+  bounded execution batches. Synchronous working sets enforce a configurable
+  10,000-member default with atomic overflow rejection.
+- Authenticated archive lookup, reports, scoped cached-payload/job/run catalogs,
+  streamed public game/user JSONL and owned graph CSV exports, and one-job
+  profile/statistics refresh submissions. Streamed archive exports close their
+  snapshot and connection when an HTTP download is interrupted.
+
 - Concurrent durable workers with per-job session ownership and fencing,
   independent provider acquisition and local processing stages, persistent
   request/retry pacing, and aggregate worker liveness. Migration `0009` must

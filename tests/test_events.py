@@ -140,8 +140,8 @@ def test_mercure_form_contract_and_stable_retry_order(
         assert publish_pending(conn, publisher, clock=lambda: 130) == 2
 
     assert requests[0] == requests[1]
-    assert requests[0]["topic"] == [f"https://archive.example/jobs/{first}"]
-    assert requests[2]["topic"] == [f"https://archive.example/jobs/{second}"]
+    assert requests[0]["topic"] == [f"https://archive.example/workspaces/local/jobs/{first}"]
+    assert requests[2]["topic"] == [f"https://archive.example/workspaces/local/jobs/{second}"]
     assert requests[0]["private"] == ["on"]
     assert requests[0]["type"] == ["job.updated"]
     event = json.loads(requests[0]["data"][0])
