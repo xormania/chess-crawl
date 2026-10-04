@@ -101,6 +101,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Read game revisions and reconstruct PGN from one complete database snapshot,
+  including when a concurrent writer replaces and removes an old unreferenced
+  version. Read/export helpers remain coherent inside READ COMMITTED callers
+  and preserve exact clock and derived-timing decimal strings.
 - Restore explicitly null current game times, opening facts, and participant
   results when a previously observed body becomes current again. Sparse omitted
   facts remain preserved; known live observations cannot retain a stale completed
