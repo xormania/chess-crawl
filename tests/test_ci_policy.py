@@ -1,4 +1,4 @@
-"""Exercise workflow guards with GitHub pull-request and dependency contexts."""
+"""Exercise workflow triggers, event isolation, and dependency guards."""
 
 from __future__ import annotations
 
@@ -15,8 +15,16 @@ from typing import Any
 import pytest
 
 
-def _workflow() -> str:
-    return (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text()
+def _workflow(name: str = "ci") -> str:
+    return (Path(__file__).resolve().parents[1] / ".github" / "workflows" / f"{name}.yml").read_text()
+
+
+def _context_value(context: dict[str, Any], expression: str) -> Any:
+    value: Any = context
+    for part in expression.strip().split("."):
+        # GitHub resolves absent properties to an empty string.
+        value = value.get(part, "") if isinstance(value, dict) else ""
+    return value
 
 
 def _job(job_id: str) -> str:
@@ -60,12 +68,7 @@ def _run_guard(
         name, expression = line.strip().split(":", 1)
         expression = expression.strip()
         assert expression.startswith("${{ ") and expression.endswith(" }}")
-        value: Any = context
-        for part in expression[4:-3].split("."):
-            # GitHub resolves a missing property, including an absent step
-            # output, to an empty string.
-            value = value.get(part, "") if isinstance(value, dict) else ""
-        env[name] = str(value)
+        env[name] = str(_context_value(context, expression[4:-3]))
     if summary is not None:
         env["GITHUB_STEP_SUMMARY"] = str(summary)
     return subprocess.run(
@@ -86,6 +89,7 @@ def _ci_guard(
     output: str | None = "true",
     base_ref: str = "dev",
     promotion_result: str = "skipped",
+    event_name: str = "pull_request",
 ) -> subprocess.CompletedProcess[str]:
     selected_scope = "offline" if job_id == "offline-checks" else "compose"
     other_scope = "compose" if selected_scope == "offline" else "offline"
@@ -94,7 +98,7 @@ def _ci_guard(
     if output is not None:
         outputs[selected_scope] = output
     return _run_guard(job_id, "Validate CI prerequisites", {
-        "github": {"base_ref": base_ref},
+        "github": {"base_ref": base_ref, "event_name": event_name},
         "steps": {"scope": {"outcome": scope_result, "outputs": outputs}},
         "needs": {
             "promotion-source": {"result": promotion_result},
@@ -130,6 +134,70 @@ def test_ci_revalidates_retargeted_pull_requests() -> None:
     assert {"opened", "synchronize", "reopened", "edited"} <= {
         activity.strip() for activity in activity_types.split(",")
     }
+
+
+@pytest.mark.parametrize("workflow", ["ci", "devbox"])
+def test_validation_workflows_cover_master_pushes_and_manual_runs(workflow: str) -> None:
+    trigger = _workflow(workflow).split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    events = dict(re.findall(r"^  (\w+):([^\n]*(?:\n(?:    [^\n]*|))*)", trigger, re.MULTILINE))
+    assert set(events) == {"pull_request", "push", "workflow_dispatch"}
+    assert events["push"].strip() == "branches: [master]"
+    assert not events["workflow_dispatch"].strip()
+    branches = re.split(
+        r"\n    \w+:", events["pull_request"].split("\n    branches:", 1)[1], maxsplit=1,
+    )[0].strip()
+    branch_values = (
+        branches.strip("[]").split(",") if branches.startswith("[")
+        else re.findall(r"(?:^|\n)\s*- (.+)", branches)
+    )
+    assert {branch.strip(" '\"") for branch in branch_values} == {"dev", "work/**", "master"}
+    activity_types = events["pull_request"].split("types: [", 1)[1].split("]", 1)[0]
+    assert {activity.strip() for activity in activity_types.split(",")} == {
+        "opened", "synchronize", "reopened", "edited",
+    }
+
+
+def test_changelog_remains_a_pull_request_policy() -> None:
+    trigger = _workflow("changelog").split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    assert re.findall(r"^  (\w+):", trigger, re.MULTILINE) == ["pull_request"]
+
+
+def test_promotion_source_guard_only_applies_to_master_pull_requests() -> None:
+    header = _job("promotion-source").split("    steps:\n", 1)[0]
+    condition = re.findall(r"^    if: (.+)$", header, re.MULTILINE)
+    assert condition == ["github.event_name == 'pull_request' && github.base_ref == 'master'"]
+
+
+def test_concurrency_separates_events_refs_and_workflows() -> None:
+    groups = []
+    for workflow in ("ci", "devbox"):
+        block = _workflow(workflow).split("\nconcurrency:\n", 1)[1].split("\njobs:\n", 1)[0]
+        assert re.findall(r"^  cancel-in-progress: (.+)$", block, re.MULTILINE) == ["true"]
+        group = re.findall(r"^  group: (.+)$", block, re.MULTILINE)[0]
+        for event_name, ref, pr_number in (
+            ("pull_request", "refs/pull/23/merge", 23),
+            ("pull_request", "refs/pull/24/merge", 24),
+            ("push", "refs/heads/master", None),
+            ("workflow_dispatch", "refs/heads/master", None),
+            ("workflow_dispatch", "refs/heads/dev", None),
+        ):
+            context = {"github": {
+                "workflow": workflow, "event_name": event_name, "ref": ref,
+                "event": {"pull_request": {"number": pr_number}} if pr_number else {},
+            }}
+
+            def resolve(match: re.Match[str]) -> str:
+                # Only the scalar lookups and fallback operator used by this
+                # group are resolved; the workflow supplies the actual policy.
+                return str(next((
+                    value for operand in match[1].split("||")
+                    if (value := _context_value(context, operand))
+                ), ""))
+
+            resolved = re.sub(r"\$\{\{(.*?)\}\}", resolve, group)
+            assert resolved == f"{workflow}-{event_name}-{pr_number or ref}"
+            groups.append(resolved)
+    assert len(set(groups)) == len(groups)
 
 
 @pytest.mark.parametrize("job_id", ["offline-checks", "compose-smoke"])
@@ -176,7 +244,7 @@ def test_required_checks_classify_before_scoping_expensive_steps(job_id: str) ->
         for step in steps
     ]
     assert [step["name"].strip() for step in properties[:3]] == [
-        "Checkout merge result and its parents",
+        "Checkout tested revision and its parents",
         "Determine affected checks",
         "Validate CI prerequisites",
     ]
@@ -185,8 +253,9 @@ def test_required_checks_classify_before_scoping_expensive_steps(job_id: str) ->
     assert "\n          fetch-depth: 2\n" in steps[0]
     assert classifier["id"].strip() == "scope"
     assert classifier["run"].strip() == (
-        'python .github/scripts/ci_scope.py --base-ref "$BASE_REF"'
+        'python .github/scripts/ci_scope.py --event-name "$EVENT_NAME" --base-ref "$BASE_REF"'
     )
+    assert "\n          EVENT_NAME: ${{ github.event_name }}\n" in steps[1]
     assert "\n          BASE_REF: ${{ github.base_ref }}\n" in steps[1]
     for prerequisite in (checkout, classifier, guard):
         assert "if" not in prerequisite
@@ -249,6 +318,19 @@ def test_required_checks_reject_unsuccessful_master_promotion(
         promotion_result=promotion_result,
     )
     assert result.returncode != 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("job_id", ["offline-checks", "compose-smoke"])
+@pytest.mark.parametrize("event_name", ["push", "workflow_dispatch"])
+@pytest.mark.parametrize("output", ["true", "false", None, ""])
+def test_non_pr_checks_require_full_scope_without_a_promotion(
+    job_id: str, event_name: str, output: str | None, tmp_path: Path,
+) -> None:
+    result = _ci_guard(
+        job_id, tmp_path / "summary", event_name=event_name,
+        base_ref="", promotion_result="skipped", output=output,
+    )
+    assert (result.returncode == 0) is (output == "true"), result.stdout + result.stderr
 
 
 def _compose_files() -> str:
