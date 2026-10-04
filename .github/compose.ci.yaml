@@ -2,6 +2,9 @@
 # Probe more often only during startup; retain the real readiness commands,
 # normal intervals, retry counts, and startup grace periods from compose.yaml.
 services:
+  postgres:
+    healthcheck:
+      start_interval: 1s
   api:
     healthcheck:
       start_interval: 1s

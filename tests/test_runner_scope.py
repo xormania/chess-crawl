@@ -130,7 +130,7 @@ def test_opponent_frontier_uses_only_games_selected_by_this_run(initialized_conn
     result = JobRunner(conn, game_fetcher=acquire).run(crawl_run_id=run_id, max_jobs=1)
     assert result.done == 1
     targets = [row[0] for row in conn.execute(
-        "SELECT target FROM discovery_jobs WHERE crawl_run_id = ? ORDER BY id", (run_id,),
+        "SELECT target FROM discovery_jobs WHERE crawl_run_id = %s ORDER BY id", (run_id,),
     )]
     assert targets == (["alice", "chosen"] if has_selection else ["alice"])
     edges = opponents_of_user(conn, provider="lichess", user_id=alice, crawl_run_id=run_id)
@@ -138,7 +138,7 @@ def test_opponent_frontier_uses_only_games_selected_by_this_run(initialized_conn
         [("chosen", selected, 1)] if has_selection else []
     )
     recorded = conn.execute(
-        "SELECT discovery_edge_id FROM run_edges WHERE crawl_run_id = ?", (run_id,),
+        "SELECT discovery_edge_id FROM run_edges WHERE crawl_run_id = %s", (run_id,),
     ).fetchall()
     assert len(recorded) == (1 if has_selection else 0)
     # Archive-wide reports can still inspect history explicitly without a run filter.

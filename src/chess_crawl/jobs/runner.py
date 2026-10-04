@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from contextlib import nullcontext
 from collections.abc import Callable, Mapping
@@ -23,17 +22,17 @@ from chess_crawl.ingest import (
 )
 from chess_crawl.jobs import discovery, state
 from chess_crawl.jobs.models import DiscoveryJob, JobState
-from chess_crawl.jobs.locking import ExecutorLease, executor_lock
+from chess_crawl.jobs.locking import ExecutorLease, ExecutorLeaseLost, executor_lock
 from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.providers.registry import ProviderSession, get_provider_info
 from chess_crawl.providers.base import ProviderRequestStopped
 from chess_crawl.storage.acquisition import associate_run_game
-from chess_crawl.storage.db import transaction
+from chess_crawl.storage.db import Connection, DatabaseError, transaction
 from chess_crawl.storage.discovery import opponents_of_user, record_discovery_edges
 from chess_crawl.storage.repository import insert_error
 
 
-GameFetcher = Callable[[sqlite3.Connection, str, str, Mapping[str, Any], int | None], IngestResult]
+GameFetcher = Callable[[Connection, str, str, Mapping[str, Any], int | None], IngestResult]
 
 
 @dataclass(frozen=True)
@@ -85,7 +84,7 @@ class _AcquisitionStopped(Exception):
 class JobRunner:
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        conn: Connection,
         *,
         config: Config | None = None,
         transport: httpx.BaseTransport | None = None,
@@ -144,6 +143,7 @@ class JobRunner:
         unblocked_count = state.unblock_jobs(self.conn, crawl_run_id=crawl_run_id, now=self.clock()) if unblock else 0
         result = RunnerResult().with_resume_counts(stale_resumed=stale_count, unblocked=unblocked_count)
         while (max_jobs is None or result.claimed < max_jobs) and not self.stop_requested():
+            lease.require(self.conn)
             job = state.claim_next_job(self.conn, crawl_run_id=crawl_run_id, now=self.clock())
             if job is None:
                 break
@@ -153,7 +153,9 @@ class JobRunner:
             if job.crawl_run_id is not None:
                 state.refresh_run_status(self.conn, job.crawl_run_id)
             try:
+                lease.require(self.conn)
                 outcome = self._execute(job)
+                lease.require(self.conn)
                 minimum_delay = self.config.provider(job.provider).min_delay_s
                 if outcome.status_code == 429:
                     minimum_delay = max(minimum_delay, get_provider_info(job.provider).policy.next_delay(429, outcome.retry_after))
@@ -200,6 +202,10 @@ class JobRunner:
             return ExecutionOutcome("error", f"unknown job kind: {job.kind}")
         except (_AcquisitionStopped, ProviderRequestStopped) as exc:
             return ExecutionOutcome("pending", str(exc))
+        except (DatabaseError, ExecutorLeaseLost):
+            # Preserve the claimed job for recovery after the database returns.
+            # Storage or ownership loss is not a failed provider acquisition.
+            raise
         except Exception as exc:
             insert_error(
                 self.conn,
@@ -426,7 +432,7 @@ def _int_or_none(value: object) -> int | None:
 
 
 def _known_at_or_before_current_depth(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     crawl_run_id: int,
     provider: str,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from chess_crawl.storage.db import require_row
+
 import json
 from datetime import UTC, datetime
 from email.utils import format_datetime
@@ -53,9 +55,9 @@ def test_304_replays_unfinished_or_outdated_cached_normalization(initialized_con
     assert result.raw_payload_id == raw_id
     assert result.normalized_ids
     assert read_raw_payload(conn, raw_id).normalization_status == "parsed"
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
     evidence = conn.execute("SELECT status_code, raw_payload_id, from_cache FROM fetch_logs").fetchone()
-    assert tuple(evidence) == (304, raw_id, 1)
+    assert tuple(evidence.values()) == (304, raw_id, 1)
 
 
 def test_normalization_failure_preserves_response_and_can_be_replayed_offline(
@@ -66,7 +68,7 @@ def test_normalization_failure_preserves_response_and_can_be_replayed_offline(
 
     def fail(conn, raw_id):
         assert not conn.in_transaction
-        assert conn.execute("SELECT raw_payload_id FROM fetch_logs").fetchone()[0] == raw_id
+        assert require_row(conn.execute("SELECT raw_payload_id FROM fetch_logs"))[0] == raw_id
         raise RuntimeError("normalizer unavailable")
 
     monkeypatch.setattr(ingest, "normalize_user_payload", fail)
@@ -75,13 +77,13 @@ def test_normalization_failure_preserves_response_and_can_be_replayed_offline(
             conn, "chess.com", "SameName", config=config(),
             transport=httpx.MockTransport(lambda request: httpx.Response(200, content=profile_record(fixtures_dir).body)),
         )
-    raw_id = conn.execute("SELECT id FROM raw_payloads").fetchone()[0]
+    raw_id = require_row(conn.execute("SELECT id FROM raw_payloads"))[0]
     assert read_raw_payload(conn, raw_id).normalization_status == "pending"
     monkeypatch.setattr(ingest, "normalize_user_payload", normalizer)
     result = ingest.replay_raw_payload(conn, raw_id)
     assert result.normalized_ids
-    assert conn.execute("SELECT COUNT(*) FROM fetch_logs").fetchone()[0] == 1
-    assert conn.execute("SELECT COUNT(*) FROM user_snapshots").fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM user_snapshots"))[0] == 1
 
 
 def test_304_without_cached_representation_fails_but_keeps_fetch_evidence(initialized_conn) -> None:
@@ -90,7 +92,7 @@ def test_304_without_cached_representation_fails_but_keeps_fetch_evidence(initia
             initialized_conn, "chess.com", "Missing", config=config(),
             transport=httpx.MockTransport(lambda request: httpx.Response(304)),
         )
-    assert initialized_conn.execute("SELECT status_code FROM fetch_logs").fetchone()[0] == 304
+    assert require_row(initialized_conn.execute("SELECT status_code FROM fetch_logs"))[0] == 304
 
 
 def test_cache_follows_latest_observation_when_older_body_reappears(initialized_conn, fixtures_dir) -> None:
@@ -115,7 +117,7 @@ def test_cache_follows_latest_observation_when_older_body_reappears(initialized_
     source = "chess.com/player/samename/profile"
     assert third.raw_payload_id == first.raw_payload_id == latest_raw_payload_id(conn, source)
     assert latest_validators(conn, source) == ('"v3"', None)
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 2
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 2
     ingest.fetch_user_profile(
         conn, "chess.com", "samename", config=config(),
         transport=httpx.MockTransport(lambda request: httpx.Response(304)),
@@ -142,9 +144,9 @@ def test_network_errors_are_retryable_and_recorded_without_exception_secrets(ini
     errors = conn.execute("SELECT error_kind, message, is_dead FROM errors").fetchall()
     assert len(errors) == 2
     expected = "timeout" if issubclass(exception, httpx.TimeoutException) else "other"
-    assert [tuple(row) for row in errors] == [(expected, "provider request failed", 0)] * 2
+    assert [tuple(row.values()) for row in errors] == [(expected, "provider request failed", 0)] * 2
     for table in ("errors", "fetch_logs"):
-        assert "deliberately-secret-value" not in repr([tuple(row) for row in conn.execute(f"SELECT * FROM {table}")])
+        assert "deliberately-secret-value" not in repr([tuple(row.values()) for row in conn.execute(f"SELECT * FROM {table}")])
 
 
 @pytest.mark.parametrize(("header", "expected"), [("seconds", 7), ("date", 7), ("expired", 0), ("invalid", None)])
@@ -273,7 +275,7 @@ def test_stop_during_retry_backoff_preserves_last_attempt_without_another_reques
     assert result.retry_after == (120 if status else None)
     assert clock.sleeps == [120 if status else 1]
     evidence = initialized_conn.execute("SELECT status_code, retry_after, attempt FROM fetch_logs").fetchall()
-    assert [tuple(row) for row in evidence] == [(status or None, 120 if status else None, 1)]
+    assert [tuple(row.values()) for row in evidence] == [(status or None, 120 if status else None, 1)]
 
 
 @pytest.mark.parametrize("stop_before_first", [True, False])
@@ -302,4 +304,4 @@ def test_stop_before_network_does_not_fabricate_a_fetch(initialized_conn, fixtur
         with pytest.raises(ProviderRequestStopped):
             ingest.fetch_user_profile(initialized_conn, "chess.com", "samename", session=session)
     assert len(requests) == (0 if stop_before_first else 1)
-    assert initialized_conn.execute("SELECT COUNT(*) FROM fetch_logs").fetchone()[0] == len(requests)
+    assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == len(requests)

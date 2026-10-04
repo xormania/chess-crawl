@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import argparse
 import signal
-import sqlite3
 import sys
 import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from pathlib import Path
 
 import httpx
 
@@ -20,7 +18,9 @@ from chess_crawl.jobs.locking import ExecutorBusy, archive_lock
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.providers.registry import ProviderSession
-from chess_crawl.storage.db import connection, open_database
+from chess_crawl.storage.db import DatabaseError, connection, database_url
+from chess_crawl.storage.migrations import initialize
+from psycopg.errors import DeadlockDetected, LockNotAvailable, SerializationFailure
 
 
 class Worker:
@@ -28,7 +28,7 @@ class Worker:
 
     def __init__(
         self,
-        db_path: str | Path,
+        db_path: str,
         *,
         settings: WorkerSettings | None = None,
         config: Config | None = None,
@@ -37,9 +37,7 @@ class Worker:
         sleeper: Callable[[float], None] | None = None,
         runner_factory: Callable[..., JobRunner] = JobRunner,
     ) -> None:
-        if str(db_path) == ":memory:":
-            raise ValueError("A worker requires a file-backed archive")
-        self.db_path = Path(db_path).resolve()
+        self.db_path = database_url(db_path)
         self.settings = settings or WorkerSettings()
         self.config = config or Config.from_env()
         self.transport = transport
@@ -63,7 +61,7 @@ class Worker:
 
     def _heartbeat(self) -> None:
         try:
-            # SQLite handles are thread-owned. Never share the runner connection.
+            # The heartbeat owns its separate session; executor rights stay on the runner session.
             while not self._heartbeat_stop.is_set():
                 try:
                     with connection(self.db_path, mode="rw") as conn:
@@ -77,15 +75,15 @@ class Worker:
                                 )
                                 if not owned:
                                     raise RuntimeError("Worker heartbeat ownership was lost")
-                            except sqlite3.OperationalError as exc:
-                                if not _is_sqlite_contention(exc):
+                            except DatabaseError as exc:
+                                if not _is_database_contention(exc):
                                     raise
-                                # Normalization owns the writer transaction.
+                                # Normalization may own the transaction write lock.
                                 # Liveness may expire, but contention does not
                                 # invalidate the process's exclusive lease.
                             self._heartbeat_stop.wait(self.settings.heartbeat_interval)
-                except sqlite3.OperationalError as exc:
-                    if not _is_sqlite_contention(exc):
+                except DatabaseError as exc:
+                    if not _is_database_contention(exc):
                         raise
                     # Connection setup can also encounter a busy archive.
                     self._heartbeat_stop.wait(self.settings.heartbeat_interval)
@@ -99,60 +97,59 @@ class Worker:
         # Lock precedes migration, recovery, and heartbeat mutations. A losing
         # contender cannot disturb the live owner's durable state.
         with archive_lock(self.db_path) as lease:
-            with open_database(self.db_path, writable=True) as conn:
-                state.resume_stale_in_progress(conn, now=int(self.clock()), lease=lease)
-                state.refresh_crawl_runs(conn)
-                state.start_worker(
-                    conn, self.worker_id, lease=lease,
-                    max_age=self.settings.heartbeat_max_age, now=self.clock(),
-                )
-                heartbeat = threading.Thread(target=self._heartbeat, name="chess-crawl-heartbeat", daemon=True)
-                heartbeat.start()
-                failed = False
-                try:
-                    provider_sleeper = self.sleeper if self.sleeper is not None else self._stop.wait
-                    with ProviderSession(
-                        self.config, transport=self.transport, sleeper=provider_sleeper, clock=self.clock,
-                        stop_requested=self._stop.is_set,
-                    ) as session:
-                        runner = self.runner_factory(
-                            conn, config=self.config, transport=self.transport, sleeper=provider_sleeper,
-                            settings=self.settings, clock=self.clock, session=session, lease=lease,
-                            stop_requested=self._stop.is_set, on_job=self._on_job,
-                        )
-                        while not self._stop.is_set():
-                            result = runner.run(max_jobs=1)
-                            claimed += result.claimed
-                            if once:
-                                break
-                            if not result.claimed:
-                                if self.sleeper is None:
-                                    self._stop.wait(self.settings.poll_interval)
-                                else:
-                                    self.sleeper(self.settings.poll_interval)
-                    if self._heartbeat_error is not None:
-                        raise RuntimeError("Worker heartbeat failed") from self._heartbeat_error
-                except BaseException:
-                    failed = True
-                    raise
-                finally:
-                    self._heartbeat_stop.set()
-                    # Heartbeat SQLite writes have the configured finite busy
-                    # timeout. Keep ownership until its thread has exited.
-                    heartbeat.join()
-                    state.stop_worker(conn, self.worker_id, failed=failed, now=self.clock())
+            conn = lease.connection
+            initialize(conn)
+            state.resume_stale_in_progress(conn, now=int(self.clock()), lease=lease)
+            state.refresh_crawl_runs(conn)
+            state.start_worker(
+                conn, self.worker_id, lease=lease,
+                max_age=self.settings.heartbeat_max_age, now=self.clock(),
+            )
+            heartbeat = threading.Thread(target=self._heartbeat, name="chess-crawl-heartbeat", daemon=True)
+            heartbeat.start()
+            failed = False
+            try:
+                provider_sleeper = self.sleeper if self.sleeper is not None else self._stop.wait
+                with ProviderSession(
+                    self.config, transport=self.transport, sleeper=provider_sleeper, clock=self.clock,
+                    stop_requested=self._stop.is_set,
+                ) as session:
+                    runner = self.runner_factory(
+                        conn, config=self.config, transport=self.transport, sleeper=provider_sleeper,
+                        settings=self.settings, clock=self.clock, session=session, lease=lease,
+                        stop_requested=self._stop.is_set, on_job=self._on_job,
+                    )
+                    while not self._stop.is_set():
+                        result = runner.run(max_jobs=1)
+                        claimed += result.claimed
+                        if once:
+                            break
+                        if not result.claimed:
+                            if self.sleeper is None:
+                                self._stop.wait(self.settings.poll_interval)
+                            else:
+                                self.sleeper(self.settings.poll_interval)
+                if self._heartbeat_error is not None:
+                    raise RuntimeError("Worker heartbeat failed") from self._heartbeat_error
+            except BaseException:
+                failed = True
+                raise
+            finally:
+                self._heartbeat_stop.set()
+                # Heartbeat PostgreSQL writes have the configured finite lock
+                # timeout. Keep ownership until its thread has exited.
+                heartbeat.join()
+                state.stop_worker(conn, self.worker_id, failed=failed, now=self.clock())
         return claimed
 
 
-def _is_sqlite_contention(exc: sqlite3.OperationalError) -> bool:
-    code = getattr(exc, "sqlite_errorcode", None)
-    # Extended SQLite result codes retain their primary code in the low byte.
-    return isinstance(code, int) and code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+def _is_database_contention(exc: DatabaseError) -> bool:
+    return isinstance(exc, (LockNotAvailable, DeadlockDetected, SerializationFailure))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the exclusive serial chess archive worker")
-    parser.add_argument("--db", type=Path, required=True, help="File-backed archive path")
+    parser.add_argument("--database-url", help="PostgreSQL URL; defaults to CHESS_CRAWL_DATABASE_URL")
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--heartbeat-interval", type=float, default=5.0)
     parser.add_argument("--max-retries", type=int, default=3, help="Durable retries after provider-level retries are exhausted")
@@ -166,7 +163,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             heartbeat_max_age=max(20.0, 4 * args.heartbeat_interval), job_max_retries=args.max_retries,
             job_retry_base_s=args.retry_base, job_retry_max_s=args.retry_max,
         )
-        worker = Worker(args.db, settings=settings)
+        worker = Worker(database_url(args.database_url), settings=settings)
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
         for sig in previous:
             signal.signal(sig, lambda signum, frame: worker.request_stop())
@@ -175,6 +172,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
+    except DatabaseError:
+        print("Worker: the database is unavailable", file=sys.stderr)
+        return 1
     except (ExecutorBusy, ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

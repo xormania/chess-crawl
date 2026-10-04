@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import sqlite3
+from chess_crawl.storage.db import Connection, transaction
 
-from chess_crawl.storage.db import transaction
 from chess_crawl.storage.repository import (
     get_or_create_time_control,
     get_or_create_variant,
@@ -30,7 +29,7 @@ class Clock:
 
 
 def seed_game(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     provider: str,
     game_key: str,

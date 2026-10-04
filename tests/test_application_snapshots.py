@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from chess_crawl.storage.db import connection, require_row
+
 import json
-from pathlib import Path
 
 import pytest
 
@@ -11,14 +12,13 @@ from chess_crawl import application
 from chess_crawl.jobs import state
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage import queries
-from chess_crawl.storage.db import connection
 from chess_crawl.storage.raw import insert_fetch_log, store_raw_payload
 from support import seed_game
 
 
-def test_run_snapshot_survives_concurrent_completion(archive_path: Path, monkeypatch) -> None:
+def test_run_snapshot_survives_concurrent_completion(database_url: str, monkeypatch) -> None:
     request = application.ImportRequest("lichess", "alice", 1704067200, 1704153600, 5)
-    with connection(archive_path, mode="rw") as writer:
+    with connection(database_url, mode="rw") as writer:
         accepted = application.submit_import(writer, request, idempotency_key="snapshot")
         original = state.get_run
 
@@ -29,7 +29,7 @@ def test_run_snapshot_survives_concurrent_completion(archive_path: Path, monkeyp
             state.refresh_run_status(writer, run_id)
             return row
 
-        with connection(archive_path) as reader:
+        with connection(database_url) as reader:
             with monkeypatch.context() as patch:
                 patch.setattr(state, "get_run", finish_after_run_read)
                 snapshot = application.get_run(reader, accepted["run_id"])
@@ -46,8 +46,8 @@ def test_run_snapshot_survives_concurrent_completion(archive_path: Path, monkeyp
             assert not reader.in_transaction
 
 
-def test_page_rows_count_and_freshness_share_one_snapshot(archive_path: Path, monkeypatch) -> None:
-    with connection(archive_path, mode="rw") as writer:
+def test_page_rows_count_and_freshness_share_one_snapshot(database_url: str, monkeypatch) -> None:
+    with connection(database_url, mode="rw") as writer:
         seed_game(writer, provider="lichess", game_key="first", white="alice", black="bob")
         original = queries.game_page
 
@@ -60,7 +60,7 @@ def test_page_rows_count_and_freshness_share_one_snapshot(archive_path: Path, mo
             )
             return result
 
-        with connection(archive_path) as reader:
+        with connection(database_url) as reader:
             with monkeypatch.context() as patch:
                 patch.setattr(queries, "game_page", add_game_after_page)
                 page = application.list_games(reader, provider="lichess")
@@ -73,11 +73,9 @@ def test_page_rows_count_and_freshness_share_one_snapshot(archive_path: Path, mo
             assert not reader.in_transaction
 
 
-def test_read_only_views_release_transactions_on_success_and_error(seeded_archive: Path) -> None:
-    with connection(seeded_archive) as reader:
-        assert reader.execute("PRAGMA query_only").fetchone()[0] == 1
-        statements: list[str] = []
-        reader.set_trace_callback(statements.append)
+def test_read_only_views_release_transactions_on_success_and_error(seeded_database_url: str) -> None:
+    with connection(seeded_database_url) as reader:
+        assert require_row(reader.execute("SHOW default_transaction_read_only"))[0] == "on"
         for read in (
             lambda: application.list_games(reader),
             lambda: application.list_users(reader),
@@ -90,8 +88,6 @@ def test_read_only_views_release_transactions_on_success_and_error(seeded_archiv
             with pytest.raises(application.NotFound):
                 missing(reader, 999)
             assert not reader.in_transaction
-        assert any(statement.upper() == "BEGIN" for statement in statements)
-        assert not any("BEGIN IMMEDIATE" in statement.upper() for statement in statements)
 
 
 def test_freshness_includes_successful_revalidation_without_replacing_raw(initialized_conn) -> None:

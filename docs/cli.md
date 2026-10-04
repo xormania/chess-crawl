@@ -4,7 +4,8 @@
 [Contributing](../CONTRIBUTING.md)
 
 Run commands from a source checkout after `uv sync --locked`. The examples use
-the default `./chess-crawl.db`. Set `CHESS_CRAWL_CONTACT` to your contact address
+the PostgreSQL database selected by `CHESS_CRAWL_DATABASE_URL`. Set
+`CHESS_CRAWL_CONTACT` to your contact address
 before making provider requests; optional provider settings are listed in
 [.env.example](../.env.example). The CLI does not load that file automatically.
 
@@ -16,17 +17,37 @@ uv run chess-crawl provider list
 uv run chess-crawl db info
 ```
 
-`init` creates the archive or applies pending migrations. To use another path,
-place `--db` after the specific command, and supply it consistently:
+`init` applies migrations to an existing PostgreSQL database. It does not
+create a PostgreSQL server or database. Configure a password-free URL with
+`CHESS_CRAWL_DATABASE_URL` and exactly one password source:
+`CHESS_CRAWL_DATABASE_PASSWORD_FILE` or `CHESS_CRAWL_DATABASE_PASSWORD`.
+
+Source-run TCP clients default to verified TLS. For a remote server, set
+`CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE` to its trusted PEM CA file. For a
+local loopback TCP server without TLS, explicitly export
+`CHESS_CRAWL_DATABASE_TRANSPORT=local`. Unix sockets remain local without TLS.
+The bundled Compose services already
+have their private connection policy. See the
+[external PostgreSQL guide](backend.md#external-postgresql) for the external
+Compose overlay and CA mount.
+
+To select a different database for one command, place `--database-url` after
+the specific command:
 
 ```bash
-uv run chess-crawl init --db data/research.sqlite
-uv run chess-crawl report summary --db data/research.sqlite
+uv run chess-crawl init --database-url postgresql://chess_crawl@localhost:5432/research
+uv run chess-crawl report summary --database-url postgresql://chess_crawl@localhost:5432/research
 ```
 
-CLI commands default to `./chess-crawl.db`; they do not use `CHESS_CRAWL_DB` to
-override that default. The Compose services use `/data/archive.sqlite` inside
-their shared volume.
+Do not include a database password in the URL or command arguments. In the
+supplied Compose stack, connection settings and the password secret are already
+mounted into the Python services. Use the packaged CLI there:
+
+```bash
+docker compose exec api chess-crawl db info
+docker compose exec api chess-crawl report summary
+```
+
 
 ## Fetch data directly
 
@@ -103,10 +124,10 @@ IDs from submission or job-list output.
 For a process that stays running and picks up new or retried jobs:
 
 ```bash
-uv run python -m chess_crawl.jobs.worker --db chess-crawl.db
+uv run python -m chess_crawl.jobs.worker
 ```
 
-The worker owns the archive's acquisition lock until it exits. Read commands
+The worker owns the database's acquisition advisory lock until it exits. Read commands
 and queued submissions can run alongside it; a second executor cannot. Worker
 shutdown stops new claims, and restart recovers orphaned work. Durable retry
 deadlines and provider cooldowns survive restarts. See the

@@ -4,22 +4,24 @@ from __future__ import annotations
 
 import argparse
 import math
-import sqlite3
 import sys
 import time
 from collections.abc import Callable, Sequence
 
 from chess_crawl.events.mercure import MercurePublisher, MercureSettings
-from chess_crawl.storage.db import open_database
+from chess_crawl.jobs.locking import ExecutorLease, executor_lock
+from chess_crawl.storage.db import Connection, DatabaseError, connection, database_url
 from chess_crawl.storage.events import acknowledge_event, defer_event, next_pending_event
+from chess_crawl.storage.migrations import initialize
 
 
 def publish_pending(
-    conn: sqlite3.Connection,
+    conn: Connection,
     publisher: MercurePublisher,
     *,
     limit: int = 100,
     clock: Callable[[], float] = time.time,
+    lease: ExecutorLease | None = None,
 ) -> int:
     """Publish a bounded batch in order; caller must hold the publisher lock.
 
@@ -30,11 +32,15 @@ def publish_pending(
         raise ValueError("Event batch limit must be positive")
     delivered = 0
     for _ in range(limit):
+        if lease is not None:
+            lease.require(conn, purpose="events")
         event = next_pending_event(conn)
         now = clock()
         if event is None or event.next_attempt_at > now:
             break
         result = publisher.publish(event, now=now)
+        if lease is not None:
+            lease.require(conn, purpose="events")
         if result.succeeded:
             acknowledge_event(conn, event.outbox_id, now=clock())
             delivered += 1
@@ -51,24 +57,29 @@ def publish_pending(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Publish committed chess-crawl events to Mercure")
-    parser.add_argument("--db", required=True, help="Path to the archive shared with the crawl worker")
+    parser.add_argument(
+        "--database-url", help="PostgreSQL connection URL; defaults to CHESS_CRAWL_DATABASE_URL",
+    )
     parser.add_argument("--once", action="store_true", help="Attempt one bounded batch, then exit")
     parser.add_argument("--poll-interval", type=float, default=1.0, help="Seconds between batches")
     args = parser.parse_args(argv)
     if not math.isfinite(args.poll_interval) or args.poll_interval <= 0:
         parser.error("--poll-interval must be finite and positive")
     try:
+        target = database_url(args.database_url)
         settings = MercureSettings.from_env()
         # Separate from the crawl executor lock: hub outages cannot stop crawls.
-        from chess_crawl.jobs.locking import archive_lock
-
-        with open_database(args.db, writable=True) as conn:
-            with archive_lock(args.db, purpose="events"), MercurePublisher(settings) as publisher:
+        with connection(target, mode="rw") as conn, executor_lock(conn, purpose="events") as lease:
+            initialize(conn)
+            with MercurePublisher(settings) as publisher:
                 while True:
-                    publish_pending(conn, publisher)
+                    publish_pending(conn, publisher, lease=lease)
                     if args.once:
                         return 0
                     time.sleep(args.poll_interval)
+    except DatabaseError:
+        print("Event publisher: the PostgreSQL archive is unavailable", file=sys.stderr)
+        return 1
     except (ValueError, OSError, RuntimeError) as exc:
         print(f"Event publisher: {exc}", file=sys.stderr)
         return 1

@@ -1,0 +1,33 @@
+# Use with compose.yaml for a separately managed PostgreSQL server.
+# Requires Compose >=2.24.4 for explicit merge-reset support.
+x-external-database-env: &external-database-env
+  CHESS_CRAWL_DATABASE_URL: ${CHESS_CRAWL_DATABASE_URL:?Set CHESS_CRAWL_DATABASE_URL for the external PostgreSQL server}
+  CHESS_CRAWL_DATABASE_TRANSPORT: verified
+  CHESS_CRAWL_DATABASE_TRUSTED_HOST: ""
+  CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE: /run/secrets/postgres_ca
+
+services:
+  postgres:
+    # Inactive unless explicitly requested. No application depends on it here.
+    profiles: [bundled-postgres]
+  init:
+    depends_on: !reset {}
+    environment: *external-database-env
+    secrets:
+      - postgres_ca
+  api:
+    environment: *external-database-env
+    secrets:
+      - postgres_ca
+  worker:
+    environment: *external-database-env
+    secrets:
+      - postgres_ca
+  events:
+    environment: *external-database-env
+    secrets:
+      - postgres_ca
+
+secrets:
+  postgres_ca:
+    file: ${CHESS_CRAWL_DATABASE_CA_FILE:?Set CHESS_CRAWL_DATABASE_CA_FILE to the external server PEM CA certificate file}

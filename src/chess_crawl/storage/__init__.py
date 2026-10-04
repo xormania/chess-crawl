@@ -1,1 +1,1 @@
-"""SQLite storage foundation."""
+"""PostgreSQL storage foundation."""

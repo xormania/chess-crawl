@@ -20,7 +20,7 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 - Transactional job/run events, a durable outbox, and private Mercure delivery.
   ([#10](https://github.com/xormania/chess-crawl/pull/10))
 - A standalone Docker Compose backend with its own Mercure hub, development
-  credentials, health checks, and persistent SQLite archive. API and event
+  credentials, health checks, and persistent PostgreSQL archive. API and event
   integration remain independent of an external web application's deployment.
   ([#11](https://github.com/xormania/chess-crawl/pull/11), [#12](https://github.com/xormania/chess-crawl/pull/12))
 - Contributor setup, PR guidelines and a PR template requiring evidence of the
@@ -28,6 +28,22 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   CI/test-only changes.
 
 ### Changed
+
+- External PostgreSQL connections require certificate-chain and hostname
+  verification by default. A separate Compose overlay omits the bundled
+  database and mounts its operator-supplied CA certificate, retaining migration
+  startup gates. Local plaintext connections require an explicit confined
+  transport policy; changing the bundled URL alone cannot weaken remote TLS.
+- Database password-file read and decoding failures return sanitized archive
+  unavailability responses (503 with retry guidance) instead of internal errors.
+- PostgreSQL 18 is now the only supported database. Compose provisions it with
+  persistent storage, password-file secrets, readiness checks, and migrations
+  before application startup. CLI and services use `CHESS_CRAWL_DATABASE_URL`
+  or `--database-url`; the SQLite backend, shared archive volume, and `--db`
+  option are removed. Existing SQLite files are not automatically imported.
+- Database coordination uses PostgreSQL session advisory locks, preserving
+  one acquisition executor and one publisher per archive. Database integration
+  tests run against real disposable PostgreSQL instances in both Python CI jobs.
 
 - CI isolates deployment-only checks, overlaps image build/pull and polls
   startup health sooner without weakening readiness. It records stage timings,

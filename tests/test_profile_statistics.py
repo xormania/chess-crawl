@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from chess_crawl.storage.db import Connection, require_row, transaction
+
 import json
-import sqlite3
 
 import httpx
 import pytest
@@ -11,7 +12,6 @@ import pytest
 from chess_crawl.config import Config
 from chess_crawl.ingest import fetch_chesscom_stats, replay_raw_payload
 from chess_crawl.normalize.users import PARSER_VERSION
-from chess_crawl.storage.db import transaction
 from chess_crawl.storage.raw import read_raw_payload, update_raw_payload_status
 
 
@@ -36,7 +36,7 @@ from chess_crawl.storage.raw import read_raw_payload, update_raw_payload_status
     }, (7, None, 4, 2, 1)),
 ])
 def test_chesscom_stats_preserve_known_and_unknown_counts(
-    initialized_conn: sqlite3.Connection, stats: dict, expected: tuple,
+    initialized_conn: Connection, stats: dict, expected: tuple,
 ) -> None:
     conn = initialized_conn
     fetched = fetch_chesscom_stats(
@@ -44,10 +44,10 @@ def test_chesscom_stats_preserve_known_and_unknown_counts(
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json=stats)),
     )
 
-    snapshot = conn.execute(
+    snapshot = require_row(conn.execute(
         "SELECT count_all, count_rated, count_win, count_loss, count_draw, perfs_or_stats FROM user_snapshots"
-    ).fetchone()
-    assert tuple(snapshot)[:5] == expected
+    ))
+    assert tuple(snapshot.values())[:5] == expected
     assert json.loads(snapshot["perfs_or_stats"]) == stats
     assert fetched.raw_payload_id is not None
     assert json.loads(read_raw_payload(conn, fetched.raw_payload_id).body) == stats
@@ -55,7 +55,7 @@ def test_chesscom_stats_preserve_known_and_unknown_counts(
 
 @pytest.mark.parametrize("replay_method", ["offline", "304"])
 def test_preexisting_v2_stats_are_repaired_without_duplicate_snapshots(
-    initialized_conn: sqlite3.Connection, replay_method: str,
+    initialized_conn: Connection, replay_method: str,
 ) -> None:
     conn = initialized_conn
     config = Config(chesscom_delay_s=0, max_retries=0)
@@ -70,7 +70,7 @@ def test_preexisting_v2_stats_are_repaired_without_duplicate_snapshots(
     with transaction(conn):
         conn.execute("UPDATE user_snapshots SET count_rated = 2, count_win = NULL, count_draw = NULL")
         update_raw_payload_status(conn, first.raw_payload_id, status="parsed", parser_version="users-normalizer-v2")
-    original = conn.execute("SELECT id, content_hash, captured_at FROM user_snapshots").fetchone()
+    original = require_row(conn.execute("SELECT id, content_hash, captured_at FROM user_snapshots"))
 
     if replay_method == "offline":
         result = replay_raw_payload(conn, first.raw_payload_id)
@@ -81,8 +81,8 @@ def test_preexisting_v2_stats_are_repaired_without_duplicate_snapshots(
 
         result = fetch_chesscom_stats(conn, "Alice", config=config, transport=httpx.MockTransport(unchanged))
         assert result.status_code == 304
-        evidence = conn.execute("SELECT status_code, raw_payload_id, from_cache FROM fetch_logs ORDER BY id DESC").fetchone()
-        assert tuple(evidence) == (304, first.raw_payload_id, 1)
+        evidence = require_row(conn.execute("SELECT status_code, raw_payload_id, from_cache FROM fetch_logs ORDER BY id DESC"))
+        assert tuple(evidence.values()) == (304, first.raw_payload_id, 1)
 
     assert result.normalized_ids == first.normalized_ids
     snapshots = conn.execute("SELECT * FROM user_snapshots").fetchall()
@@ -93,6 +93,6 @@ def test_preexisting_v2_stats_are_repaired_without_duplicate_snapshots(
     assert tuple(snapshot[key] for key in ("count_all", "count_rated", "count_win", "count_loss", "count_draw")) == (
         2, None, 0, 2, 0,
     )
-    assert conn.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
     assert read_raw_payload(conn, first.raw_payload_id).parser_version == PARSER_VERSION
     assert PARSER_VERSION != "users-normalizer-v2"

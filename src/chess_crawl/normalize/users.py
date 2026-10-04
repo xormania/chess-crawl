@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from typing import Any
 
@@ -11,7 +10,7 @@ from chess_crawl.normalize.codes import canonical_hash
 from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
 from chess_crawl.providers.base import NormalizedUser
-from chess_crawl.storage.db import transaction
+from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
 
@@ -19,7 +18,7 @@ from chess_crawl.storage.repository import upsert_provider_user, upsert_user_sna
 PARSER_VERSION = "users-normalizer-v3"
 
 
-def normalize_user_payload(conn: sqlite3.Connection, raw_payload_id: int) -> int | None:
+def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
     raw = read_raw_payload(conn, raw_payload_id)
     if raw.endpoint_type == "user_profile":
         if raw.provider == "chess.com":

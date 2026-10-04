@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
@@ -24,12 +23,12 @@ from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
 from chess_crawl.providers.registry import list_provider_infos
 from chess_crawl.storage import application as submissions
 from chess_crawl.storage import queries
-from chess_crawl.storage.db import consistent_read, transaction
+from chess_crawl.storage.db import Connection, Row, consistent_read, transaction
 from chess_crawl.storage.events import archive_id
 
 
 def submit_import(
-    conn: sqlite3.Connection,
+    conn: Connection,
     request: ImportRequest,
     *,
     idempotency_key: str,
@@ -57,7 +56,7 @@ def submit_import(
 
 
 def submit_crawl(
-    conn: sqlite3.Connection,
+    conn: Connection,
     request: CrawlRequest,
     *,
     idempotency_key: str,
@@ -81,7 +80,7 @@ def submit_crawl(
 
 
 def _submit(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     key: str,
     operation: str,
@@ -89,8 +88,8 @@ def _submit(
     create: Callable[[], tuple[int, list[int]]],
 ) -> dict[str, Any]:
     canonical = json.dumps(asdict(request), sort_keys=True, separators=(",", ":"))
-    # BEGIN IMMEDIATE serializes the identity check with creation, including
-    # concurrent adapters. The identity survives all terminal job/run states.
+    # The archive transaction lock serializes the identity check with creation
+    # across concurrent adapters. Identity survives terminal job/run states.
     with transaction(conn):
         existing = submissions.get_submission(conn, key)
         if existing is not None:
@@ -109,7 +108,7 @@ def _submit(
 
 
 @consistent_read
-def get_run(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
+def get_run(conn: Connection, run_id: int) -> dict[str, Any]:
     validate_integer(run_id, "run_id", minimum=1, maximum=2**63 - 1)
     row = state.get_run(conn, run_id)
     if row is None:
@@ -126,7 +125,7 @@ def get_run(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
 
 
 @consistent_read
-def get_job(conn: sqlite3.Connection, job_id: int) -> dict[str, Any]:
+def get_job(conn: Connection, job_id: int) -> dict[str, Any]:
     validate_integer(job_id, "job_id", minimum=1, maximum=2**63 - 1)
     job = state.get_job(conn, job_id)
     if job is None:
@@ -139,7 +138,7 @@ def get_job(conn: sqlite3.Connection, job_id: int) -> dict[str, Any]:
 
 @consistent_read
 def list_games(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     provider: str | None = None,
     after: int | None = None,
@@ -158,7 +157,7 @@ def list_games(
 
 @consistent_read
 def list_users(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     provider: str | None = None,
     after: int | None = None,
@@ -173,7 +172,7 @@ def list_users(
 
 @consistent_read
 def list_opponents(
-    conn: sqlite3.Connection,
+    conn: Connection,
     provider: str,
     username: str,
     *,
@@ -192,8 +191,8 @@ def list_opponents(
 
 
 def _page(
-    conn: sqlite3.Connection,
-    rows: list[sqlite3.Row],
+    conn: Connection,
+    rows: list[Row],
     *,
     total: int,
     size: int,
@@ -209,7 +208,7 @@ def _page(
 
 
 @consistent_read
-def summary(conn: sqlite3.Connection) -> dict[str, Any]:
+def summary(conn: Connection) -> dict[str, Any]:
     report = queries.summary_report(conn)
     return {
         "providers": [dict(row) for row in report["providers"]],

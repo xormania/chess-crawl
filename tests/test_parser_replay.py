@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-import sqlite3
+from chess_crawl.storage.db import Connection, transaction
 from pathlib import Path
 
 import httpx
@@ -15,12 +15,11 @@ import chess_crawl.normalize.games as games_module
 from chess_crawl.normalize.games import PARSER_VERSION, normalize_games_payload
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage.acquisition import associate_run_game, run_game_ids
-from chess_crawl.storage.db import transaction
 from chess_crawl.storage.raw import read_raw_payload, store_raw_payload, update_raw_payload_status
 
 
 @pytest.fixture
-def stored_archive(initialized_conn: sqlite3.Connection, fixtures_dir: Path) -> tuple[int, str]:
+def stored_archive(initialized_conn: Connection, fixtures_dir: Path) -> tuple[int, str]:
     archive = json.loads((fixtures_dir / "chesscom/archive_2024_01.json").read_bytes())
     second = copy.deepcopy(archive["games"][0])
     second.update(uuid="parser-replay-second", url="https://www.chess.com/game/live/parser-replay-second")
@@ -38,7 +37,7 @@ def stored_archive(initialized_conn: sqlite3.Connection, fixtures_dir: Path) -> 
     return raw_id, archive["games"][0]["eco"]
 
 
-def _old_parser_state(conn: sqlite3.Connection, raw_id: int) -> None:
+def _old_parser_state(conn: Connection, raw_id: int) -> None:
     with transaction(conn):
         conn.execute("UPDATE games SET eco = 'old-parser-value'")
         update_raw_payload_status(conn, raw_id, status="parsed", parser_version="games-normalizer-old")
@@ -47,7 +46,7 @@ def _old_parser_state(conn: sqlite3.Connection, raw_id: int) -> None:
 @pytest.mark.parametrize("via_http", [False, True], ids=["offline", "cached-304"])
 @pytest.mark.parametrize("associated", [False, True], ids=["standalone", "existing-run"])
 def test_old_parser_replays_game_upserts_even_when_run_already_acquired_every_game(
-    initialized_conn: sqlite3.Connection, stored_archive: tuple[int, str], via_http: bool, associated: bool,
+    initialized_conn: Connection, stored_archive: tuple[int, str], via_http: bool, associated: bool,
 ) -> None:
     conn = initialized_conn
     raw_id, expected_eco = stored_archive
@@ -73,7 +72,7 @@ def test_old_parser_replays_game_upserts_even_when_run_already_acquired_every_ga
     else:
         replay_raw_payload(conn, raw_id, crawl_run_id=run_id, max_games=allowance)
 
-    assert [tuple(row) for row in conn.execute("SELECT id, eco FROM games ORDER BY id")] == [
+    assert [tuple(row.values()) for row in conn.execute("SELECT id, eco FROM games ORDER BY id")] == [
         (game_id, expected_eco) for game_id in ids
     ]
     if run_id is not None:
@@ -84,7 +83,7 @@ def test_old_parser_replays_game_upserts_even_when_run_already_acquired_every_ga
 
 
 def test_partial_parser_upgrade_does_not_certify_unselected_old_records(
-    initialized_conn: sqlite3.Connection, stored_archive: tuple[int, str],
+    initialized_conn: Connection, stored_archive: tuple[int, str],
 ) -> None:
     conn = initialized_conn
     raw_id, expected_eco = stored_archive
@@ -97,7 +96,7 @@ def test_partial_parser_upgrade_does_not_certify_unselected_old_records(
         result = replay_raw_payload(conn, raw_id, crawl_run_id=run_id, max_games=0)
         assert result.normalized_ids == ()
         assert run_game_ids(conn, run_id) == {first}
-        assert [tuple(row) for row in conn.execute("SELECT id, eco FROM games ORDER BY id")] == [
+        assert [tuple(row.values()) for row in conn.execute("SELECT id, eco FROM games ORDER BY id")] == [
             (first, expected_eco), (second, "old-parser-value"),
         ]
         raw = read_raw_payload(conn, raw_id)
@@ -112,7 +111,7 @@ def test_partial_parser_upgrade_does_not_certify_unselected_old_records(
 
 
 def test_current_parser_attribution_reuses_ids_without_rewriting_games(
-    initialized_conn: sqlite3.Connection, stored_archive: tuple[int, str], monkeypatch: pytest.MonkeyPatch,
+    initialized_conn: Connection, stored_archive: tuple[int, str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = initialized_conn
     raw_id, _ = stored_archive
@@ -130,7 +129,7 @@ def test_current_parser_attribution_reuses_ids_without_rewriting_games(
 
 
 def test_explicit_standalone_replay_refreshes_current_parser_records(
-    initialized_conn: sqlite3.Connection, stored_archive: tuple[int, str],
+    initialized_conn: Connection, stored_archive: tuple[int, str],
 ) -> None:
     conn = initialized_conn
     raw_id, expected_eco = stored_archive
@@ -142,7 +141,7 @@ def test_explicit_standalone_replay_refreshes_current_parser_records(
     result = replay_raw_payload(conn, raw_id)
 
     assert result.normalized_ids == tuple(ids)
-    assert [tuple(row) for row in conn.execute("SELECT id, eco FROM games ORDER BY id")] == [
+    assert [tuple(row.values()) for row in conn.execute("SELECT id, eco FROM games ORDER BY id")] == [
         (game_id, expected_eco) for game_id in ids
     ]
     assert read_raw_payload(conn, raw_id).normalization_status == "parsed"

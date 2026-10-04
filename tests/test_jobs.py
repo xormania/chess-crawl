@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import sqlite3
+from chess_crawl.storage.db import Connection, require_row, transaction
+
 from collections.abc import Mapping
 
 import pytest
@@ -15,12 +16,11 @@ from chess_crawl.jobs.discovery import (
 )
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.storage.discovery import opponents_of_user, record_discovery_edges
-from chess_crawl.storage.db import transaction
 from chess_crawl.jobs import state
 from chess_crawl.storage.repository import upsert_provider_user
 
 
-def test_job_enqueue_dedup_and_terminal_reenqueue(initialized_conn: sqlite3.Connection) -> None:
+def test_job_enqueue_dedup_and_terminal_reenqueue(initialized_conn: Connection) -> None:
     conn = initialized_conn
     first = state.enqueue_job(conn, provider="chess.com", kind="fetch_user_profile", target="SameName")
     duplicate = state.enqueue_job(conn, provider="chess.com", kind="fetch_user_profile", target="samename")
@@ -36,7 +36,7 @@ def test_job_enqueue_dedup_and_terminal_reenqueue(initialized_conn: sqlite3.Conn
     assert after_done.job_id != first.job_id
 
 
-def test_job_state_transitions_and_stale_resume(initialized_conn: sqlite3.Connection) -> None:
+def test_job_state_transitions_and_stale_resume(initialized_conn: Connection) -> None:
     conn = initialized_conn
     job_id = state.enqueue_job(conn, provider="lichess", kind="fetch_user_profile", target="SameName").job_id
     claimed = state.claim_next_job(conn)
@@ -67,7 +67,7 @@ def test_job_state_transitions_and_stale_resume(initialized_conn: sqlite3.Connec
 
 
 def test_crawl_creation_rolls_back_run_and_root_job_together(
-    initialized_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+    initialized_conn: Connection, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = initialized_conn
     original_enqueue = state.enqueue_job
@@ -83,13 +83,13 @@ def test_crawl_creation_rolls_back_run_and_root_job_together(
             bounds=CrawlBounds(max_depth=1, max_users=10, max_games=10, max_jobs=10),
         )
 
-    assert conn.execute("SELECT COUNT(*) FROM crawl_runs").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM discovery_jobs").fetchone()[0] == 0
+    assert require_row(conn.execute("SELECT COUNT(*) FROM crawl_runs"))[0] == 0
+    assert require_row(conn.execute("SELECT COUNT(*) FROM discovery_jobs"))[0] == 0
     assert conn.in_transaction is False
 
 
 def test_run_refresh_tracks_job_state_and_preserves_cancellation(
-    initialized_conn: sqlite3.Connection,
+    initialized_conn: Connection,
 ) -> None:
     conn = initialized_conn
     run_id, job_id = create_opponent_crawl(
@@ -106,7 +106,7 @@ def test_run_refresh_tracks_job_state_and_preserves_cancellation(
         state.mark_job(conn, job_id, job_state, now=123)
         state.refresh_run_status(conn, run_id)
         job = state.get_job(conn, job_id)
-        run = conn.execute("SELECT status, finished_at FROM crawl_runs WHERE id = ?", (run_id,)).fetchone()
+        run = require_row(conn.execute("SELECT status, finished_at FROM crawl_runs WHERE id = %s", (run_id,)))
         assert job is not None
         assert job.done_at == (123 if terminal else None)
         assert run["status"] == run_status
@@ -119,7 +119,7 @@ def test_run_refresh_tracks_job_state_and_preserves_cancellation(
 
 @pytest.mark.parametrize("scoped", [True, False], ids=["explicit-run", "global-scheduling"])
 def test_cancelled_crawl_excludes_all_live_jobs_from_resume_and_execution(
-    initialized_conn: sqlite3.Connection, scoped: bool,
+    initialized_conn: Connection, scoped: bool,
 ) -> None:
     conn = initialized_conn
     run_id = state.create_crawl_run(conn, provider="lichess", seed_spec="cancelled fixture", params={})
@@ -149,7 +149,7 @@ def test_cancelled_crawl_excludes_all_live_jobs_from_resume_and_execution(
     assert dict(state.crawl_runs(conn)[0]) == run_before
 
 
-def test_discovery_edge_insertion_is_idempotent(initialized_conn: sqlite3.Connection) -> None:
+def test_discovery_edge_insertion_is_idempotent(initialized_conn: Connection) -> None:
     conn = initialized_conn
     run_id, _ = create_opponent_crawl(
         conn,
@@ -166,14 +166,14 @@ def test_discovery_edge_insertion_is_idempotent(initialized_conn: sqlite3.Connec
     record_discovery_edges(conn, crawl_run_id=run_id, provider="chess.com", from_user_id=from_user, depth=1, edges=edges)
     record_discovery_edges(conn, crawl_run_id=run_id, provider="chess.com", from_user_id=from_user, depth=1, edges=edges)
 
-    row = conn.execute("SELECT game_count, depth FROM discovery_edges").fetchone()
+    row = require_row(conn.execute("SELECT game_count, depth FROM discovery_edges"))
     assert row["game_count"] == 1
     assert row["depth"] == 1
 
 
 def _graph_fetcher(graph: Mapping[str, list[str]], calls: list[str]):
     def fake_fetcher(
-        inner: sqlite3.Connection,
+        inner: Connection,
         provider: str,
         username: str,
         params: Mapping[str, object],
@@ -198,7 +198,7 @@ def _graph_fetcher(graph: Mapping[str, list[str]], calls: list[str]):
     return fake_fetcher
 
 
-def test_bounded_fake_graph_crawl_depth_and_duplicate_dedupe(initialized_conn: sqlite3.Connection) -> None:
+def test_bounded_fake_graph_crawl_depth_and_duplicate_dedupe(initialized_conn: Connection) -> None:
     conn = initialized_conn
     graph = {"a": ["b", "c"], "b": [], "c": ["d"], "d": []}
     calls: list[str] = []
@@ -255,7 +255,7 @@ def test_bounded_fake_graph_crawl_depth_and_duplicate_dedupe(initialized_conn: s
     ],
 )
 def test_crawl_enforces_caps(
-    initialized_conn: sqlite3.Connection, bounds: CrawlBounds, expected: dict[str, int],
+    initialized_conn: Connection, bounds: CrawlBounds, expected: dict[str, int],
 ) -> None:
     conn = initialized_conn
     fetcher = _graph_fetcher({"a": ["b", "c"], "b": ["d"], "c": ["e"]}, [])
@@ -271,14 +271,14 @@ def test_crawl_enforces_caps(
     actual = {
         "crawl_users": state.crawl_user_count(conn, run_id),
         "total_jobs": state.total_jobs_for_run(conn, run_id),
-        "games": int(conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]),
-        "edges": int(conn.execute("SELECT COUNT(*) FROM discovery_edges").fetchone()[0]),
+        "games": int(require_row(conn.execute("SELECT COUNT(*) FROM games"))[0]),
+        "edges": int(require_row(conn.execute("SELECT COUNT(*) FROM discovery_edges"))[0]),
     }
     assert {key: actual[key] for key in expected} == expected
 
 
 def test_runner_fetch_user_games_chesscom_advances_month_cursor(
-    initialized_conn: sqlite3.Connection,
+    initialized_conn: Connection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = initialized_conn
@@ -307,7 +307,7 @@ def test_runner_fetch_user_games_chesscom_advances_month_cursor(
 
 
 def test_runner_resume_retries_failed_month_before_advancing_checkpoint(
-    initialized_conn: sqlite3.Connection,
+    initialized_conn: Connection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = initialized_conn
@@ -348,7 +348,7 @@ def test_runner_resume_retries_failed_month_before_advancing_checkpoint(
 
 
 def test_runner_fetch_game_by_id_uses_lichess_service(
-    initialized_conn: sqlite3.Connection,
+    initialized_conn: Connection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = initialized_conn
@@ -375,13 +375,13 @@ def test_runner_fetch_game_by_id_uses_lichess_service(
     ],
 )
 def test_unsupported_provider_jobs_are_not_schedulable(
-    initialized_conn: sqlite3.Connection, provider: str, kind: JobKind, target: str, supported_provider: str,
+    initialized_conn: Connection, provider: str, kind: JobKind, target: str, supported_provider: str,
 ) -> None:
     with pytest.raises(ValueError, match=f"supported only for {supported_provider}"):
         state.enqueue_job(initialized_conn, provider=provider, kind=kind, target=target)
 
 
-def test_runner_reports_legacy_chesscom_fetch_game_by_id_as_error(initialized_conn: sqlite3.Connection) -> None:
+def test_runner_reports_legacy_chesscom_fetch_game_by_id_as_error(initialized_conn: Connection) -> None:
     conn = initialized_conn
     with transaction(conn):
         conn.execute(
@@ -392,7 +392,7 @@ def test_runner_reports_legacy_chesscom_fetch_game_by_id_as_error(initialized_co
         )
 
     result = JobRunner(conn).run(max_jobs=1)
-    job = conn.execute("SELECT state, reason FROM discovery_jobs WHERE dedup_key = 'legacy-chesscom-game'").fetchone()
+    job = require_row(conn.execute("SELECT state, reason FROM discovery_jobs WHERE dedup_key = 'legacy-chesscom-game'"))
 
     assert result.errors == 1
     assert job["state"] == "error"
@@ -400,7 +400,7 @@ def test_runner_reports_legacy_chesscom_fetch_game_by_id_as_error(initialized_co
 
 
 def test_runner_rejects_claimed_job_without_persisted_id(
-    initialized_conn: sqlite3.Connection,
+    initialized_conn: Connection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_claim_next_job(*args: object, **kwargs: object) -> DiscoveryJob:
@@ -413,7 +413,7 @@ def test_runner_rejects_claimed_job_without_persisted_id(
 
 
 def test_runner_records_unexpected_handler_errors(
-    initialized_conn: sqlite3.Connection,
+    initialized_conn: Connection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = initialized_conn
@@ -430,6 +430,54 @@ def test_runner_records_unexpected_handler_errors(
     assert result.errors == 1
     assert job is not None
     assert job.state == "error"
-    row = conn.execute("SELECT error_kind, message FROM errors").fetchone()
+    row = require_row(conn.execute("SELECT error_kind, message FROM errors"))
     assert row["error_kind"] == "other"
     assert row["message"] == "handler exploded"
+
+
+def test_database_disconnect_preserves_claim_for_successor_recovery(database_url: str, monkeypatch) -> None:
+    import psycopg
+    from chess_crawl.jobs.locking import executor_lock
+    from chess_crawl.storage.db import open_database
+
+    with open_database(database_url, writable=True) as owner, open_database(database_url, writable=True) as observer:
+        job_id = state.enqueue_job(owner, provider="lichess", kind="fetch_user_profile", target="alice").job_id
+
+        def disconnected_fetch(conn, *args, **kwargs):
+            assert require_row(observer.execute("SELECT pg_terminate_backend(%s)", (conn.info.backend_pid,)))[0]
+            conn.execute("SELECT 1")
+            raise AssertionError("A terminated session must not remain usable")
+
+        monkeypatch.setattr(runner_module, "fetch_user_profile", disconnected_fetch)
+        with pytest.raises(psycopg.Error):
+            JobRunner(owner).run(max_jobs=1)
+        job = state.get_job(observer, job_id)
+        assert job is not None and job.state == "in_progress" and job.attempts == 1
+        assert require_row(observer.execute("SELECT COUNT(*) FROM errors"))[0] == 0
+        with executor_lock(observer) as lease:
+            assert state.resume_stale_in_progress(observer, lease=lease) == 1
+        recovered = state.get_job(observer, job_id)
+        assert recovered is not None and recovered.state == "pending" and recovered.attempts == 1
+
+
+def test_ownership_lost_during_http_leaves_claim_recoverable_without_provider_error(database_url: str) -> None:
+    import httpx
+    from chess_crawl.jobs.locking import ExecutorLeaseLost, executor_lock
+    from chess_crawl.storage.db import open_database
+
+    with open_database(database_url, writable=True) as owner, open_database(database_url, writable=True) as observer:
+        job_id = state.enqueue_job(owner, provider="lichess", kind="fetch_user_profile", target="alice").job_id
+
+        def response(request):
+            owner.execute("SELECT pg_advisory_unlock_all()")
+            return httpx.Response(200, json={"id": "alice", "username": "Alice"})
+
+        with pytest.raises(ExecutorLeaseLost):
+            JobRunner(owner, transport=httpx.MockTransport(response)).run(max_jobs=1)
+        job = state.get_job(observer, job_id)
+        assert job is not None and job.state == "in_progress" and job.attempts == 1
+        assert require_row(observer.execute("SELECT COUNT(*) FROM errors"))[0] == 0
+        for table in ("raw_payloads", "fetch_logs", "provider_users"):
+            assert require_row(observer.execute(f"SELECT COUNT(*) FROM {table}"))[0] == 0
+        with executor_lock(observer) as lease:
+            assert state.resume_stale_in_progress(observer, lease=lease) == 1
