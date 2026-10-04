@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.18.4/.schema/devbox.schema.json",
+  "packages": {
+    "python": {
+      "version": "3.13.15",
+      "disable_plugin": true
+    },
+    "uv": "0.12.17",
+    "git": "2.55.0",
+    "postgresql": {
+      "version": "18.6",
+      "disable_plugin": true
+    }
+  },
+  "env": {
+    "UV_PYTHON_DOWNLOADS": "never"
+  },
+  "shell": {
+    "init_hook": "export UV_PYTHON=\"$DEVBOX_PACKAGES_DIR/bin/python3.13\"",
+    "scripts": {
+      "setup": "uv sync --locked --group dev --extra api",
+      "check": "sh scripts/check_dev.sh",
+      "test": "uv run --locked python -m pytest \"$@\""
+    }
+  }
+}

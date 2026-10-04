@@ -31,6 +31,7 @@ provider APIs and one serial acquisition executor per archive.
 | A local archive and command-line queries or exports | [Run from source](#run-from-source) |
 | HTTP routes, authentication, event payloads, and recovery behavior | [Backend and integration guide](docs/backend.md) |
 | Fetch, queue, inspect, resume, and export commands | [CLI guide](docs/cli.md) |
+| A pinned toolchain for contributing from Linux, WSL2, or Apple Silicon macOS | [Devbox development setup](CONTRIBUTING.md#development-setup) |
 
 Both paths start with a source checkout:
 
