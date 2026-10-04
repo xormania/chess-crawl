@@ -27,6 +27,13 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   need and of the result; a changelog update requirement for all PRs beyond
   CI/test-only changes.
 
+- A PostgreSQL operations guide with full-database custom backups, isolated
+  restoration, binary payload and event identity verification, authenticated
+  readiness checks, and major-version upgrade and recovery instructions.
+  External-server setup uses the optional Compose overlay and a mounted CA
+  certificate for verified TLS, without starting an unused bundled database.
+  See [PostgreSQL operations](docs/postgresql-operations.md).
+
 ### Changed
 
 - External PostgreSQL connections require certificate-chain and hostname
