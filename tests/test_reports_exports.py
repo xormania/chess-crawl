@@ -9,8 +9,16 @@ from pathlib import Path
 import pytest
 
 from support import seed_game
+from chess_crawl.providers.base import RawRecord
 from chess_crawl.export.writers import export_games_jsonl, export_graph_csv, export_users_jsonl
-from chess_crawl.storage.queries import games_by_month, opponent_report, summary_report, user_game_summary
+from chess_crawl.storage.queries import (
+    archive_freshness,
+    games_by_month,
+    opponent_report,
+    summary_report,
+    user_game_summary,
+)
+from chess_crawl.storage.raw import insert_fetch_log, store_raw_payload
 
 
 def test_reports_are_null_outcome_aware_and_provider_scoped(initialized_conn) -> None:
@@ -39,6 +47,37 @@ def test_reports_are_null_outcome_aware_and_provider_scoped(initialized_conn) ->
     months = games_by_month(conn, provider="chess.com")
     assert [(row["month"], row["games"], row["unfinished"]) for row in months] == [("2024-01", 1, 1)]
     assert summary_report(conn)["raw_payloads"] == 0
+
+
+def test_public_archive_metrics_exclude_workspace_scoped_payloads(initialized_conn) -> None:
+    conn = initialized_conn
+    public_raw_id = store_raw_payload(conn, RawRecord(
+        provider="lichess", endpoint_type="user_profile", request_url="https://example/public",
+        canonical_source_key="user:public", fetched_at=100, body=b'{"id":"public"}',
+    ))
+    private_raw_id = store_raw_payload(conn, RawRecord(
+        provider="lichess", endpoint_type="user_resource", request_url="https://example/private",
+        canonical_source_key="user:private:teams", fetched_at=200, body=b'[{"id":"secret"}]',
+        owner_scope="workspace:test",
+    ))
+    insert_fetch_log(
+        conn, provider="lichess", url="https://example/public", endpoint_type="user_profile",
+        attempted_at=110, status_code=200, raw_payload_id=public_raw_id,
+    )
+    insert_fetch_log(
+        conn, provider="lichess", url="https://example/private", endpoint_type="user_resource",
+        attempted_at=210, status_code=200, raw_payload_id=private_raw_id,
+    )
+
+    assert summary_report(conn)["raw_payloads"] == 1
+    assert archive_freshness(conn) == {
+        "provider": None,
+        "last_checked_at": 110,
+        "last_fetched_at": 100,
+        "last_normalized_at": None,
+        "pending_payloads": 1,
+        "failed_payloads": 0,
+    }
 
 
 def test_exports_preserve_provider_and_omit_raw_payloads(tmp_path: Path, seeded_database_url: str) -> None:
