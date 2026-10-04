@@ -5,6 +5,7 @@ from __future__ import annotations
 from chess_crawl.storage.db import Connection, open_database, require_row, transaction
 
 import json
+import time
 from typing import Any
 
 import httpx
@@ -220,12 +221,22 @@ def test_standalone_game_archive_304_refreshes_the_current_source(initialized_co
         )),
     )
     assert first.raw_payload_id is not None
+    baseline = int(time.time())
+    with transaction(conn):
+        conn.execute(
+            "UPDATE raw_payloads SET fetched_at=%s WHERE id=%s",
+            (baseline - 2, first.raw_payload_id),
+        )
+        conn.execute(
+            "UPDATE fetch_logs SET attempted_at=%s WHERE raw_payload_id=%s",
+            (baseline - 2, first.raw_payload_id),
+        )
     newer_raw = store_raw_payload(conn, RawRecord(
         provider="chess.com", endpoint_type="monthly_archive",
         request_url="https://api.chess.com/pub/player/alice/games/2024/02",
         canonical_source_key="chess.com/player/alice/games/2024/02",
         body=chesscom_archive_body("checkmated"),
-        fetched_at=read_raw_payload(conn, first.raw_payload_id).fetched_at + 1,
+        fetched_at=baseline - 1,
         media_type="application/json",
     ))
     normalize_games_payload(conn, newer_raw)
