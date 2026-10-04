@@ -1,0 +1,1983 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Chess Crawl private AWS foundation; starts with zero ECS service tasks until migrations and release gates pass",
+  "Parameters": {
+    "VpcId": {
+      "Type": "AWS::EC2::VPC::Id"
+    },
+    "PrivateSubnets": {
+      "Type": "List<AWS::EC2::Subnet::Id>",
+      "Description": "At least two private subnets in different AZs; dependency-service and provider egress must already exist"
+    },
+    "FrontendSecurityGroupId": {
+      "Type": "AWS::EC2::SecurityGroup::Id",
+      "Description": "Existing frontend service security group allowed to call the private TLS API"
+    },
+    "ApiCertificateArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:acm:[a-z0-9-]+:\\d{12}:certificate/.+"
+    },
+    "ApiHostname": {
+      "Type": "String",
+      "AllowedPattern": "[a-z0-9][a-z0-9.-]+",
+      "Description": "Private DNS name covered by the ACM certificate; create its Route53 alias separately"
+    },
+    "ContainerImage": {
+      "Type": "String",
+      "AllowedPattern": "\\d{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com(?:\\.cn)?/.+@sha256:[a-f0-9]{64}",
+      "Description": "Digest-pinned private ECR image built from all dependent PRs"
+    },
+    "ContainerRepositoryArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:ecr:[a-z0-9-]+:\\d{12}:repository/.+"
+    },
+    "ApplicationDatabaseSecretArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:secretsmanager:[a-z0-9-]+:\\d{12}:secret:.+",
+      "Description": "Existing Secrets Manager JSON secret containing password (32+ characters); never a secret value"
+    },
+    "ApiTokenSecretArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z-]+:secretsmanager:[a-z0-9-]+:\\d{12}:secret:.+",
+      "Description": "Existing plaintext API service-token secret ARN"
+    },
+    "ApplicationSecretKmsKeyArn": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Optional customer-managed key ARN for application secrets; empty uses AWS-managed encryption"
+    },
+    "DatabaseEngineVersion": {
+      "Type": "String",
+      "Default": "18.6",
+      "AllowedPattern": "18\\.\\d+",
+      "Description": "Confirm minor-version availability in the selected region before deployment"
+    },
+    "DatabaseInstanceClass": {
+      "Type": "String",
+      "Default": "db.t4g.small",
+      "AllowedPattern": "db\\.[a-z0-9]+\\.[a-z0-9]+"
+    },
+    "DatabaseStorageGiB": {
+      "Type": "Number",
+      "Default": 100,
+      "MinValue": 20,
+      "MaxValue": 65536
+    },
+    "DatabaseBackupDays": {
+      "Type": "Number",
+      "Default": 7,
+      "MinValue": 1,
+      "MaxValue": 35
+    },
+    "DatabaseMultiAZ": {
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": [
+        "true",
+        "false"
+      ]
+    },
+    "DatabaseDeletionProtection": {
+      "Type": "String",
+      "Default": "true",
+      "AllowedValues": [
+        "true",
+        "false"
+      ]
+    },
+    "ApplicationDatabaseUser": {
+      "Type": "String",
+      "Default": "chess_crawl_app",
+      "AllowedPattern": "[a-z][a-z0-9_]{0,62}"
+    },
+    "ApiDesiredCount": {
+      "Type": "Number",
+      "Default": 0,
+      "MinValue": 0,
+      "MaxValue": 10
+    },
+    "WorkerDesiredCount": {
+      "Type": "Number",
+      "Default": 0,
+      "MinValue": 0,
+      "MaxValue": 100
+    },
+    "DispatcherDesiredCount": {
+      "Type": "Number",
+      "Default": 0,
+      "AllowedValues": [
+        0,
+        1
+      ]
+    },
+    "TaskCpu": {
+      "Type": "String",
+      "Default": "512",
+      "AllowedValues": [
+        "512",
+        "1024",
+        "2048",
+        "4096"
+      ]
+    },
+    "TaskMemory": {
+      "Type": "String",
+      "Default": "1024",
+      "AllowedValues": [
+        "1024",
+        "2048",
+        "4096",
+        "8192"
+      ]
+    },
+    "QueueVisibilitySeconds": {
+      "Type": "Number",
+      "Default": 120,
+      "MinValue": 30,
+      "MaxValue": 43200
+    },
+    "QueueMaxReceives": {
+      "Type": "Number",
+      "Default": 5,
+      "MinValue": 1,
+      "MaxValue": 100
+    },
+    "LogRetentionDays": {
+      "Type": "Number",
+      "Default": 14,
+      "AllowedValues": [
+        1,
+        3,
+        5,
+        7,
+        14,
+        30,
+        60,
+        90,
+        180,
+        365
+      ]
+    },
+    "MaxGamesPerRequest": {
+      "Type": "Number",
+      "Default": 100000,
+      "MinValue": 1,
+      "MaxValue": 100000000
+    },
+    "MaxJobsPerRequest": {
+      "Type": "Number",
+      "Default": 10000,
+      "MinValue": 1,
+      "MaxValue": 10000000
+    },
+    "MaxUsersPerRequest": {
+      "Type": "Number",
+      "Default": 1000,
+      "MinValue": 1,
+      "MaxValue": 10000000
+    },
+    "Contact": {
+      "Type": "String",
+      "Description": "Operator contact for provider User-Agent"
+    },
+    "LoadBalancerDeletionProtection": {
+      "Type": "String",
+      "Default": "true",
+      "AllowedValues": [
+        "true",
+        "false"
+      ]
+    }
+  },
+  "Conditions": {
+    "MultiAZ": {
+      "Fn::Equals": [
+        {
+          "Ref": "DatabaseMultiAZ"
+        },
+        "true"
+      ]
+    },
+    "ProtectDatabase": {
+      "Fn::Equals": [
+        {
+          "Ref": "DatabaseDeletionProtection"
+        },
+        "true"
+      ]
+    },
+    "CustomerSecretKey": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "ApplicationSecretKmsKeyArn"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "ProtectLoadBalancer": {
+      "Fn::Equals": [
+        {
+          "Ref": "LoadBalancerDeletionProtection"
+        },
+        "true"
+      ]
+    }
+  },
+  "Resources": {
+    "ArchiveBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "OwnershipControls": {
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "ArchiveBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "ArchiveBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "ArchiveBucket",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${ArchiveBucket.Arn}/*"
+                }
+              ],
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "DeadLetterQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "SqsManagedSseEnabled": true,
+        "MessageRetentionPeriod": 1209600
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "WorkQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "SqsManagedSseEnabled": true,
+        "MessageRetentionPeriod": 345600,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "VisibilityTimeout": {
+          "Ref": "QueueVisibilitySeconds"
+        },
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "DeadLetterQueue",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": {
+            "Ref": "QueueMaxReceives"
+          }
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "QueuePolicy": {
+      "Type": "AWS::SQS::QueuePolicy",
+      "Properties": {
+        "Queues": [
+          {
+            "Ref": "WorkQueue"
+          },
+          {
+            "Ref": "DeadLetterQueue"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "sqs:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "WorkQueue",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::GetAtt": [
+                    "DeadLetterQueue",
+                    "Arn"
+                  ]
+                }
+              ],
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "Cluster": {
+      "Type": "AWS::ECS::Cluster",
+      "Properties": {
+        "ClusterSettings": [
+          {
+            "Name": "containerInsights",
+            "Value": "disabled"
+          }
+        ]
+      }
+    },
+    "Logs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "RetentionInDays": {
+          "Ref": "LogRetentionDays"
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "TaskSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Private archive application tasks",
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Existing private-subnet routes control AWS dependency and provider egress"
+          }
+        ]
+      }
+    },
+    "LoadBalancerSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Private TLS API from the frontend security group only",
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "SourceSecurityGroupId": {
+              "Ref": "FrontendSecurityGroupId"
+            }
+          }
+        ],
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 8000,
+            "ToPort": 8000,
+            "DestinationSecurityGroupId": {
+              "Ref": "TaskSecurityGroup"
+            }
+          }
+        ]
+      }
+    },
+    "ApiIngress": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "TaskSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 8000,
+        "ToPort": 8000,
+        "SourceSecurityGroupId": {
+          "Ref": "LoadBalancerSecurityGroup"
+        }
+      }
+    },
+    "DatabaseSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "PostgreSQL from application tasks only",
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 5432,
+            "ToPort": 5432,
+            "SourceSecurityGroupId": {
+              "Ref": "TaskSecurityGroup"
+            }
+          }
+        ],
+        "SecurityGroupEgress": []
+      }
+    },
+    "DatabaseSubnets": {
+      "Type": "AWS::RDS::DBSubnetGroup",
+      "Properties": {
+        "DBSubnetGroupDescription": "Private archive database subnets",
+        "SubnetIds": {
+          "Ref": "PrivateSubnets"
+        }
+      }
+    },
+    "DatabaseParameters": {
+      "Type": "AWS::RDS::DBParameterGroup",
+      "Properties": {
+        "Description": "Require TLS for PostgreSQL18 archive",
+        "Family": "postgres18",
+        "Parameters": {
+          "rds.force_ssl": "1"
+        }
+      }
+    },
+    "Database": {
+      "Type": "AWS::RDS::DBInstance",
+      "Properties": {
+        "Engine": "postgres",
+        "EngineVersion": {
+          "Ref": "DatabaseEngineVersion"
+        },
+        "DBInstanceClass": {
+          "Ref": "DatabaseInstanceClass"
+        },
+        "DBName": "chess_crawl",
+        "MasterUsername": "archive_admin",
+        "ManageMasterUserPassword": true,
+        "StorageType": "gp3",
+        "AllocatedStorage": {
+          "Ref": "DatabaseStorageGiB"
+        },
+        "StorageEncrypted": true,
+        "BackupRetentionPeriod": {
+          "Ref": "DatabaseBackupDays"
+        },
+        "CopyTagsToSnapshot": true,
+        "DeletionProtection": {
+          "Fn::If": [
+            "ProtectDatabase",
+            true,
+            false
+          ]
+        },
+        "MultiAZ": {
+          "Fn::If": [
+            "MultiAZ",
+            true,
+            false
+          ]
+        },
+        "PubliclyAccessible": false,
+        "DBSubnetGroupName": {
+          "Ref": "DatabaseSubnets"
+        },
+        "VPCSecurityGroups": [
+          {
+            "Ref": "DatabaseSecurityGroup"
+          }
+        ],
+        "DBParameterGroupName": {
+          "Ref": "DatabaseParameters"
+        },
+        "AutoMinorVersionUpgrade": false
+      },
+      "DeletionPolicy": "Snapshot",
+      "UpdateReplacePolicy": "Snapshot"
+    },
+    "LoadBalancer": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "Scheme": "internal",
+        "Type": "application",
+        "Subnets": {
+          "Ref": "PrivateSubnets"
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "LoadBalancerSecurityGroup"
+          }
+        ],
+        "LoadBalancerAttributes": [
+          {
+            "Key": "deletion_protection.enabled",
+            "Value": {
+              "Fn::If": [
+                "ProtectLoadBalancer",
+                "true",
+                "false"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ApiTargets": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "Port": 8000,
+        "Protocol": "HTTP",
+        "TargetType": "ip",
+        "HealthCheckPath": "/health/live",
+        "Matcher": {
+          "HttpCode": "200"
+        },
+        "HealthCheckIntervalSeconds": 30
+      }
+    },
+    "ApiListener": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "LoadBalancerArn": {
+          "Ref": "LoadBalancer"
+        },
+        "Port": 443,
+        "Protocol": "HTTPS",
+        "SslPolicy": "ELBSecurityPolicy-TLS13-1-2-2021-06",
+        "Certificates": [
+          {
+            "CertificateArn": {
+              "Ref": "ApiCertificateArn"
+            }
+          }
+        ],
+        "DefaultActions": [
+          {
+            "Type": "forward",
+            "TargetGroupArn": {
+              "Ref": "ApiTargets"
+            }
+          }
+        ]
+      }
+    },
+    "ExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "archive-scoped",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:GetAuthorizationToken"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchGetImage"
+                  ],
+                  "Resource": {
+                    "Ref": "ContainerRepositoryArn"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${Logs.Arn}:*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": [
+                    {
+                      "Ref": "ApplicationDatabaseSecretArn"
+                    },
+                    {
+                      "Ref": "ApiTokenSecretArn"
+                    }
+                  ]
+                },
+                {
+                  "Fn::If": [
+                    "CustomerSecretKey",
+                    {
+                      "Effect": "Allow",
+                      "Action": [
+                        "kms:Decrypt"
+                      ],
+                      "Resource": {
+                        "Ref": "ApplicationSecretKmsKeyArn"
+                      },
+                      "Condition": {
+                        "StringEquals": {
+                          "kms:ViaService": {
+                            "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "Ref": "AWS::NoValue"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "MigrationExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "archive-scoped",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:GetAuthorizationToken"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchGetImage"
+                  ],
+                  "Resource": {
+                    "Ref": "ContainerRepositoryArn"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${Logs.Arn}:*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": [
+                    {
+                      "Ref": "ApplicationDatabaseSecretArn"
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "Database",
+                        "MasterUserSecret.SecretArn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Fn::If": [
+                    "CustomerSecretKey",
+                    {
+                      "Effect": "Allow",
+                      "Action": [
+                        "kms:Decrypt"
+                      ],
+                      "Resource": {
+                        "Ref": "ApplicationSecretKmsKeyArn"
+                      },
+                      "Condition": {
+                        "StringEquals": {
+                          "kms:ViaService": {
+                            "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "Ref": "AWS::NoValue"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ApiRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "archive-scoped",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "WorkerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "archive-scoped",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "WorkQueue",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "DispatcherRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "archive-scoped",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "WorkQueue",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "MigrationRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "archive-scoped",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ApiTask": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "NetworkMode": "awsvpc",
+        "Cpu": {
+          "Ref": "TaskCpu"
+        },
+        "Memory": {
+          "Ref": "TaskMemory"
+        },
+        "RuntimePlatform": {
+          "CpuArchitecture": "X86_64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "ExecutionRole",
+            "Arn"
+          ]
+        },
+        "TaskRoleArn": {
+          "Fn::GetAtt": [
+            "ApiRole",
+            "Arn"
+          ]
+        },
+        "ContainerDefinitions": [
+          {
+            "Name": "archive",
+            "Image": {
+              "Ref": "ContainerImage"
+            },
+            "Essential": true,
+            "User": "10001:10001",
+            "ReadonlyRootFilesystem": true,
+            "Command": [
+              "uvicorn",
+              "chess_crawl.api:create_app",
+              "--factory",
+              "--host",
+              "0.0.0.0",
+              "--port",
+              "8000"
+            ],
+            "Environment": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_URL",
+                "Value": {
+                  "Fn::Sub": "postgresql://${ApplicationDatabaseUser}@${Database.Endpoint.Address}:${Database.Endpoint.Port}/chess_crawl"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_TRANSPORT",
+                "Value": "verified"
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE",
+                "Value": "/app/docker/rds-ca-bundle.pem"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_BACKEND",
+                "Value": "s3"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_S3_BUCKET",
+                "Value": {
+                  "Ref": "ArchiveBucket"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_SQS_QUEUE_URL",
+                "Value": {
+                  "Ref": "WorkQueue"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_CONTACT",
+                "Value": {
+                  "Ref": "Contact"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_USAGE_LOG",
+                "Value": "true"
+              },
+              {
+                "Name": "CHESS_CRAWL_MAX_GAMES",
+                "Value": {
+                  "Ref": "MaxGamesPerRequest"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_MAX_JOBS",
+                "Value": {
+                  "Ref": "MaxJobsPerRequest"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_MAX_USERS",
+                "Value": {
+                  "Ref": "MaxUsersPerRequest"
+                }
+              },
+              {
+                "Name": "AWS_DEFAULT_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "${ApplicationDatabaseSecretArn}:password::"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_API_TOKEN",
+                "ValueFrom": {
+                  "Ref": "ApiTokenSecretArn"
+                }
+              }
+            ],
+            "LinuxParameters": {
+              "InitProcessEnabled": true,
+              "Capabilities": {
+                "Drop": [
+                  "ALL"
+                ]
+              },
+              "Tmpfs": [
+                {
+                  "ContainerPath": "/tmp",
+                  "Size": 64,
+                  "MountOptions": [
+                    "rw",
+                    "noexec",
+                    "nosuid",
+                    "nodev",
+                    "mode=1777"
+                  ]
+                }
+              ]
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "Logs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "ApiTask",
+                "mode": "non-blocking",
+                "max-buffer-size": "4m"
+              }
+            },
+            "PortMappings": [
+              {
+                "ContainerPort": 8000,
+                "Protocol": "tcp"
+              }
+            ],
+            "HealthCheck": {
+              "Command": [
+                "CMD",
+                "python",
+                "/app/docker/healthcheck.py",
+                "api"
+              ],
+              "Interval": 30,
+              "Timeout": 5,
+              "Retries": 3,
+              "StartPeriod": 30
+            }
+          }
+        ]
+      }
+    },
+    "WorkerTask": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "NetworkMode": "awsvpc",
+        "Cpu": {
+          "Ref": "TaskCpu"
+        },
+        "Memory": {
+          "Ref": "TaskMemory"
+        },
+        "RuntimePlatform": {
+          "CpuArchitecture": "X86_64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "ExecutionRole",
+            "Arn"
+          ]
+        },
+        "TaskRoleArn": {
+          "Fn::GetAtt": [
+            "WorkerRole",
+            "Arn"
+          ]
+        },
+        "ContainerDefinitions": [
+          {
+            "Name": "archive",
+            "Image": {
+              "Ref": "ContainerImage"
+            },
+            "Essential": true,
+            "User": "10001:10001",
+            "ReadonlyRootFilesystem": true,
+            "Command": [
+              "python",
+              "-m",
+              "chess_crawl.jobs.worker",
+              "--stage",
+              "all",
+              "--queue-url",
+              {
+                "Ref": "WorkQueue"
+              }
+            ],
+            "Environment": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_URL",
+                "Value": {
+                  "Fn::Sub": "postgresql://${ApplicationDatabaseUser}@${Database.Endpoint.Address}:${Database.Endpoint.Port}/chess_crawl"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_TRANSPORT",
+                "Value": "verified"
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE",
+                "Value": "/app/docker/rds-ca-bundle.pem"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_BACKEND",
+                "Value": "s3"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_S3_BUCKET",
+                "Value": {
+                  "Ref": "ArchiveBucket"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_SQS_QUEUE_URL",
+                "Value": {
+                  "Ref": "WorkQueue"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_CONTACT",
+                "Value": {
+                  "Ref": "Contact"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_USAGE_LOG",
+                "Value": "true"
+              },
+              {
+                "Name": "AWS_DEFAULT_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "${ApplicationDatabaseSecretArn}:password::"
+                }
+              }
+            ],
+            "LinuxParameters": {
+              "InitProcessEnabled": true,
+              "Capabilities": {
+                "Drop": [
+                  "ALL"
+                ]
+              },
+              "Tmpfs": [
+                {
+                  "ContainerPath": "/tmp",
+                  "Size": 64,
+                  "MountOptions": [
+                    "rw",
+                    "noexec",
+                    "nosuid",
+                    "nodev",
+                    "mode=1777"
+                  ]
+                }
+              ]
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "Logs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "WorkerTask",
+                "mode": "non-blocking",
+                "max-buffer-size": "4m"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "DispatcherTask": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "NetworkMode": "awsvpc",
+        "Cpu": {
+          "Ref": "TaskCpu"
+        },
+        "Memory": {
+          "Ref": "TaskMemory"
+        },
+        "RuntimePlatform": {
+          "CpuArchitecture": "X86_64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "ExecutionRole",
+            "Arn"
+          ]
+        },
+        "TaskRoleArn": {
+          "Fn::GetAtt": [
+            "DispatcherRole",
+            "Arn"
+          ]
+        },
+        "ContainerDefinitions": [
+          {
+            "Name": "archive",
+            "Image": {
+              "Ref": "ContainerImage"
+            },
+            "Essential": true,
+            "User": "10001:10001",
+            "ReadonlyRootFilesystem": true,
+            "Command": [
+              "python",
+              "-m",
+              "chess_crawl.jobs.dispatch"
+            ],
+            "Environment": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_URL",
+                "Value": {
+                  "Fn::Sub": "postgresql://${ApplicationDatabaseUser}@${Database.Endpoint.Address}:${Database.Endpoint.Port}/chess_crawl"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_TRANSPORT",
+                "Value": "verified"
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE",
+                "Value": "/app/docker/rds-ca-bundle.pem"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_BACKEND",
+                "Value": "s3"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_S3_BUCKET",
+                "Value": {
+                  "Ref": "ArchiveBucket"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_SQS_QUEUE_URL",
+                "Value": {
+                  "Ref": "WorkQueue"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_CONTACT",
+                "Value": {
+                  "Ref": "Contact"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_USAGE_LOG",
+                "Value": "true"
+              },
+              {
+                "Name": "AWS_DEFAULT_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "${ApplicationDatabaseSecretArn}:password::"
+                }
+              }
+            ],
+            "LinuxParameters": {
+              "InitProcessEnabled": true,
+              "Capabilities": {
+                "Drop": [
+                  "ALL"
+                ]
+              },
+              "Tmpfs": [
+                {
+                  "ContainerPath": "/tmp",
+                  "Size": 64,
+                  "MountOptions": [
+                    "rw",
+                    "noexec",
+                    "nosuid",
+                    "nodev",
+                    "mode=1777"
+                  ]
+                }
+              ]
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "Logs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "DispatcherTask",
+                "mode": "non-blocking",
+                "max-buffer-size": "4m"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "MigrationTask": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "NetworkMode": "awsvpc",
+        "Cpu": {
+          "Ref": "TaskCpu"
+        },
+        "Memory": {
+          "Ref": "TaskMemory"
+        },
+        "RuntimePlatform": {
+          "CpuArchitecture": "X86_64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "MigrationExecutionRole",
+            "Arn"
+          ]
+        },
+        "TaskRoleArn": {
+          "Fn::GetAtt": [
+            "MigrationRole",
+            "Arn"
+          ]
+        },
+        "ContainerDefinitions": [
+          {
+            "Name": "archive",
+            "Image": {
+              "Ref": "ContainerImage"
+            },
+            "Essential": true,
+            "User": "10001:10001",
+            "ReadonlyRootFilesystem": true,
+            "Command": [
+              "python",
+              "-m",
+              "chess_crawl.storage.cloud_bootstrap"
+            ],
+            "Environment": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_TRANSPORT",
+                "Value": "verified"
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE",
+                "Value": "/app/docker/rds-ca-bundle.pem"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_BACKEND",
+                "Value": "s3"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_S3_BUCKET",
+                "Value": {
+                  "Ref": "ArchiveBucket"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_CONTACT",
+                "Value": {
+                  "Ref": "Contact"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_USAGE_LOG",
+                "Value": "true"
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_URL",
+                "Value": {
+                  "Fn::Sub": "postgresql://archive_admin@${Database.Endpoint.Address}:${Database.Endpoint.Port}/chess_crawl"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_APPLICATION_DATABASE_USER",
+                "Value": {
+                  "Ref": "ApplicationDatabaseUser"
+                }
+              },
+              {
+                "Name": "AWS_DEFAULT_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Database",
+                          "MasterUserSecret.SecretArn"
+                        ]
+                      },
+                      ":password::"
+                    ]
+                  ]
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_APPLICATION_DATABASE_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "${ApplicationDatabaseSecretArn}:password::"
+                }
+              }
+            ],
+            "LinuxParameters": {
+              "InitProcessEnabled": true,
+              "Capabilities": {
+                "Drop": [
+                  "ALL"
+                ]
+              },
+              "Tmpfs": [
+                {
+                  "ContainerPath": "/tmp",
+                  "Size": 64,
+                  "MountOptions": [
+                    "rw",
+                    "noexec",
+                    "nosuid",
+                    "nodev",
+                    "mode=1777"
+                  ]
+                }
+              ]
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "Logs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "MigrationTask",
+                "mode": "non-blocking",
+                "max-buffer-size": "4m"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "ApiService": {
+      "Type": "AWS::ECS::Service",
+      "Properties": {
+        "Cluster": {
+          "Ref": "Cluster"
+        },
+        "TaskDefinition": {
+          "Ref": "ApiTask"
+        },
+        "DesiredCount": {
+          "Ref": "ApiDesiredCount"
+        },
+        "LaunchType": "FARGATE",
+        "PlatformVersion": "LATEST",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "Subnets": {
+              "Ref": "PrivateSubnets"
+            },
+            "SecurityGroups": [
+              {
+                "Ref": "TaskSecurityGroup"
+              }
+            ]
+          }
+        },
+        "DeploymentConfiguration": {
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true
+          },
+          "MinimumHealthyPercent": 100,
+          "MaximumPercent": 200
+        },
+        "LoadBalancers": [
+          {
+            "TargetGroupArn": {
+              "Ref": "ApiTargets"
+            },
+            "ContainerName": "archive",
+            "ContainerPort": 8000
+          }
+        ],
+        "HealthCheckGracePeriodSeconds": 60
+      },
+      "DependsOn": [
+        "ApiListener"
+      ]
+    },
+    "WorkerService": {
+      "Type": "AWS::ECS::Service",
+      "Properties": {
+        "Cluster": {
+          "Ref": "Cluster"
+        },
+        "TaskDefinition": {
+          "Ref": "WorkerTask"
+        },
+        "DesiredCount": {
+          "Ref": "WorkerDesiredCount"
+        },
+        "LaunchType": "FARGATE",
+        "PlatformVersion": "LATEST",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "Subnets": {
+              "Ref": "PrivateSubnets"
+            },
+            "SecurityGroups": [
+              {
+                "Ref": "TaskSecurityGroup"
+              }
+            ]
+          }
+        },
+        "DeploymentConfiguration": {
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true
+          },
+          "MinimumHealthyPercent": 100,
+          "MaximumPercent": 200
+        }
+      }
+    },
+    "DispatcherService": {
+      "Type": "AWS::ECS::Service",
+      "Properties": {
+        "Cluster": {
+          "Ref": "Cluster"
+        },
+        "TaskDefinition": {
+          "Ref": "DispatcherTask"
+        },
+        "DesiredCount": {
+          "Ref": "DispatcherDesiredCount"
+        },
+        "LaunchType": "FARGATE",
+        "PlatformVersion": "LATEST",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "Subnets": {
+              "Ref": "PrivateSubnets"
+            },
+            "SecurityGroups": [
+              {
+                "Ref": "TaskSecurityGroup"
+              }
+            ]
+          }
+        },
+        "DeploymentConfiguration": {
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true
+          },
+          "MinimumHealthyPercent": 100,
+          "MaximumPercent": 200
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "ClusterArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Cluster",
+          "Arn"
+        ]
+      }
+    },
+    "MigrationTaskDefinition": {
+      "Value": {
+        "Ref": "MigrationTask"
+      }
+    },
+    "TaskSecurityGroupId": {
+      "Value": {
+        "Ref": "TaskSecurityGroup"
+      }
+    },
+    "ApiServiceName": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ApiService",
+          "Name"
+        ]
+      }
+    },
+    "WorkerServiceName": {
+      "Value": {
+        "Fn::GetAtt": [
+          "WorkerService",
+          "Name"
+        ]
+      }
+    },
+    "DispatcherServiceName": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DispatcherService",
+          "Name"
+        ]
+      }
+    },
+    "ApiUrl": {
+      "Value": {
+        "Fn::Sub": "https://${ApiHostname}"
+      }
+    },
+    "PrivateLoadBalancerDns": {
+      "Value": {
+        "Fn::GetAtt": [
+          "LoadBalancer",
+          "DNSName"
+        ]
+      }
+    },
+    "PrivateLoadBalancerHostedZoneId": {
+      "Value": {
+        "Fn::GetAtt": [
+          "LoadBalancer",
+          "CanonicalHostedZoneID"
+        ]
+      }
+    },
+    "DatabaseEndpoint": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Database",
+          "Endpoint.Address"
+        ]
+      }
+    },
+    "DatabaseMasterSecretArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Database",
+          "MasterUserSecret.SecretArn"
+        ]
+      }
+    },
+    "ArchiveBucketName": {
+      "Value": {
+        "Ref": "ArchiveBucket"
+      }
+    },
+    "WorkQueueUrl": {
+      "Value": {
+        "Ref": "WorkQueue"
+      }
+    },
+    "DeadLetterQueueUrl": {
+      "Value": {
+        "Ref": "DeadLetterQueue"
+      }
+    }
+  },
+  "Rules": {
+    "ValidTaskSize": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Or": [
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "TaskCpu"
+                      },
+                      "512"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "1024",
+                        "2048",
+                        "4096"
+                      ],
+                      {
+                        "Ref": "TaskMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "TaskCpu"
+                      },
+                      "1024"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "2048",
+                        "4096",
+                        "8192"
+                      ],
+                      {
+                        "Ref": "TaskMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "TaskCpu"
+                      },
+                      "2048"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "4096",
+                        "8192"
+                      ],
+                      {
+                        "Ref": "TaskMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "TaskCpu"
+                      },
+                      "4096"
+                    ]
+                  },
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "TaskMemory"
+                      },
+                      "8192"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Fargate CPU/memory combination must be valid"
+        }
+      ]
+    }
+  }
+}

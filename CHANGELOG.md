@@ -7,6 +7,16 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- A bounded, cursor-based operational transfer for referenced local/S3 archive
+  objects. It verifies and copies exact compressed evidence before atomically
+  repointing raw/import references, retains source backups and IDs, and resumes
+  after failures without provider refetches.
+- A private AWS CloudFormation foundation for encrypted PostgreSQL 18, retained
+  versioned S3 archives, SQS/DLQ, and zero-task ECS startup with separate migration
+  credentials. Includes verified RDS trust roots, restricted runtime-role
+  bootstrap, anonymous workload telemetry, and explicit-price cost estimates.
+  Provisioning and production verification remain operator steps.
+
 - Workspace-owned submissions, jobs, Mercure topics, immutable player working sets,
   and exact-input analysis result reuse, with server-bound service credentials.
 - Rich archive APIs for profile/resource history, game evidence, clock precision,
@@ -112,6 +122,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Changed
 
+- Local Compose stores compressed source objects in a persistent archive volume,
+  initialized for UID 10001 and mounted read-only in the API. Images include the
+  optional AWS SDK and pinned RDS CA bundle. Back up objects alongside PostgreSQL;
+  historical inline bodies move only through the offline relocation helper.
+
 - Game normalization prepares PGN evidence outside write transactions, commits
   each game's evidence and run attribution with its source checkpoint, and
   resumes remaining items after interruption. Account reconciliation takes
@@ -174,6 +189,13 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- CloudFormation rejects unsupported Fargate CPU/memory combinations, including
+  0.5 vCPU with 8 GiB, before creating task definitions.
+- Cloud role bootstrap works with non-superuser database owners such as RDS
+  masters, retaining unsafe-role refusal and runtime DDL restrictions while
+  rotating only permitted role attributes. Temporary-table creation is denied;
+  dedicated-database PUBLIC privilege assumptions are documented.
+
 - Archive relocation selects pending payloads through a partial ordered index
   and checks continuation without counting the entire remaining queue per batch.
   Its JSON result adds `has_more`; `remaining` is null while work remains unless
@@ -185,8 +207,8 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 - Object reuse rechecks publication and readback before relocation releases an
   inline backup, restoring missing objects and retaining inline evidence on
-  corruption. Archive settings currently apply to source-run clients and
-  operational helpers; the existing Compose stack continues inline storage.
+  corruption. Compose uses a persistent shared local object volume; source-run
+  clients and operational helpers require an explicit archive location.
 
 
 - Object publication and verification run before database write transactions,
