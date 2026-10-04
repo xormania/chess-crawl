@@ -224,7 +224,9 @@ def test_standalone_game_archive_304_refreshes_the_current_source(initialized_co
         provider="chess.com", endpoint_type="monthly_archive",
         request_url="https://api.chess.com/pub/player/alice/games/2024/02",
         canonical_source_key="chess.com/player/alice/games/2024/02",
-        body=chesscom_archive_body("checkmated"), fetched_at=200, media_type="application/json",
+        body=chesscom_archive_body("checkmated"),
+        fetched_at=read_raw_payload(conn, first.raw_payload_id).fetched_at + 1,
+        media_type="application/json",
     ))
     normalize_games_payload(conn, newer_raw)
     game_id = first.normalized_ids[0]

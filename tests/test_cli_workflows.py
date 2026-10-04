@@ -324,7 +324,8 @@ def test_cli_fresh_archive_rerun_query_export_and_provider_boundaries(tmp_path: 
     assert cli.run(["fetch", "games", "chess.com", "SameName", "--month", "2024-01", "--database-url", str(target_database_url)]) == 0
     second_chesscom_out = capsys.readouterr().out
     assert "HTTP status: 304" in second_chesscom_out
-    assert "not modified" in second_chesscom_out
+    assert "replayed raw" in second_chesscom_out
+    assert "Normalized rows: 1" in second_chesscom_out
 
     lichess_fetch = [
         "fetch",
