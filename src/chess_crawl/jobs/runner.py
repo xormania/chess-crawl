@@ -262,9 +262,13 @@ class JobRunner:
             # Storage or ownership loss is not a failed provider acquisition.
             raise
         except Exception as exc:
-            if job.kind == "reprocess_archive":
+            if job.kind == "reprocess_archive" and job.id is not None:
                 params = state.load_params(job.params_json)
-                fail_upgrade(self.conn, str(params.get("upgrade_id", job.target)), error=str(exc))
+                fail_upgrade(
+                    self.conn, str(params.get("upgrade_id", job.target)), job_id=job.id,
+                    provider=job.provider, owner_scope=str(params.get("owner_scope", "public")),
+                    error=str(exc),
+                )
             insert_error(
                 self.conn,
                 provider=job.provider,

@@ -53,10 +53,14 @@ def checkpoint_upgrade(conn: Connection, upgrade_id: str, raw_id: int, *, done: 
 
 
 @atomic
-def fail_upgrade(conn: Connection, upgrade_id: str, *, error: str) -> None:
+def fail_upgrade(
+    conn: Connection, upgrade_id: str, *, job_id: int, provider: str,
+    owner_scope: str, error: str,
+) -> None:
     conn.execute(
-        "UPDATE data_upgrades SET state='error',error=%s,updated_at=%s WHERE id=%s",
-        (error, int(time.time()), upgrade_id),
+        """UPDATE data_upgrades SET state='error',error=%s,updated_at=%s
+             WHERE id=%s AND job_id=%s AND provider=%s AND owner_scope=%s""",
+        (error, int(time.time()), upgrade_id, job_id, provider, owner_scope),
     )
 
 

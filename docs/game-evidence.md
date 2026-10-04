@@ -92,6 +92,12 @@ the recorded canonical state.
 the requested game revision, nodes, exact clock values, derived timing records,
 and provenance. Omitting a version selects the current revision. A version from
 another game is never returned.
+The complete revision, ordered evidence, timing calculations and provenance
+are selected with one PostgreSQL statement. PGN reconstruction uses that same
+snapshot and its ordered lexical records. A concurrent current-version switch
+or removal of an unreferenced version cannot split metadata from its evidence,
+even inside a caller's READ COMMITTED transaction. Standalone helper calls use
+the shared read-only transaction boundary and release it after success or error.
 
 `export_game_version_pgn` reconstructs notation from database tokens without
 reading the compressed source. Headers, comments, variations and unfamiliar

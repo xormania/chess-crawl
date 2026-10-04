@@ -135,6 +135,11 @@ class Worker:
                             count = self.queue_consumer.run_once(
                                 conn, lambda job_id: runner.run(max_jobs=1, job_id=job_id, resume_stale=True).claimed,
                             )
+                            # Queue delivery is a latency hint. Expired/DLQ'd
+                            # messages and temporarily unclaimable hints must
+                            # not strand durable pending database work.
+                            if not count:
+                                count = runner.run(max_jobs=1).claimed
                         claimed += count
                         if once:
                             break

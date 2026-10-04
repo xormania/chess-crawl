@@ -72,6 +72,8 @@ a per-receive override. Queue visibility is not a job lease; duplicate
 deliveries cannot claim an owned or completed job. Failed publication keeps its
 outbox entry for retry.
 A crash after send and before the outbox acknowledgement can deliver twice.
+Workers also poll PostgreSQL when a received hint cannot claim work or the queue
+is empty, so expired or dead-lettered hints do not strand pending jobs.
 
 The dispatcher sends only `job_id`. Pending continuations and delayed retries
 create new outbox entries in the same transaction as the job transition.
@@ -94,6 +96,8 @@ execution records a raw-payload high-water mark. Each successfully replayed
 payload advances a durable checkpoint; subsequent executions resume there.
 Only public source records and the selected workspace's scoped sources are
 included. Replay neither opens provider sockets nor fabricates fetch evidence.
+An upgrade identity belongs to its original job, provider, and owner scope.
+Rejected reuse preserves that job's progress and reports an error on the new job.
 
 Schema migrations contain DDL only. Remote enrichment/backfills are explicit
 `fetch_user_games` jobs using `collection_mode=backfill`; reading a report or

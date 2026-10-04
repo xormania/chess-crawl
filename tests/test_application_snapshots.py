@@ -54,9 +54,19 @@ def test_page_rows_count_and_freshness_share_one_snapshot(database_url: str, mon
         def add_game_after_page(*args, **kwargs):
             result = original(*args, **kwargs)
             seed_game(writer, provider="lichess", game_key="second", white="alice", black="carol")
+            raw_id = store_raw_payload(
+                writer,
+                RawRecord(
+                    provider="lichess", endpoint_type="user_games_stream",
+                    request_url="https://lichess.org/api/games/user/alice",
+                    canonical_source_key="lichess/games/alice/snapshot", fetched_at=123,
+                    body=b"{}\n", media_type="application/x-ndjson", owner_scope="public",
+                ),
+            )
             insert_fetch_log(
                 writer, provider="lichess", endpoint_type="user_games_stream",
                 url="https://lichess.org/api/games/user/alice", attempted_at=123, status_code=200,
+                raw_payload_id=raw_id,
             )
             return result
 
@@ -105,9 +115,18 @@ def test_freshness_includes_successful_revalidation_without_replacing_raw(initia
             conn, provider="lichess", endpoint_type="user_profile", url="https://lichess.org/api/user/alice",
             attempted_at=timestamp, status_code=status, raw_payload_id=raw_id if status in {200, 304} else None,
         )
+    chess_raw_id = store_raw_payload(
+        conn,
+        RawRecord(
+            provider="chess.com", endpoint_type="user_profile",
+            request_url="https://api.chess.com/pub/player/alice",
+            canonical_source_key="chess.com/user/alice", http_status=200, fetched_at=500,
+            body=b"{}", media_type="application/json", owner_scope="public",
+        ),
+    )
     insert_fetch_log(
         conn, provider="chess.com", endpoint_type="user_profile", url="https://api.chess.com/pub/player/alice",
-        attempted_at=500, status_code=200,
+        attempted_at=500, status_code=200, raw_payload_id=chess_raw_id,
     )
     lichess = application.list_users(conn, provider="lichess")["freshness"]
     assert lichess["last_checked_at"] == 200
