@@ -7,19 +7,24 @@ import hashlib
 import io
 import os
 import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from chess_crawl.providers.base import RawRecord
+from chess_crawl.ingest import _persist_response
 from chess_crawl.storage import archives, migrations
 from chess_crawl.storage.archives import (
-    read_archive_object, read_import_backup, relocate_raw_payloads, store_archive_object, store_import_backup,
+    prepare_archive_object, read_archive_object, read_import_backup, relocate_raw_payloads,
+    store_archive_object, store_import_backup,
 )
 from chess_crawl.storage.db import connection, require_row, transaction
 from chess_crawl.storage.object_store import LocalObjectStore, S3ObjectStore, configured_store, digest, object_key
 from chess_crawl.storage.raw import read_raw_payload, store_raw_payload
+from chess_crawl.storage.repository import upsert_provider_user
 
 
 def record(body: bytes = b'{"username":"alice"}') -> RawRecord:
@@ -89,9 +94,10 @@ def test_object_payload_reads_without_current_write_configuration(initialized_co
 def test_failed_database_commit_leaves_reusable_object(initialized_conn, tmp_path) -> None:
     conn = initialized_conn
     store = LocalObjectStore(str(tmp_path))
+    prepared = prepare_archive_object(record().body or b"", store=store)
     with pytest.raises(RuntimeError, match="abort"):
         with transaction(conn):
-            store_raw_payload(conn, record(), store=store)
+            store_raw_payload(conn, record(), store=store, prepared_object=prepared)
             raise RuntimeError("abort database commit")
     assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 0
     assert require_row(conn.execute("SELECT COUNT(*) FROM archive_objects"))[0] == 0
@@ -99,6 +105,108 @@ def test_failed_database_commit_leaves_reusable_object(initialized_conn, tmp_pat
     raw_id = store_raw_payload(conn, record(), store=store)
     assert read_raw_payload(conn, raw_id).body == record().body
     assert len(list(tmp_path.rglob("*.gz"))) == 1
+
+
+@pytest.mark.parametrize("operation", ["raw", "response", "import", "relocate"])
+def test_blocked_object_publication_does_not_block_database_writes(
+    database_url, tmp_path, monkeypatch, operation,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    store = LocalObjectStore(str(tmp_path))
+    original_put = LocalObjectStore.put
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_BACKEND", "local")
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_DIRECTORY", str(tmp_path))
+    if operation == "relocate":
+        monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_BACKEND", "database")
+        with connection(database_url, mode="rw") as conn:
+            store_raw_payload(conn, record())
+
+    def blocked_put(self, key, body):
+        entered.set()
+        if not release.wait(10):
+            raise TimeoutError("test publication release not signaled")
+        original_put(self, key, body)
+
+    monkeypatch.setattr(LocalObjectStore, "put", blocked_put)
+
+    def publish():
+        with connection(database_url, mode="rw") as conn:
+            if operation == "raw":
+                return store_raw_payload(conn, record(), store=store)
+            if operation == "response":
+                return _persist_response(conn, record(), job_id=None, crawl_run_id=None)
+            if operation == "import":
+                return store_import_backup(conn, b"PGN", workspace_id="a", source_name="game.pgn", store=store)
+            return relocate_raw_payloads(conn, store=store).moved
+
+    def mutate():
+        with connection(database_url, mode="rw") as conn:
+            return upsert_provider_user(conn, provider="lichess", username="independent")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        publication = executor.submit(publish)
+        try:
+            assert entered.wait(5)
+            mutation = executor.submit(mutate)
+            assert mutation.result(timeout=3) > 0
+            assert not publication.done()
+        finally:
+            release.set()
+        assert publication.result(timeout=10) > 0
+
+
+def test_external_writes_in_outer_transaction_require_preparation(initialized_conn, tmp_path, monkeypatch) -> None:
+    conn = initialized_conn
+    store = LocalObjectStore(str(tmp_path))
+
+    def forbidden_put(self, key, body):
+        pytest.fail("External I/O must never run inside a caller-owned transaction")
+
+    monkeypatch.setattr(LocalObjectStore, "put", forbidden_put)
+    with transaction(conn):
+        with pytest.raises(ValueError, match="prepared object"):
+            store_raw_payload(conn, record(), store=store)
+        with pytest.raises(ValueError, match="prepared object"):
+            store_archive_object(conn, b"PGN", store=store)
+        with pytest.raises(ValueError, match="prepared object"):
+            store_import_backup(conn, b"PGN", workspace_id="a", source_name="game.pgn", store=store)
+    assert require_row(conn.execute("SELECT COUNT(*) FROM archive_objects"))[0] == 0
+
+
+def test_existing_raw_payload_deduplication_avoids_object_io(initialized_conn, tmp_path, monkeypatch) -> None:
+    conn = initialized_conn
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_BACKEND", "local")
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_DIRECTORY", str(tmp_path))
+    raw_id = _persist_response(conn, record(), job_id=None, crawl_run_id=None)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Deduplicated source must not re-upload or download objects")
+
+    monkeypatch.setattr(LocalObjectStore, "put", forbidden)
+    monkeypatch.setattr(LocalObjectStore, "read", forbidden)
+    assert _persist_response(conn, record(), job_id=None, crawl_run_id=None) == raw_id
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == 2
+
+
+def test_verified_shared_objects_are_reused_across_imports_and_sources(initialized_conn, tmp_path, monkeypatch) -> None:
+    conn = initialized_conn
+    store = LocalObjectStore(str(tmp_path))
+    body = b"shared evidence"
+    archive_id = store_archive_object(conn, body, store=store)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Previously registered immutable objects must not perform duplicate I/O")
+
+    monkeypatch.setattr(LocalObjectStore, "put", forbidden)
+    monkeypatch.setattr(LocalObjectStore, "read", forbidden)
+    assert store_archive_object(conn, body, store=store) == archive_id
+    store_import_backup(conn, body, workspace_id="a", source_name="study.pgn", store=store)
+    store_import_backup(conn, body, workspace_id="b", source_name="study.pgn", store=store)
+    store_raw_payload(conn, record(body), store=store)
+    assert require_row(conn.execute("SELECT COUNT(*) FROM archive_objects"))[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM archive_imports"))[0] == 2
 
 
 def test_failed_publication_never_releases_inline_body(initialized_conn, tmp_path, monkeypatch) -> None:

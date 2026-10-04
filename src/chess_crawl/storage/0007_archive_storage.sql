@@ -12,6 +12,7 @@ CREATE TABLE archive_objects (
   created_at BIGINT NOT NULL,
   UNIQUE (backend, location, object_key)
 );
+CREATE INDEX ix_archive_body_identity ON archive_objects(backend, location, body_hash, body_bytes);
 
 ALTER TABLE raw_payloads ALTER COLUMN raw_body DROP NOT NULL;
 ALTER TABLE raw_payloads ADD COLUMN archive_object_id BIGINT REFERENCES archive_objects(id);

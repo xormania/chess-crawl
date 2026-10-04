@@ -10,8 +10,19 @@ from chess_crawl.storage.db import Connection, atomic, require_row
 from chess_crawl.storage.object_store import ObjectStore, digest, object_key, store_for_reference
 
 
-@atomic
-def store_archive_object(conn: Connection, body: bytes, *, store: ObjectStore) -> int:
+@dataclass(frozen=True)
+class PreparedArchiveObject:
+    """Verified immutable publication prepared without a database transaction."""
+    backend: str
+    location: str
+    object_key: str
+    body_hash: str
+    stored_hash: str
+    body_bytes: int
+    stored_bytes: int
+
+
+def prepare_archive_object(body: bytes, *, store: ObjectStore) -> PreparedArchiveObject:
     body_hash = digest(body)
     encoded = gzip.compress(body, mtime=0)
     stored_hash = digest(encoded)
@@ -23,22 +34,62 @@ def store_archive_object(conn: Connection, body: bytes, *, store: ObjectStore) -
     store.put(key, encoded)
     if digest(store.read(key, expected_size=len(encoded))) != stored_hash:
         raise ValueError("Published archive object checksum mismatch")
+    return PreparedArchiveObject(
+        store.backend, store.location, key, body_hash, stored_hash, len(body), len(encoded),
+    )
+
+
+def prepare_or_reuse_archive_object(conn: Connection, body: bytes, *, store: ObjectStore) -> PreparedArchiveObject:
+    """Reuse a previously verified registration without contacting its backend."""
+    if conn.in_transaction:
+        raise ValueError("External archive writes in a transaction require a prepared object")
+    existing = conn.execute(
+        """SELECT * FROM archive_objects WHERE backend=%s AND location=%s AND body_hash=%s
+             AND body_bytes=%s ORDER BY id LIMIT 1""",
+        (store.backend, store.location, digest(body), len(body)),
+    ).fetchone()
+    if existing is not None:
+        return PreparedArchiveObject(
+            existing["backend"], existing["location"], existing["object_key"], existing["body_hash"],
+            existing["stored_hash"], int(existing["body_bytes"]), int(existing["stored_bytes"]),
+        )
+    return prepare_archive_object(body, store=store)
+
+
+def store_archive_object(
+    conn: Connection, body: bytes, *, store: ObjectStore, prepared_object: PreparedArchiveObject | None = None,
+) -> int:
+    if prepared_object is None:
+        if conn.in_transaction:
+            raise ValueError("External archive writes in a transaction require a prepared object")
+        prepared_object = prepare_or_reuse_archive_object(conn, body, store=store)
+    if prepared_object.body_hash != digest(body) or prepared_object.body_bytes != len(body):
+        raise ValueError("Prepared archive object does not match supplied source bytes")
+    if (prepared_object.backend, prepared_object.location) != (store.backend, store.location):
+        raise ValueError("Prepared archive object does not match the selected store")
+    return register_archive_object(conn, prepared_object)
+
+
+@atomic
+def register_archive_object(conn: Connection, prepared: PreparedArchiveObject) -> int:
+    """Publish only SQL metadata; preparation must already have verified bytes."""
     row = conn.execute(
         """INSERT INTO archive_objects(
              backend, location, object_key, body_hash, stored_hash, compression,
              body_bytes, stored_bytes, created_at)
            VALUES (%s, %s, %s, %s, %s, 'gzip', %s, %s, %s)
            ON CONFLICT (backend, location, object_key) DO NOTHING RETURNING id""",
-        (store.backend, store.location, key, body_hash, stored_hash, len(body), len(encoded), int(time.time())),
+        (prepared.backend, prepared.location, prepared.object_key, prepared.body_hash, prepared.stored_hash,
+         prepared.body_bytes, prepared.stored_bytes, int(time.time())),
     ).fetchone()
     if row is not None:
         return int(row["id"])
     existing = require_row(conn.execute(
         "SELECT * FROM archive_objects WHERE backend=%s AND location=%s AND object_key=%s",
-        (store.backend, store.location, key),
+        (prepared.backend, prepared.location, prepared.object_key),
     ))
     if (existing["body_hash"], existing["stored_hash"], existing["body_bytes"], existing["stored_bytes"]) != (
-        body_hash, stored_hash, len(body), len(encoded),
+        prepared.body_hash, prepared.stored_hash, prepared.body_bytes, prepared.stored_bytes,
     ):
         raise ValueError("Archive object reference conflicts with published bytes")
     return int(existing["id"])
@@ -62,16 +113,35 @@ def read_archive_object(conn: Connection, archive_object_id: int, *, store: Obje
     return body
 
 
-@atomic
 def store_import_backup(
     conn: Connection, body: bytes, *, workspace_id: str, source_name: str, store: ObjectStore,
     media_type: str = "application/x-chess-pgn", captured_at: int | None = None,
+    prepared_object: PreparedArchiveObject | None = None,
 ) -> int:
     """Retain import evidence before parsing within an explicit workspace."""
     _validate_workspace(workspace_id)
     if not source_name or not media_type:
         raise ValueError("Import source name and media type are required")
-    archive_id = store_archive_object(conn, body, store=store)
+    if prepared_object is None:
+        if conn.in_transaction:
+            raise ValueError("External archive writes in a transaction require a prepared object")
+        prepared_object = prepare_or_reuse_archive_object(conn, body, store=store)
+    if prepared_object.body_hash != digest(body) or prepared_object.body_bytes != len(body):
+        raise ValueError("Prepared archive object does not match supplied source bytes")
+    if (prepared_object.backend, prepared_object.location) != (store.backend, store.location):
+        raise ValueError("Prepared archive object does not match the selected store")
+    return _register_import(
+        conn, prepared_object, workspace_id=workspace_id, source_name=source_name,
+        media_type=media_type, captured_at=captured_at,
+    )
+
+
+@atomic
+def _register_import(
+    conn: Connection, prepared: PreparedArchiveObject, *, workspace_id: str, source_name: str,
+    media_type: str, captured_at: int | None,
+) -> int:
+    archive_id = register_archive_object(conn, prepared)
     row = require_row(conn.execute(
         """INSERT INTO archive_imports(archive_object_id, workspace_id, source_name, media_type, captured_at)
            VALUES (%s, %s, %s, %s, %s) RETURNING id""",
@@ -132,15 +202,27 @@ def relocate_raw_payloads(conn: Connection, *, store: ObjectStore, batch_size: i
     return RelocationResult(moved, remaining)
 
 
-@atomic
 def _relocate_payload(conn: Connection, raw_id: int, *, store: ObjectStore) -> int:
     from chess_crawl.storage.raw import read_raw_payload
 
-    row = require_row(conn.execute("SELECT archive_object_id FROM raw_payloads WHERE id=%s FOR UPDATE", (raw_id,)))
+    row = require_row(conn.execute("SELECT archive_object_id FROM raw_payloads WHERE id=%s", (raw_id,)))
     if row["archive_object_id"] is not None:
         return 0
     payload = read_raw_payload(conn, raw_id)
-    archive_id = store_archive_object(conn, payload.body, store=store)
+    prepared = prepare_or_reuse_archive_object(conn, payload.body, store=store)
+    return _register_relocated_payload(conn, raw_id, prepared)
+
+
+@atomic
+def _register_relocated_payload(conn: Connection, raw_id: int, prepared: PreparedArchiveObject) -> int:
+    row = require_row(conn.execute(
+        "SELECT archive_object_id, body_hash, body_bytes FROM raw_payloads WHERE id=%s FOR UPDATE", (raw_id,),
+    ))
+    if row["archive_object_id"] is not None:
+        return 0
+    if row["body_hash"] != prepared.body_hash or row["body_bytes"] != prepared.body_bytes:
+        raise ValueError("Raw source changed during archive relocation")
+    archive_id = register_archive_object(conn, prepared)
     # The last durable inline copy is only released after verified object reads.
     conn.execute(
         "UPDATE raw_payloads SET raw_body=NULL, archive_object_id=%s, body_compression='gzip' WHERE id=%s",

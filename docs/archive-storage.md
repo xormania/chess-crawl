@@ -73,6 +73,15 @@ verification leaves the inline body intact. A later failed database commit may
 leave an unreferenced object. Retrying reuses it. Never automatically delete that
 object: another transaction may already reference the same immutable bytes.
 
+Compression, object publication, and readback verification run before acquiring
+database write locks. Only reference registration is transactional. Raw responses
+are prepared before the transaction that also records their fetch evidence;
+already stored responses skip object I/O. Code that owns an outer transaction
+must call `prepare_archive_object()` beforehand and pass its verified
+`prepared_object` to the storage helper. Unprepared external writes inside an
+existing transaction are rejected, preserving rollback semantics without holding
+database locks across storage calls.
+
 ## Integrity, recovery, and imports
 
 Both encoded-object and original-body checksums and byte counts are recorded.

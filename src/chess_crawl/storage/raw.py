@@ -5,13 +5,16 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 from chess_crawl.storage.db import Connection, atomic
 from chess_crawl.providers.base import RawRecord
-from chess_crawl.storage.archives import read_archive_object, store_archive_object
+from chess_crawl.storage.archives import (
+    PreparedArchiveObject, prepare_or_reuse_archive_object, read_archive_object, register_archive_object,
+)
 from chess_crawl.storage.object_store import ObjectStore, configured_store
 
 
@@ -40,7 +43,6 @@ def compute_body_hash(body: bytes) -> str:
     return "sha256:" + hashlib.sha256(body).hexdigest()
 
 
-@atomic
 def store_raw_payload(
     conn: Connection,
     record: RawRecord,
@@ -48,13 +50,31 @@ def store_raw_payload(
     parser_version: str | None = None,
     normalization_status: str = "pending",
     store: ObjectStore | None = None,
+    prepared_object: PreparedArchiveObject | None = None,
 ) -> int:
+    external_expected = store is not None or os.getenv("CHESS_CRAWL_ARCHIVE_BACKEND", "database") != "database"
+    if prepared_object is None:
+        prepared_object = prepare_raw_payload(conn, record, store=store)
+    if prepared_object is not None and store is not None and (
+        prepared_object.backend, prepared_object.location,
+    ) != (store.backend, store.location):
+        raise ValueError("Prepared archive object does not match the selected store")
+    return _store_raw_payload(
+        conn, record, parser_version=parser_version, normalization_status=normalization_status,
+        prepared_object=prepared_object, external_expected=external_expected,
+    )
+
+
+def _body_hash(record: RawRecord) -> str:
     if record.body is None:
         raise ValueError("raw payload storage requires body bytes")
-
     body_hash = compute_body_hash(record.body)
     if record.body_hash is not None and record.body_hash != body_hash:
         raise ValueError("Supplied raw payload body hash does not match its bytes")
+    return body_hash
+
+
+def _existing_payload(conn: Connection, record: RawRecord, body_hash: str) -> int | None:
     existing = conn.execute(
         """
         SELECT id FROM raw_payloads
@@ -65,14 +85,50 @@ def store_raw_payload(
     ).fetchone()
     if existing is not None:
         return int(existing["id"])
+    return None
 
+
+def prepare_raw_payload(
+    conn: Connection, record: RawRecord, *, store: ObjectStore | None = None,
+) -> PreparedArchiveObject | None:
+    """Avoid duplicate object I/O and publish new bodies before taking write locks."""
+    body_hash = _body_hash(record)
+    if _existing_payload(conn, record, body_hash) is not None:
+        return None
+    external_expected = store is not None or os.getenv("CHESS_CRAWL_ARCHIVE_BACKEND", "database") != "database"
+    if external_expected and conn.in_transaction:
+        raise ValueError("External archive writes in a transaction require a prepared object")
     selected_store = store or configured_store()
-    archive_id = None
     if selected_store is None:
+        return None
+    if record.body is None:
+        raise ValueError("raw payload storage requires body bytes")
+    return prepare_or_reuse_archive_object(conn, record.body, store=selected_store)
+
+
+@atomic
+def _store_raw_payload(
+    conn: Connection, record: RawRecord, *, parser_version: str | None,
+    normalization_status: str, prepared_object: PreparedArchiveObject | None,
+    external_expected: bool,
+) -> int:
+    body_hash = _body_hash(record)
+    existing = _existing_payload(conn, record, body_hash)
+    if existing is not None:
+        return existing
+    if record.body is None:
+        raise ValueError("raw payload storage requires body bytes")
+
+    archive_id = None
+    if prepared_object is None:
+        if external_expected:
+            raise ValueError("External archive writes in a transaction require a prepared object")
         compression, inline_body = _encode_body(record.body)
         stored_body: bytes | None = inline_body
     else:
-        archive_id = store_archive_object(conn, record.body, store=selected_store)
+        if prepared_object.body_hash != body_hash or prepared_object.body_bytes != len(record.body):
+            raise ValueError("Prepared archive object does not match supplied source bytes")
+        archive_id = register_archive_object(conn, prepared_object)
         compression, stored_body = "gzip", None
     response_headers = dict(record.response_headers)
     if record.etag is not None:
