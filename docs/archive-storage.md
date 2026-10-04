@@ -72,7 +72,13 @@ the destination. Run the operational helper against the selected archive:
 uv run python -m chess_crawl.storage.archive_migration --batch-size 100
 ```
 
-Each call prints `moved` and `remaining`. Repeat until `remaining` is zero. It
+Each call prints `moved`, `has_more`, and `remaining`. Repeat until `has_more`
+is false. By default, `remaining` is null when more work exists and zero when
+complete: the helper checks for one pending entry rather than counting the
+entire queue on every batch. Pass `--count-remaining` to request an exact count;
+that additional reporting scan is intentionally outside the bounded-work claim.
+The pending-entry partial index orders inline payload IDs without scanning the
+already completed prefix. The helper
 processes only inline bodies and commits each payload separately. A stopped or
 failed run resumes by selecting bodies that still remain inline; no provider
 requests occur. It is separate from SQL migration versions and must not be run

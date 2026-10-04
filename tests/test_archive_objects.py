@@ -272,7 +272,7 @@ def test_partial_relocation_resumes_without_provider_calls(initialized_conn, tmp
         relocate_raw_payloads(conn, store=store)
     assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads WHERE archive_object_id IS NOT NULL"))[0] == 1
     monkeypatch.setattr(LocalObjectStore, "put", original_put)
-    result = relocate_raw_payloads(conn, store=store, batch_size=1)
+    result = relocate_raw_payloads(conn, store=store, batch_size=1, count_remaining=True)
     assert (result.moved, result.remaining) == (1, 1)
     result = relocate_raw_payloads(conn, store=store)
     assert (result.moved, result.remaining) == (1, 0)

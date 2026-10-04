@@ -97,6 +97,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Archive relocation selects pending payloads through a partial ordered index
+  and checks continuation without counting the entire remaining queue per batch.
+  Its JSON result adds `has_more`; `remaining` is null while work remains unless
+  `--count-remaining` explicitly requests an exact reporting scan.
+
 - Configured local archival requires an explicit absolute directory and rejects
   missing, blank, or relative locations, preventing source-run processes from
   silently selecting different archives based on their working directory.

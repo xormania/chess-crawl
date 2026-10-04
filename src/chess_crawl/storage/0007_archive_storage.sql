@@ -19,6 +19,7 @@ ALTER TABLE raw_payloads ADD CONSTRAINT raw_payload_body_location
   CHECK ((raw_body IS NOT NULL AND archive_object_id IS NULL)
       OR (raw_body IS NULL AND archive_object_id IS NOT NULL));
 CREATE INDEX ix_raw_archive_object ON raw_payloads(archive_object_id);
+CREATE INDEX ix_raw_inline_relocation ON raw_payloads(id) WHERE archive_object_id IS NULL;
 
 -- Import evidence is independent of whether parsing subsequently succeeds.
 CREATE TABLE archive_imports (

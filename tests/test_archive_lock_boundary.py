@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import pytest
+import json
 
 from chess_crawl.ingest import _persist_response
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage.archives import (
     prepare_archive_object, read_import_backup, relocate_raw_payloads, store_archive_object, store_import_backup,
 )
-from chess_crawl.storage.db import connection, require_row, transaction
+from chess_crawl.storage.db import Connection, connection, require_row, transaction
 from chess_crawl.storage.object_store import LocalObjectStore
 from chess_crawl.storage.raw import prepare_raw_payload, read_raw_payload, store_raw_payload
 
@@ -209,3 +210,86 @@ def test_relocation_reverifies_registered_object_before_releasing_inline_copy(
         assert row["raw_body"] == original.body
         assert row["archive_object_id"] is None
     assert read_raw_payload(conn, inline_id).body == original.body
+
+
+def test_relocation_selection_work_is_bounded_after_a_large_completed_prefix(initialized_conn, tmp_path) -> None:
+    conn = initialized_conn
+    body = b"evidence"
+    archive_id = store_archive_object(conn, body, store=LocalObjectStore(str(tmp_path)))
+    from chess_crawl.storage.raw import compute_body_hash
+
+    with transaction(conn):
+        conn.execute(
+            """INSERT INTO raw_payloads(provider, endpoint_type, canonical_source_key, fetched_at, response_status,
+                 body_hash, body_compression, raw_body, body_bytes, archive_object_id)
+               SELECT 'lichess', 'user_profile', 'completed-' || n, 123, 200, %s, 'gzip', NULL, %s, %s
+                 FROM generate_series(1, 10000) AS n""",
+            (compute_body_hash(body), len(body), archive_id),
+        )
+        conn.execute(
+            """INSERT INTO raw_payloads(provider, endpoint_type, canonical_source_key, fetched_at, response_status,
+                 body_hash, body_compression, raw_body, body_bytes)
+               SELECT 'lichess', 'user_profile', 'pending-' || n, 123, 200, %s, 'none', %s, %s
+                 FROM generate_series(1, 20) AS n""",
+            (compute_body_hash(body), body, len(body)),
+        )
+    conn.execute("ANALYZE raw_payloads")
+    plan = require_row(conn.execute(
+        "EXPLAIN (ANALYZE, FORMAT JSON) SELECT id FROM raw_payloads WHERE archive_object_id IS NULL ORDER BY id LIMIT 2",
+    ))[0][0]["Plan"]
+
+    def scanned_rows(node):
+        here = node["Actual Rows"] + node.get("Rows Removed by Filter", 0) if "Scan" in node["Node Type"] else 0
+        return here + sum(scanned_rows(child) for child in node.get("Plans", []))
+
+    assert scanned_rows(plan) <= 2, plan
+
+
+def test_relocation_default_continuation_avoids_full_count(initialized_conn, tmp_path, monkeypatch) -> None:
+    conn = initialized_conn
+    for number in range(3):
+        store_raw_payload(conn, RawRecord(
+            provider="lichess", endpoint_type="user_profile", canonical_source_key=f"batch-{number}",
+            body=b"evidence", request_url="https://lichess.org/api/user/alice",
+        ))
+    commands: list[str] = []
+    original = Connection.execute
+
+    def execute(self, query, params=None, **kwargs):
+        if self is conn and isinstance(query, str):
+            commands.append(query)
+        return original(self, query, params, **kwargs)
+
+    monkeypatch.setattr(Connection, "execute", execute)
+    store = LocalObjectStore(str(tmp_path))
+    first = relocate_raw_payloads(conn, store=store, batch_size=1)
+    assert (first.moved, first.has_more, first.remaining) == (1, True, None)
+    assert not any("COUNT(*)" in command for command in commands)
+    commands.clear()
+    counted = relocate_raw_payloads(conn, store=store, batch_size=1, count_remaining=True)
+    assert (counted.moved, counted.has_more, counted.remaining) == (1, True, 1)
+    assert any("COUNT(*)" in command for command in commands)
+    commands.clear()
+    last = relocate_raw_payloads(conn, store=store, batch_size=1)
+    assert (last.moved, last.has_more, last.remaining) == (1, False, 0)
+    assert not any("COUNT(*)" in command for command in commands)
+
+
+def test_relocation_entrypoint_exposes_continuation_and_optional_count(database_url, tmp_path, monkeypatch, capsys):
+    from chess_crawl.storage.archive_migration import main
+
+    with connection(database_url, mode="rw") as conn:
+        for number in range(3):
+            store_raw_payload(conn, RawRecord(
+                provider="lichess", endpoint_type="user_profile", canonical_source_key=f"cli-{number}",
+                body=b"evidence", request_url="https://lichess.org/api/user/alice",
+            ))
+    monkeypatch.setenv("CHESS_CRAWL_DATABASE_URL", database_url)
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_BACKEND", "local")
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_DIRECTORY", str(tmp_path))
+    assert main(["--batch-size", "1"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"moved": 1, "has_more": True, "remaining": None}
+    assert main(["--batch-size", "1", "--count-remaining"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"moved": 1, "has_more": True, "remaining": 1}
+    assert main(["--batch-size", "1"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"moved": 1, "has_more": False, "remaining": 0}

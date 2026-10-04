@@ -13,12 +13,18 @@ from chess_crawl.storage.object_store import configured_store
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Relocate a bounded batch of archived bodies")
     parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument(
+        "--count-remaining", action="store_true",
+        help="Compute an exact remaining count (scans all pending entries)",
+    )
     args = parser.parse_args(argv)
     store = configured_store()
     if store is None:
         parser.error("Select a local or s3 CHESS_CRAWL_ARCHIVE_BACKEND")
     with open_database(database_url(), writable=True) as conn:
-        result = relocate_raw_payloads(conn, store=store, batch_size=args.batch_size)
+        result = relocate_raw_payloads(
+            conn, store=store, batch_size=args.batch_size, count_remaining=args.count_remaining,
+        )
     print(json.dumps(asdict(result), sort_keys=True))
     return 0
 

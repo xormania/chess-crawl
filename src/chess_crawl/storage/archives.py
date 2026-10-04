@@ -177,10 +177,13 @@ def read_import_backup(conn: Connection, import_id: int, *, workspace_id: str) -
 @dataclass(frozen=True)
 class RelocationResult:
     moved: int
-    remaining: int
+    remaining: int | None
+    has_more: bool
 
 
-def relocate_raw_payloads(conn: Connection, *, store: ObjectStore, batch_size: int = 100) -> RelocationResult:
+def relocate_raw_payloads(
+    conn: Connection, *, store: ObjectStore, batch_size: int = 100, count_remaining: bool = False,
+) -> RelocationResult:
     """Commit each body separately; rerunning skips completed rows without a cursor."""
     if type(batch_size) is not int or not 1 <= batch_size <= 10000:
         raise ValueError("Archive relocation batch size must be between 1 and 10000")
@@ -190,10 +193,15 @@ def relocate_raw_payloads(conn: Connection, *, store: ObjectStore, batch_size: i
         "SELECT id FROM raw_payloads WHERE archive_object_id IS NULL ORDER BY id LIMIT %s", (batch_size,),
     ))
     moved = sum(_relocate_payload(conn, int(row["id"]), store=store) for row in rows)
-    remaining = int(require_row(conn.execute(
-        "SELECT COUNT(*) FROM raw_payloads WHERE archive_object_id IS NULL",
-    ))[0])
-    return RelocationResult(moved, remaining)
+    if count_remaining:
+        remaining = int(require_row(conn.execute(
+            "SELECT COUNT(*) FROM raw_payloads WHERE archive_object_id IS NULL",
+        ))[0])
+        return RelocationResult(moved, remaining, remaining > 0)
+    has_more = conn.execute(
+        "SELECT id FROM raw_payloads WHERE archive_object_id IS NULL ORDER BY id LIMIT 1",
+    ).fetchone() is not None
+    return RelocationResult(moved, None if has_more else 0, has_more)
 
 
 def _relocate_payload(conn: Connection, raw_id: int, *, store: ObjectStore) -> int:
