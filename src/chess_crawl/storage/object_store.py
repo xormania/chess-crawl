@@ -150,8 +150,13 @@ def configured_store() -> ObjectStore | None:
     if backend == "database":
         return None
     if backend == "local":
-        directory = str(Path(os.getenv("CHESS_CRAWL_ARCHIVE_DIRECTORY", "data/archive")).expanduser().resolve())
-        return store_for_reference("local", directory)
+        directory = os.getenv("CHESS_CRAWL_ARCHIVE_DIRECTORY")
+        if directory is None or not directory.strip():
+            raise ValueError("Local archival requires an explicit CHESS_CRAWL_ARCHIVE_DIRECTORY")
+        path = Path(directory).expanduser()
+        if not path.is_absolute():
+            raise ValueError("CHESS_CRAWL_ARCHIVE_DIRECTORY must be an absolute path")
+        return store_for_reference("local", str(path.resolve()))
     if backend == "s3":
         return store_for_reference("s3", os.getenv("CHESS_CRAWL_ARCHIVE_S3_BUCKET", ""))
     raise ValueError("CHESS_CRAWL_ARCHIVE_BACKEND must be database, local, or s3")

@@ -26,6 +26,10 @@ export CHESS_CRAWL_ARCHIVE_BACKEND=local
 export CHESS_CRAWL_ARCHIVE_DIRECTORY=/absolute/durable/path/archive
 ```
 
+Local mode requires `CHESS_CRAWL_ARCHIVE_DIRECTORY` to be nonempty and absolute
+(after optional home-directory expansion). Missing or relative settings fail
+explicitly; the process working directory never selects the configured archive.
+
 The directory must be persistent, privately writable by the service, and mounted
 at the same absolute path for every reader and worker. Local objects use private
 file permissions, filesystem synchronization, and atomic publication that refuses

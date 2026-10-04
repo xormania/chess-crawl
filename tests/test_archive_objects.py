@@ -439,3 +439,27 @@ def test_archive_configuration_is_local_by_default_and_never_includes_credential
     monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_BACKEND", "other")
     with pytest.raises(ValueError, match="database, local, or s3"):
         configured_store()
+
+
+@pytest.mark.parametrize("directory", [None, "", "  ", "relative/archive"])
+def test_local_archive_configuration_requires_explicit_absolute_directory(tmp_path, monkeypatch, directory) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_BACKEND", "local")
+    if directory is None:
+        monkeypatch.delenv("CHESS_CRAWL_ARCHIVE_DIRECTORY", raising=False)
+    else:
+        monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_DIRECTORY", directory)
+    with pytest.raises(ValueError, match="CHESS_CRAWL_ARCHIVE_DIRECTORY"):
+        configured_store()
+    assert not (tmp_path / "data").exists()
+
+
+def test_local_archive_configuration_uses_same_location_after_chdir(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "durable-archive"
+    elsewhere = tmp_path / "other-process-directory"
+    elsewhere.mkdir()
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_BACKEND", "local")
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_DIRECTORY", str(root))
+    first = configured_store()
+    monkeypatch.chdir(elsewhere)
+    assert configured_store() == first == LocalObjectStore(str(root))

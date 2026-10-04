@@ -97,6 +97,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Configured local archival requires an explicit absolute directory and rejects
+  missing, blank, or relative locations, preventing source-run processes from
+  silently selecting different archives based on their working directory.
+
 - Object reuse rechecks publication and readback before relocation releases an
   inline backup, restoring missing objects and retaining inline evidence on
   corruption. Archive settings currently apply to source-run clients and
