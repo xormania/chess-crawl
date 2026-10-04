@@ -28,7 +28,7 @@ def parse_user_profile(body: bytes) -> NormalizedUser:
         created_at=_int_or_none(data.get("joined")),
         last_seen_at=_int_or_none(data.get("last_online")),
         country=data.get("country"),
-        is_verified=_bool_or_none(data.get("is_verified")),
+        is_verified=_bool_or_none(data.get("verified", data.get("is_verified"))),
     )
 
 
@@ -74,6 +74,7 @@ def parse_game(game: dict[str, Any]) -> NormalizedGame:
         opening_name=None,
         opening_ply=None,
         pgn=_str_or_none(game.get("pgn")),
+        source_data=game,
     )
 
 

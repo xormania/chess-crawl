@@ -66,6 +66,8 @@ class HttpClient:
         self._stop_requested = stop_requested or (lambda: False)
         self._last_request_at: float | None = None
         self._not_before: float = 0
+        self.before_request: Callable[[], None] | None = None
+        self.persist_deadline: Callable[[float, str], None] | None = None
         self._client = httpx.Client(
             timeout=timeout_s,
             transport=transport,
@@ -94,6 +96,8 @@ class HttpClient:
 
         last_result: HttpFetchResult | None = None
         for attempt_number in range(1, max_attempts + 1):
+            if self.before_request is not None:
+                self.before_request()
             if not self._stop_requested():
                 self._respect_serial_delay()
             if self._stop_requested():
@@ -147,9 +151,13 @@ class HttpClient:
 
             status = last_result.status_code
             if status not in {0, 429} and not 500 <= status <= 599:
+                if self.persist_deadline is not None:
+                    self.persist_deadline(self._clock() + self.policy.min_delay_s, "provider request pacing")
                 return last_result
             delay = self._retry_delay(status, retry_after, attempt_number)
             self._not_before = self._clock() + delay
+            if self.persist_deadline is not None:
+                self.persist_deadline(self._not_before, f"HTTP {status} backoff")
             if attempt_number == max_attempts or self._stop_requested():
                 return last_result
             self._sleeper(delay)

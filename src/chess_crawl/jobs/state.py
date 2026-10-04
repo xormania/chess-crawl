@@ -5,13 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from chess_crawl.jobs.models import DiscoveryJob, EnqueueResult, JOB_KINDS, JobKind, JobState
-from chess_crawl.jobs.locking import ExecutorLease, executor_lock
+from chess_crawl.jobs.models import DiscoveryJob, EnqueueResult, JOB_KINDS, JobKind, JobState, PROCESSING_JOB_KINDS
+from chess_crawl.jobs.locking import ExecutorLease, parallel_executor_lock
 from chess_crawl.jobs.settings import WorkerSettings
-from chess_crawl.storage.db import Connection, Row, atomic, require_row
+from chess_crawl.storage.db import (
+    Connection, Row, atomic, require_row, operation_lock, lock_key,
+    acquire_lock_key, release_lock_key, owns_lock_key,
+)
 from chess_crawl.storage.discovery import discovery_edge_count
 
 
@@ -83,6 +87,7 @@ def enqueue_job(
         params=params,
         crawl_run_id=crawl_run_id,
     )
+    operation_lock(conn, "job-dedup", dedup)
     existing = conn.execute(
         """
         SELECT id FROM discovery_jobs
@@ -133,43 +138,85 @@ def _validate_schedulable_job(*, provider: str, kind: str) -> None:
 
 @atomic
 def claim_next_job(
-    conn: Connection,
-    *,
-    crawl_run_id: int | None = None,
-    now: float | None = None,
+    conn: Connection, *, crawl_run_id: int | None = None,
+    now: float | None = None, worker_id: str | None = None,
+    job_id: int | None = None, stage: str = "all",
 ) -> DiscoveryJob | None:
+    """Claim row and session ownership together; duplicate delivery is harmless."""
+    if stage not in {"all", "acquisition", "processing"}:
+        raise ValueError("stage must be all, acquisition, or processing")
     timestamp = time.time() if now is None else now
-    row = conn.execute(
-        f"""
-        UPDATE discovery_jobs
-           SET state = 'in_progress',
-               started_at = %s,
-               attempts = attempts + 1,
-               reason = NULL,
-               done_at = NULL,
-               next_attempt_at = NULL
-         WHERE id = (
-           SELECT id
-             FROM discovery_jobs
-            WHERE (state = 'pending' OR (state = 'blocked' AND next_attempt_at IS NOT NULL))
-              AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
-              AND NOT EXISTS (
-                  SELECT 1 FROM provider_cooldowns
-                   WHERE provider_cooldowns.provider = discovery_jobs.provider
-                     AND provider_cooldowns.not_before > %s
-              )
-              AND (%s::bigint IS NULL OR crawl_run_id = %s)
-              AND {_RUN_ALLOWS_WORK}
-            ORDER BY priority ASC, depth ASC, enqueued_at ASC NULLS FIRST, id ASC
-            LIMIT 1
-         )
-         RETURNING id
-        """,  # nosec B608 # Only the fixed _RUN_ALLOWS_WORK fragment is interpolated; values are bound.
-        (int(timestamp), timestamp, timestamp, crawl_run_id, crawl_run_id),
-    ).fetchone()
-    # Read the persisted job snapshot while this operation still owns the
-    # transaction and its archive write lock.
-    return None if row is None else get_job(conn, int(row["id"]))
+    processing = PROCESSING_JOB_KINDS
+    excluded_providers: list[str] = []
+    while True:
+        exclusions_before = len(excluded_providers)
+        candidates = conn.execute(
+            f"""SELECT id,provider,kind FROM discovery_jobs
+                 WHERE (state='pending' OR (state='blocked' AND next_attempt_at IS NOT NULL))
+                   AND (next_attempt_at IS NULL OR next_attempt_at<=%s)
+                   AND (%s::bigint IS NULL OR crawl_run_id=%s)
+                   AND (%s::bigint IS NULL OR id=%s)
+                   AND (%s='all' OR (%s='processing' AND kind=ANY(%s))
+                        OR (%s='acquisition' AND NOT kind=ANY(%s)))
+                   AND (kind=ANY(%s) OR NOT EXISTS(SELECT 1 FROM provider_cooldowns p
+                           WHERE p.provider=discovery_jobs.provider AND p.not_before>%s))
+                   AND (kind=ANY(%s) OR NOT provider=ANY(%s))
+                   AND {_RUN_ALLOWS_WORK}
+                 ORDER BY priority,depth,enqueued_at NULLS FIRST,id
+                 LIMIT 100 FOR UPDATE SKIP LOCKED""",  # nosec B608 # Fixed cancellation SQL only.
+            (timestamp, crawl_run_id, crawl_run_id, job_id, job_id,
+             stage, stage, list(processing), stage, list(processing), list(processing), timestamp, list(processing), excluded_providers),
+        ).fetchall()
+        if not candidates:
+            return None
+        for candidate in candidates:
+            keys: list[int] = []
+            if worker_id is not None:
+                if candidate["kind"] not in processing:
+                    provider_key = lock_key("acquisition-provider", candidate["provider"])
+                    if candidate["provider"] in excluded_providers:
+                        continue
+                    if not acquire_lock_key(conn, provider_key):
+                        excluded_providers.append(candidate["provider"])
+                        continue
+                    keys.append(provider_key)
+                job_key = lock_key("executor-job", int(candidate["id"]))
+                if not acquire_lock_key(conn, job_key):
+                    for key in keys:
+                        release_lock_key(conn, key)
+                    continue
+                keys.append(job_key)
+            token = uuid.uuid4().hex if worker_id is not None else None
+            try:
+                with conn.transaction():
+                    conn.execute(
+                        """UPDATE discovery_jobs SET state='in_progress', started_at=%s,
+                             attempts=attempts+1,reason=NULL,done_at=NULL,next_attempt_at=NULL,
+                             owner_worker_id=%s,owner_backend_pid=CASE WHEN %s::text IS NULL THEN NULL ELSE pg_backend_pid() END,
+                             ownership_token=%s,ownership_generation=ownership_generation+1 WHERE id=%s""",
+                        (int(timestamp), worker_id, worker_id, token, candidate["id"]),
+                    )
+                    job = get_job(conn, int(candidate["id"]))
+            except BaseException:
+                for key in keys:
+                    release_lock_key(conn, key)
+                raise
+            if worker_id is not None and token is not None:
+                conn._ownership_keys = tuple(keys)
+                conn._job_fence = (int(candidate["id"]), token)
+            return job
+        if len(excluded_providers) == exclusions_before:
+            return None
+
+
+def release_job_ownership(conn: Connection) -> None:
+    """Clear local fencing before the next job, releasing all session locks."""
+    keys = conn._ownership_keys
+    conn._job_fence = None
+    conn._ownership_keys = ()
+    if not conn.closed:
+        for key in reversed(keys):
+            release_lock_key(conn, key)
 
 
 @atomic
@@ -225,42 +272,48 @@ def update_job_params(
 
 
 def resume_stale_in_progress(
-    conn: Connection,
-    *,
-    crawl_run_id: int | None = None,
-    stale_seconds: int = 0,
-    now: int | None = None,
+    conn: Connection, *, crawl_run_id: int | None = None,
+    stale_seconds: int = 0, now: int | None = None,
     lease: ExecutorLease | None = None,
 ) -> int:
-    with executor_lock(conn, lease=lease):
-        return _resume_stale_in_progress(conn, crawl_run_id=crawl_run_id, stale_seconds=stale_seconds, now=now)
+    # Legacy explicit archive owners retain their gate. New workers recover
+    # each orphan only after obtaining that job's session lock.
+    with parallel_executor_lock(conn, lease=lease):
+        return _resume_stale_in_progress(conn, crawl_run_id=crawl_run_id,
+                                        stale_seconds=stale_seconds, now=now)
 
 
 @atomic
 def _resume_stale_in_progress(
-    conn: Connection,
-    *,
-    crawl_run_id: int | None,
-    stale_seconds: int,
-    now: int | None,
+    conn: Connection, *, crawl_run_id: int | None, stale_seconds: int, now: int | None,
 ) -> int:
     timestamp = int(time.time()) if now is None else now
     cutoff = timestamp - stale_seconds
-    cursor = conn.execute(
-        f"""
-        UPDATE discovery_jobs
-           SET state = 'pending',
-               started_at = NULL,
-               done_at = NULL,
-               reason = COALESCE(reason, 'resumed stale in_progress job')
-         WHERE state = 'in_progress'
-           AND (%s::bigint IS NULL OR crawl_run_id = %s)
-           AND {_RUN_ALLOWS_WORK}
-           AND (%s = 0 OR started_at IS NULL OR started_at <= %s)
-        """,  # nosec B608 # Only the fixed _RUN_ALLOWS_WORK fragment is interpolated; values are bound.
-        (crawl_run_id, crawl_run_id, stale_seconds, cutoff),
-    )
-    return int(cursor.rowcount)
+    rows = conn.execute(
+        f"""SELECT id,owner_backend_pid,ownership_token FROM discovery_jobs WHERE state='in_progress'
+             AND (%s::bigint IS NULL OR crawl_run_id=%s) AND {_RUN_ALLOWS_WORK}
+             AND (%s=0 OR started_at IS NULL OR started_at<=%s)
+             ORDER BY id FOR UPDATE SKIP LOCKED""",  # nosec B608 # Fixed cancellation SQL only.
+        (crawl_run_id,crawl_run_id,stale_seconds,cutoff),
+    ).fetchall()
+    resumed = 0
+    for row in rows:
+        if (conn._job_fence == (int(row["id"]), row["ownership_token"])
+                and owns_lock_key(conn, lock_key("executor-job", int(row["id"])))):
+            continue
+        key = lock_key("executor-job", int(row["id"]))
+        if not acquire_lock_key(conn, key):
+            continue
+        try:
+            conn.execute(
+                """UPDATE discovery_jobs SET state='pending',started_at=NULL,done_at=NULL,
+                     ownership_token=NULL,owner_worker_id=NULL,owner_backend_pid=NULL,
+                     reason=COALESCE(reason,'resumed orphaned job') WHERE id=%s""", (row["id"],),
+            )
+            resumed += 1
+        finally:
+            release_lock_key(conn,key)
+    return resumed
 
 
 @atomic
@@ -398,7 +451,7 @@ def run_counters(conn: Connection, crawl_run_id: int) -> dict[str, int]:
 @atomic
 def refresh_run_status(conn: Connection, crawl_run_id: int) -> None:
     """Derive run state from its jobs without reopening an explicit cancellation."""
-    run = conn.execute("SELECT status FROM crawl_runs WHERE id = %s", (crawl_run_id,)).fetchone()
+    run = conn.execute("SELECT status FROM crawl_runs WHERE id = %s FOR UPDATE", (crawl_run_id,)).fetchone()
     if run is None or run["status"] == "cancelled":
         return
     counts = {row["state"]: int(row["count"]) for row in job_state_counts(conn, crawl_run_id=crawl_run_id)}
@@ -478,6 +531,17 @@ def provider_ready_at(conn: Connection, provider: str) -> float | None:
     return None if row is None else float(row["not_before"])
 
 
+def next_pacing_deadline(conn: Connection, *, crawl_run_id: int | None, now: float) -> float | None:
+    row = require_row(conn.execute(
+        """SELECT MIN(p.not_before) FROM provider_cooldowns p
+             WHERE p.reason='provider request pacing' AND p.not_before>%s
+               AND EXISTS(SELECT 1 FROM discovery_jobs j WHERE j.provider=p.provider AND j.state='pending'
+                           AND (%s::bigint IS NULL OR j.crawl_run_id=%s))""",
+        (now, crawl_run_id, crawl_run_id),
+    ))
+    return None if row[0] is None else float(row[0])
+
+
 @atomic
 def defer_provider(
     conn: Connection, provider: str, *, not_before: float,
@@ -510,14 +574,11 @@ def start_worker(
     lease.require(conn)
     timestamp = time.time() if now is None else now
     conn.execute(
-        """INSERT INTO worker_heartbeats(id, worker_id, started_at, heartbeat_at,
-                   heartbeat_expires_at, stopped_at, current_job_id, status)
-           VALUES (1, %s, %s, %s, %s, NULL, NULL, 'running')
-           ON CONFLICT(id) DO UPDATE SET worker_id=excluded.worker_id,
-               started_at=excluded.started_at, heartbeat_at=excluded.heartbeat_at,
-               heartbeat_expires_at=excluded.heartbeat_expires_at, stopped_at=NULL,
-               current_job_id=NULL, status='running'""",
-        (worker_id, timestamp, timestamp, timestamp + max_age),
+        """INSERT INTO executor_heartbeats(worker_id,started_at,heartbeat_at,heartbeat_expires_at,status)
+           VALUES(%s,%s,%s,%s,'running') ON CONFLICT(worker_id) DO UPDATE SET
+           started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at,
+           heartbeat_expires_at=excluded.heartbeat_expires_at,stopped_at=NULL,status='running'""",
+        (worker_id,timestamp,timestamp,timestamp+max_age),
     )
 
 
@@ -528,10 +589,9 @@ def heartbeat_worker(
 ) -> bool:
     timestamp = time.time() if now is None else now
     cursor = conn.execute(
-        """UPDATE worker_heartbeats SET heartbeat_at=%s, heartbeat_expires_at=%s,
-                   current_job_id=%s, status=%s
-             WHERE id=1 AND worker_id=%s AND status IN ('running','stopping')""",
-        (timestamp, timestamp + max_age, current_job_id, 'stopping' if stopping else 'running', worker_id),
+        """UPDATE executor_heartbeats SET heartbeat_at=%s,heartbeat_expires_at=%s,
+             current_job_id=%s,status=%s WHERE worker_id=%s AND status IN ('running','stopping')""",
+        (timestamp,timestamp+max_age,current_job_id,'stopping' if stopping else 'running',worker_id),
     )
     return cursor.rowcount == 1
 
@@ -540,25 +600,29 @@ def heartbeat_worker(
 def stop_worker(conn: Connection, worker_id: str, *, failed: bool = False, now: float | None = None) -> None:
     timestamp = time.time() if now is None else now
     conn.execute(
-        """UPDATE worker_heartbeats SET status=%s, heartbeat_at=%s, heartbeat_expires_at=%s,
-                   stopped_at=%s, current_job_id=NULL WHERE id=1 AND worker_id=%s""",
-        ('failed' if failed else 'stopped', timestamp, timestamp, timestamp, worker_id),
+        """UPDATE executor_heartbeats SET status=%s,heartbeat_at=%s,heartbeat_expires_at=%s,
+             stopped_at=%s,current_job_id=NULL WHERE worker_id=%s""",
+        ('failed' if failed else 'stopped',timestamp,timestamp,timestamp,worker_id),
     )
 
 
 def worker_status(conn: Connection, *, now: float | None = None, max_age: float | None = None) -> dict[str, Any]:
-    row = conn.execute("SELECT * FROM worker_heartbeats WHERE id=1").fetchone()
-    if row is None:
-        return {"alive": False, "status": "absent", "worker_id": None, "heartbeat_at": None, "age_seconds": None}
     timestamp = time.time() if now is None else now
-    result = dict(row)
-    age = max(0.0, timestamp - float(row["heartbeat_at"]))
-    expires = float(row["heartbeat_expires_at"])
-    if max_age is not None:
-        expires = min(expires, float(row["heartbeat_at"]) + max_age)
-    result["age_seconds"] = age
-    result["alive"] = row["status"] in {"running", "stopping"} and timestamp < expires
-    return result
+    rows = conn.execute("SELECT * FROM executor_heartbeats ORDER BY heartbeat_at DESC,worker_id").fetchall()
+    if not rows:
+        return {"alive":False,"status":"absent","worker_id":None,"heartbeat_at":None,"age_seconds":None,
+                "active_workers":0,"workers":[]}
+    workers = []
+    for row in rows:
+        result = dict(row)
+        result['age_seconds'] = max(0.0,timestamp-float(row['heartbeat_at']))
+        expires = float(row['heartbeat_expires_at'])
+        if max_age is not None:
+            expires = min(expires,float(row['heartbeat_at'])+max_age)
+        result['alive'] = row['status'] in {'running','stopping'} and timestamp<expires
+        workers.append(result)
+    representative = next((worker for worker in workers if worker['alive']),workers[0])
+    return {**representative,'active_workers':sum(bool(w['alive']) for w in workers),'workers':workers}
 
 
 def get_job(conn: Connection, job_id: int) -> DiscoveryJob | None:
@@ -676,6 +740,9 @@ def row_to_job(row: Row) -> DiscoveryJob:
         retry_count=int(row["retry_count"]),
         next_attempt_at=row["next_attempt_at"],
         revision=int(row["revision"]) if "revision" in row.keys() else 0,
+        ownership_token=row["ownership_token"] if "ownership_token" in row else None,
+        owner_worker_id=row["owner_worker_id"] if "owner_worker_id" in row else None,
+        ownership_generation=int(row["ownership_generation"]) if "ownership_generation" in row else 0,
         dedup_key=row["dedup_key"],
         enqueued_at=None if row["enqueued_at"] is None else int(row["enqueued_at"]),
         started_at=None if row["started_at"] is None else int(row["started_at"]),

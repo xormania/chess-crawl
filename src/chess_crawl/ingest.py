@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -14,14 +15,20 @@ from chess_crawl.normalize.games import PARSER_VERSION as GAMES_PARSER_VERSION
 from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.normalize.users import PARSER_VERSION as USERS_PARSER_VERSION
 from chess_crawl.normalize.users import normalize_user_payload
+from chess_crawl.normalize.resources import PARSER_VERSION as RESOURCES_PARSER_VERSION
+from chess_crawl.normalize.resources import normalize_resource_payload
 from chess_crawl.providers.base import FetchAttempt, RawRecord
 from chess_crawl.providers.registry import ProviderSession, get_provider_info
 from chess_crawl.storage.db import Connection, transaction
+from chess_crawl.storage.archives import PreparedArchiveObject
 from chess_crawl.storage.raw import (
     insert_fetch_log, latest_raw_payload_id, latest_validators,
     read_raw_payload, store_raw_payload, update_raw_payload_status,
+    prepare_raw_payload,
 )
 from chess_crawl.storage.repository import insert_error
+from chess_crawl.storage.player_profiles import record_resource_attempt, refresh_profile_observations, refresh_resource_observations
+from chess_crawl.providers.resources import resource_source_key
 
 
 @dataclass(frozen=True)
@@ -83,6 +90,23 @@ def fetch_chesscom_stats(
             normalizer=normalize_user_payload,
             job_id=job_id,
             crawl_run_id=crawl_run_id,
+        )
+
+
+def fetch_user_resource(
+    conn: Connection, provider: str, username: str, resource_key: str, *,
+    parameters: dict[str, Any] | None = None, owner_scope: str = "public",
+    config: Config | None = None, transport: httpx.BaseTransport | None = None, sleeper=None,
+    session: ProviderSession | None = None, job_id: int | None = None, crawl_run_id: int | None = None,
+) -> IngestResult:
+    key = resource_source_key(provider, username, resource_key, parameters, owner_scope=owner_scope)
+    with _provider_client(provider, config=config, transport=transport, sleeper=sleeper, session=session) as client:
+        etag, last_modified = latest_validators(conn, key) if provider == "chess.com" else (None, None)
+        record = client.get_user_resource(
+            username, resource_key, parameters=parameters, owner_scope=owner_scope, etag=etag, last_modified=last_modified,
+        )
+        return _store_and_normalize(
+            conn, record, normalizer=normalize_resource_payload, job_id=job_id, crawl_run_id=crawl_run_id,
         )
 
 
@@ -181,6 +205,24 @@ def fetch_lichess_game(
         )
 
 
+def fetch_lichess_games_page(
+    conn: Connection, username: str, *, since_ms: int | None, until_ms: int,
+    limit: int, config: Config | None = None,
+    transport: httpx.BaseTransport | None = None, sleeper=None,
+    session: ProviderSession | None = None, job_id: int | None = None,
+    crawl_run_id: int | None = None,
+) -> IngestResult:
+    """Fetch a page using the provider's native millisecond boundaries."""
+    with _provider_client("lichess", config=config, transport=transport, sleeper=sleeper, session=session) as client:
+        record = client.get_user_games_page(
+            username, since_ms=since_ms, until_ms=until_ms, limit=limit,
+        )
+        return _store_and_normalize(
+            conn, record, normalizer=normalize_games_payload, max_games=None,
+            job_id=job_id, crawl_run_id=crawl_run_id,
+        )
+
+
 @contextmanager
 def _provider_client(provider: str, *, config, transport, sleeper, session):
     if session is not None:
@@ -203,6 +245,8 @@ def replay_raw_payload(
     normalized: list[int] | int | None
     if raw.endpoint_type in {"user_profile", "user_stats"}:
         normalized = normalize_user_payload(conn, raw_payload_id)
+    elif raw.endpoint_type == "user_resource":
+        normalized = normalize_resource_payload(conn, raw_payload_id)
     elif raw.endpoint_type in {"monthly_archive", "user_games_stream", "game"}:
         normalized = normalize_games_payload(
             conn, raw_payload_id, crawl_run_id=crawl_run_id, max_games=max_games,
@@ -220,10 +264,21 @@ def replay_raw_payload(
     )
 
 
+def installed_parser_target(requested: str = "current") -> str:
+    """Pin a mixed-endpoint replay to the complete installed parser manifest."""
+    manifest = "|".join(("chesscom-archives-index-v1", GAMES_PARSER_VERSION,
+                         RESOURCES_PARSER_VERSION, USERS_PARSER_VERSION))
+    if requested not in {"current", manifest}:
+        raise ValueError("Requested parser target is unavailable; use current or the installed parser manifest")
+    return manifest
+
+
 def _requires_normalization(conn: Connection, raw_payload_id: int) -> bool:
     raw = read_raw_payload(conn, raw_payload_id)
     if raw.endpoint_type in {"user_profile", "user_stats"}:
         version = USERS_PARSER_VERSION
+    elif raw.endpoint_type == "user_resource":
+        version = RESOURCES_PARSER_VERSION
     elif raw.endpoint_type == "archives_index":
         version = "chesscom-archives-index-v1"
     else:
@@ -250,7 +305,21 @@ def _store_and_normalize(
     game_payload = record.endpoint_type in {"monthly_archive", "user_games_stream", "game"}
     if record.http_status == 304 and not (game_payload and crawl_run_id is not None):
         if not _requires_normalization(conn, raw_payload_id):
+            if record.endpoint_type in {"user_profile", "user_stats"}:
+                refresh_profile_observations(conn, raw_payload_id)
+            elif record.endpoint_type == "user_resource":
+                refresh_resource_observations(conn, raw_payload_id)
             return _non_body_result(record)
+    if conn._defer_normalization:
+        from chess_crawl.jobs.state import enqueue_job
+        enqueue_job(
+            conn, provider=record.provider, kind="normalize_payload", target=str(raw_payload_id),
+            params={"raw_payload_id": raw_payload_id, "max_games": max_games},
+            crawl_run_id=crawl_run_id, parent_job_id=job_id, priority=20,
+        )
+        return IngestResult(record.provider, record.endpoint_type, record.http_status,
+                            raw_payload_id, (), f"stored raw #{raw_payload_id}; normalization queued",
+                            retry_after=_retry_after(record))
     if game_payload:
         normalized = normalizer(conn, raw_payload_id, crawl_run_id=crawl_run_id, max_games=max_games)
     else:
@@ -303,13 +372,18 @@ def _persist_response(
     job_id: int | None,
     crawl_run_id: int | None,
 ) -> int | None:
+    prepared_object = (
+        prepare_raw_payload(conn, record) if record.body is not None and record.http_status == 200 else None
+    )
     # Commit the response and its attempt/error evidence together, before
     # invoking a normalizer that can fail independently.
     with transaction(conn):
-        raw_payload_id = _store_raw_if_present(conn, record)
+        raw_payload_id = _store_raw_if_present(conn, record, prepared_object=prepared_object)
         if record.http_status == 304:
             raw_payload_id = latest_raw_payload_id(conn, record.canonical_source_key)
         _log_attempts(conn, record, raw_payload_id, job_id=job_id, crawl_run_id=crawl_run_id)
+        if record.endpoint_type == "user_resource":
+            record_resource_attempt(conn, record, raw_payload_id)
         retry_after = _retry_after(record)
         if record.http_status in {429, 503} and retry_after is not None:
             response_at = float(record.fetched_at)
@@ -325,10 +399,12 @@ def _persist_response(
     return raw_payload_id
 
 
-def _store_raw_if_present(conn: Connection, record: RawRecord) -> int | None:
+def _store_raw_if_present(
+    conn: Connection, record: RawRecord, *, prepared_object: PreparedArchiveObject | None = None,
+) -> int | None:
     if record.body is None or record.http_status != 200:
         return None
-    return store_raw_payload(conn, record)
+    return store_raw_payload(conn, record, prepared_object=prepared_object)
 
 
 def _log_attempts(

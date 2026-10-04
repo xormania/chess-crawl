@@ -13,6 +13,9 @@ JobKind = Literal[
     "fetch_user_games",
     "fetch_game_by_id",
     "crawl_opponents",
+    "fetch_user_resource",
+    "normalize_payload",
+    "reprocess_archive",
 ]
 
 JOB_STATES: tuple[str, ...] = ("pending", "in_progress", "done", "error", "skipped", "blocked")
@@ -22,7 +25,12 @@ JOB_KINDS: tuple[str, ...] = (
     "fetch_user_games",
     "fetch_game_by_id",
     "crawl_opponents",
+    "fetch_user_resource",
+    "normalize_payload",
+    "reprocess_archive",
 )
+
+PROCESSING_JOB_KINDS: tuple[str, ...] = ("normalize_payload", "reprocess_archive")
 
 
 @dataclass(frozen=True)
@@ -46,6 +54,9 @@ class DiscoveryJob:
     retry_count: int = 0
     next_attempt_at: float | None = None
     revision: int = 0
+    ownership_token: str | None = None
+    owner_worker_id: str | None = None
+    ownership_generation: int = 0
 
 
 @dataclass(frozen=True)

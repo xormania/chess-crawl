@@ -5,9 +5,16 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from psycopg.types.json import Jsonb
 
-from chess_crawl.storage.db import Connection, Row, atomic, require_row
+from chess_crawl.storage.db import (
+    Connection, Row, atomic, require_row, operation_lock, operation_locks, operation_lock_held, transaction,
+)
+from chess_crawl.providers.base import NormalizedGame
 from chess_crawl.storage.migrations import current_version
+from chess_crawl.storage.player_profiles import merge_player_evidence
 
 
 @dataclass(frozen=True)
@@ -16,6 +23,89 @@ class DatabaseSummary:
     migration_count: int
     table_count: int
     providers: tuple[str, ...]
+
+
+def user_identity_resources(provider: str, username: str, stable_id: str | None) -> list[tuple[str, str | int]]:
+    resources: list[tuple[str, str | int]] = [("account-name", f"{provider}/{username.strip().lower()}")]
+    if stable_id is not None:
+        resources.append(("account-id", f"{provider}/{stable_id}"))
+    return resources
+
+
+class _IdentityGateRetry(Exception):
+    """Restart before any mutation when a shared identity gate is insufficient."""
+
+
+def _identity_needs_reconciliation(conn: Connection, provider: str, username: str, stable_id: str | None) -> bool:
+    if stable_id is None:
+        return False
+    identified = conn.execute(
+        "SELECT id,username_normalized FROM provider_users WHERE provider=%s AND provider_user_id=%s",
+        (provider, stable_id),
+    ).fetchone()
+    return identified is not None and identified["username_normalized"] != username.strip().lower()
+
+
+@contextmanager
+def _reconciliation_transaction(
+    conn: Connection, provider: str, accounts: list[tuple[str, str | None]],
+    resources: list[tuple[str, str | int]], *, crawl_run_id: int | None = None,
+) -> Iterator[Connection]:
+    """Use an exclusive provider gate only for an actual certified rename/merge.
+
+    A savepoint releases our shared gate and account locks before escalation,
+    avoiding shared-to-exclusive upgrade deadlocks between unrelated profiles.
+    """
+    exclusive = operation_lock_held(conn, "reconciliation-provider", provider, exclusive=True)
+    while True:
+        try:
+            with transaction(conn):
+                operation_lock(conn, "reconciliation-provider", provider, shared=not exclusive)
+                if crawl_run_id is not None:
+                    operation_lock(conn, "run-game-budget", crawl_run_id)
+                operation_locks(conn, resources)
+                if not exclusive and any(_identity_needs_reconciliation(conn, provider, username, stable_id)
+                                         for username, stable_id in accounts):
+                    raise _IdentityGateRetry
+                yield conn
+            return
+        except _IdentityGateRetry:
+            if operation_lock_held(conn, "reconciliation-provider", provider, exclusive=False):
+                raise ValueError("Rename reconciliation requires the identity transaction before other provider locks") from None
+            exclusive = True
+
+
+def user_identity_transaction(
+    conn: Connection, provider: str, username: str, stable_id: str | None,
+):
+    return _reconciliation_transaction(conn, provider, [(username, stable_id)],
+                                       user_identity_resources(provider, username, stable_id))
+
+
+def game_identity_resources(
+    provider: str, game_id: str | None, canonical_url: str | None, content_hash: str,
+) -> list[tuple[str, str | int]]:
+    resources: list[tuple[str, str | int]] = [("game-content", content_hash)]
+    if game_id is not None:
+        resources.append(("game-id", f"{provider}/{game_id}"))
+    if canonical_url is not None:
+        resources.append(("game-url", canonical_url))
+    return resources
+
+
+def normalization_transaction(
+    conn: Connection, provider: str, games: list[NormalizedGame], *, crawl_run_id: int | None = None,
+):
+    """Lock only affected accounts/games, allowing disjoint same-provider work."""
+    resources: list[tuple[str, str | int]] = []
+    accounts: list[tuple[str, str | None]] = []
+    for game in games:
+        resources.extend(game_identity_resources(provider, game.provider_game_id, game.canonical_url, game.content_hash))
+        for participant in (game.white, game.black):
+            if participant.username_normalized:
+                accounts.append((participant.username_normalized, participant.provider_user_id))
+                resources.extend(user_identity_resources(provider, participant.username_normalized, participant.provider_user_id))
+    return _reconciliation_transaction(conn, provider, accounts, resources, crawl_run_id=crawl_run_id)
 
 
 def list_providers(conn: Connection) -> tuple[str, ...]:
@@ -52,6 +142,19 @@ def upsert_provider_user(
     profile_raw_payload_id: int | None = None,
 ) -> int:
     """Merge sparse observations; full profiles replace metadata in observation order."""
+    with user_identity_transaction(conn, provider, username, provider_user_id):
+        return _upsert_provider_user_locked(
+            conn, provider=provider, username=username, provider_user_id=provider_user_id,
+            display_username=display_username, account_status=account_status, title=title, now=now,
+            profile_raw_payload_id=profile_raw_payload_id,
+        )
+
+
+def _upsert_provider_user_locked(
+    conn: Connection, *, provider: str, username: str, provider_user_id: str | None,
+    display_username: str | None, account_status: str | None, title: str | None,
+    now: int | None, profile_raw_payload_id: int | None,
+) -> int:
     timestamp = int(time.time()) if now is None else now
     username_normalized = username.strip().lower()
     display = display_username or username
@@ -133,6 +236,7 @@ def _merge_source_records(conn: Connection, entity_type: str, survivor: int, rep
 def _merge_user_placeholder(conn: Connection, survivor: int, replaced: int) -> None:
     """Reconcile a certified same-provider placeholder inside the caller's transaction."""
     conn.execute("UPDATE game_participants SET provider_user_id = %s WHERE provider_user_id = %s", (survivor, replaced))
+    merge_player_evidence(conn, survivor, replaced)
     for snapshot in conn.execute("SELECT * FROM user_snapshots WHERE provider_user_id = %s", (replaced,)).fetchall():
         matching = conn.execute(
             "SELECT id, captured_at FROM user_snapshots WHERE provider_user_id = %s AND content_hash = %s",
@@ -145,12 +249,23 @@ def _merge_user_placeholder(conn: Connection, survivor: int, replaced: int) -> N
                 fields = (
                     "captured_at", "observed_username", "status", "title", "country", "followers", "patron",
                     "count_all", "count_rated", "count_win", "count_loss", "count_draw", "perfs_or_stats", "raw_payload_id",
+                    "native_data", "created_at", "last_seen_at", "real_name", "location", "avatar_url", "profile_url",
+                    "is_verified", "is_streamer", "fide_rating",
                 )
                 conn.execute(
                     f"UPDATE user_snapshots SET {', '.join(f'{field} = %s' for field in fields)} WHERE id = %s",  # nosec B608 # Columns come only from the literal tuple above; values are bound.
-                    (*[snapshot[field] for field in fields], matching["id"]),
+                    (*[Jsonb(snapshot[field]) if field == "native_data" and snapshot[field] is not None
+                       else snapshot[field] for field in fields], matching["id"]),
                 )
             _merge_source_records(conn, "user_snapshot", int(matching["id"]), int(snapshot["id"]))
+            conn.execute("UPDATE user_observations SET snapshot_id = %s WHERE snapshot_id = %s", (matching["id"], snapshot["id"]))
+            conn.execute(
+                """INSERT INTO user_rating_records SELECT %s, performance, rating, best_rating, best_at, lowest_rating, lowest_at,
+                     rating_deviation, provisional, games, wins, losses, draws, progress, native_data
+                   FROM user_rating_records WHERE snapshot_id = %s
+                   ON CONFLICT(snapshot_id, performance) DO NOTHING""", (matching["id"], snapshot["id"]),
+            )
+            conn.execute("DELETE FROM user_rating_records WHERE snapshot_id = %s", (snapshot["id"],))
             conn.execute("DELETE FROM user_snapshots WHERE id = %s", (snapshot["id"],))
     _merge_source_records(conn, "user", survivor, replaced)
     affected_runs = _merge_user_edges(conn, survivor, replaced)
@@ -403,7 +518,11 @@ def upsert_game(
     opening_ply: int | None = None,
     tournament_ref: str | None = None,
     now: int | None = None,
+    replace_nullable_fields: frozenset[str] = frozenset(),
 ) -> int:
+    """Merge sparse facts; explicitly supplied nullable facts replace older values."""
+    operation_lock(conn, "reconciliation-provider", provider, shared=True)
+    operation_locks(conn, game_identity_resources(provider, provider_game_id, canonical_url, content_hash))
     timestamp = now or int(time.time())
     existing = find_existing_game(conn, provider, provider_game_id, canonical_url, content_hash)
     if existing is None:
@@ -455,12 +574,12 @@ def upsert_game(
                outcome = %s,
                is_live = %s,
                status_raw = %s,
-               created_at = COALESCE(%s, created_at),
-               ended_at = COALESCE(%s, ended_at),
+               created_at = CASE WHEN %s THEN %s ELSE COALESCE(%s, created_at) END,
+               ended_at = CASE WHEN %s THEN %s ELSE COALESCE(%s, ended_at) END,
                ply_count = COALESCE(%s, ply_count),
-               eco = COALESCE(%s, eco),
-               opening_name = COALESCE(%s, opening_name),
-               opening_ply = COALESCE(%s, opening_ply),
+               eco = CASE WHEN %s THEN %s ELSE COALESCE(%s, eco) END,
+               opening_name = CASE WHEN %s THEN %s ELSE COALESCE(%s, opening_name) END,
+               opening_ply = CASE WHEN %s THEN %s ELSE COALESCE(%s, opening_ply) END,
                tournament_ref = COALESCE(%s, tournament_ref)
          WHERE id = %s
         """,
@@ -474,11 +593,21 @@ def upsert_game(
             outcome,
             int(is_live),
             status_raw,
+            "created_at" in replace_nullable_fields,
             created_at,
+            created_at,
+            "ended_at" in replace_nullable_fields,
+            ended_at,
             ended_at,
             ply_count,
+            "eco" in replace_nullable_fields,
             eco,
+            eco,
+            "opening_name" in replace_nullable_fields,
             opening_name,
+            opening_name,
+            "opening_ply" in replace_nullable_fields,
+            opening_ply,
             opening_ply,
             tournament_ref,
             int(existing["id"]),
@@ -498,6 +627,7 @@ def upsert_game_participant(
     result_raw: str | None = None,
     is_winner: bool | None = None,
     is_ai: bool = False,
+    replace_result_raw: bool = False,
 ) -> int:
     conn.execute(
         """
@@ -509,7 +639,8 @@ def upsert_game_participant(
         ON CONFLICT(game_id, color) DO UPDATE SET
           provider_user_id = COALESCE(excluded.provider_user_id, game_participants.provider_user_id),
           username_normalized = COALESCE(excluded.username_normalized, game_participants.username_normalized),
-          result_raw = COALESCE(excluded.result_raw, game_participants.result_raw),
+          result_raw = CASE WHEN %s THEN excluded.result_raw
+                            ELSE COALESCE(excluded.result_raw, game_participants.result_raw) END,
           is_winner = excluded.is_winner,
           is_ai = excluded.is_ai
         """,
@@ -521,6 +652,7 @@ def upsert_game_participant(
             result_raw,
             None if is_winner is None else int(is_winner),
             int(is_ai),
+            replace_result_raw,
         ),
     )
     row = conn.execute(

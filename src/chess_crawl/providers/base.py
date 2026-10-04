@@ -10,6 +10,7 @@ ProviderKey = Literal["chess.com", "lichess"]
 EndpointType = Literal[
     "user_profile",
     "user_stats",
+    "user_resource",
     "archives_index",
     "monthly_archive",
     "user_games_stream",
@@ -60,6 +61,7 @@ class RawRecord:
     archive_unit: str | None = None
     response_headers: Mapping[str, Any] = field(default_factory=dict)
     fetch_attempts: tuple[FetchAttempt, ...] = ()
+    owner_scope: str = "public"
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,7 @@ class NormalizedGame:
     opening_name: str | None = None
     opening_ply: int | None = None
     pgn: str | None = None
+    source_data: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

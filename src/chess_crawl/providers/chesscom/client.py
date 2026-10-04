@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Any, Mapping
 
 import httpx
 
@@ -10,6 +10,7 @@ from chess_crawl.config import ProviderSettings
 from chess_crawl.providers.base import FetchPolicy, RawRecord
 from chess_crawl.providers.chesscom import endpoints
 from chess_crawl.providers.http import HttpClient, HttpFetchResult
+from chess_crawl.providers.resources import get_resource, resource_source_key
 
 
 PROVIDER = "chess.com"
@@ -135,6 +136,26 @@ class ChessComClient:
 
     def get_game(self, game_ref: str) -> RawRecord:
         raise NotImplementedError("Chess.com has no single-game-by-id endpoint; fetch the owning monthly archive")
+
+    def get_user_resource(
+        self, username: str, resource_key: str, *, parameters: dict[str, Any] | None = None,
+        owner_scope: str = "public", etag: str | None = None, last_modified: str | None = None,
+    ) -> RawRecord:
+        resource = get_resource(PROVIDER, resource_key)
+        values = resource.parameters(parameters)
+        result = self.http.request(
+            "GET", resource.url(username, values), endpoint_type="user_resource",
+            headers=_conditional_headers(etag, last_modified),
+        )
+        return RawRecord(
+            provider=PROVIDER, endpoint_type="user_resource", request_url=result.url,
+            canonical_source_key=resource_source_key(PROVIDER, username, resource_key, values, owner_scope=owner_scope),
+            request_params={"resource_key": resource_key, "parameters": values, "owner_scope": "public", "authenticated": False},
+            http_status=result.status_code, fetched_at=result.fetched_at, body=result.body,
+            media_type=result.content_type or "application/json", etag=result.etag, last_modified=result.last_modified,
+            body_hash=result.body_hash, target_username=_username(username), response_headers=result.headers,
+            fetch_attempts=result.attempts,
+        )
 
     def close(self) -> None:
         self.http.close()

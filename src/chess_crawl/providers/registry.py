@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, ExitStack
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -124,6 +125,8 @@ class ProviderSession(AbstractContextManager["ProviderSession"]):
         self._clients: dict[str, ChessComClient | LichessClient] = {}
         self._resources = ExitStack()
         self._closed = False
+        self.before_request: Callable[[str], None] | None = None
+        self.persist_deadline: Callable[[str, float, str], None] | None = None
 
     def client(self, provider: str):
         if self._closed:
@@ -135,6 +138,13 @@ class ProviderSession(AbstractContextManager["ProviderSession"]):
             )
             self._resources.callback(client.close)
             self._clients[provider] = client
+        client = self._clients[provider]
+        if self.before_request is not None:
+            client.http.before_request = lambda: self.before_request(provider) if self.before_request is not None else None
+        if self.persist_deadline is not None:
+            client.http.persist_deadline = lambda deadline, reason: (
+                self.persist_deadline(provider, deadline, reason) if self.persist_deadline is not None else None
+            )
         return self._clients[provider]
 
     def close(self) -> None:

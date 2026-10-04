@@ -82,7 +82,7 @@ def test_monthly_cap_survives_restart_and_retains_full_pending_payload(
         assert read_raw_payload(conn, raw_id).normalization_status == "pending"
 
 
-def test_interrupted_selection_rolls_back_new_associations_and_resumes_remaining_games(
+def test_interrupted_selection_retains_committed_games_and_resumes_remaining_games(
     initialized_conn: Connection, fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = initialized_conn
@@ -99,14 +99,15 @@ def test_interrupted_selection_rolls_back_new_associations_and_resumes_remaining
     monkeypatch.setattr(games_module, "_normalize_game", interrupt_last_game)
     with pytest.raises(RuntimeError, match="interrupted selection"):
         normalize_games_payload(conn, raw_id, crawl_run_id=run_id, max_games=2)
-    assert run_game_ids(conn, run_id) == set(first)
-    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 1
+    committed = run_game_ids(conn, run_id)
+    assert set(first) < committed and len(committed) == 2
+    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 2
     assert read_raw_payload(conn, raw_id).normalization_status == "pending"
 
     monkeypatch.setattr(games_module, "_normalize_game", original)
     remaining = normalize_games_payload(conn, raw_id, crawl_run_id=run_id, max_games=2)
-    assert len(remaining) == 2
-    assert set(first).isdisjoint(remaining)
+    assert len(remaining) == 1
+    assert committed.isdisjoint(remaining)
     assert _count(conn, run_id) == 3
     assert read_raw_payload(conn, raw_id).normalization_status == "parsed"
 
@@ -249,7 +250,8 @@ def test_monthly_import_applies_half_open_date_window_before_game_budget(
     assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == (5 if already_parsed else 1)
     raw = read_raw_payload(conn, raw_id)
     assert raw.body == body
-    assert raw.normalization_status == ("parsed" if already_parsed else "pending")
+    # The new fetch observation was only partially refreshed under this cap.
+    assert raw.normalization_status == "pending"
 
 
 def test_attribution_rejects_out_of_window_game_without_consuming_capacity(

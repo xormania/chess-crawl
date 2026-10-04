@@ -201,7 +201,8 @@ def test_304_repairs_previously_inferred_chesscom_activity(initialized_conn: Con
     )
 
     assert refreshed.normalized_ids == first.normalized_ids
-    assert read_raw_payload(conn, first.raw_payload_id).parser_version == "games-normalizer-v2"
+    from chess_crawl.normalize.games import PARSER_VERSION
+    assert read_raw_payload(conn, first.raw_payload_id).parser_version == PARSER_VERSION
     row = user_game_summary(conn, "chess.com", "alice")
     assert row is not None
     assert (row["no_result"], row["in_progress"]) == (1, 0)

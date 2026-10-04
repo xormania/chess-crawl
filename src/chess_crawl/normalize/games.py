@@ -6,11 +6,14 @@ import time
 from typing import TypedDict
 
 from chess_crawl.normalize.codes import map_variant
+from chess_crawl.normalize.game_evidence import EVIDENCE_VERSION, GameEvidence, parse_game_evidence
 from chess_crawl.providers.base import NormalizedGame, NormalizedParticipant
 from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
-from chess_crawl.storage.acquisition import associate_run_game, payload_game_ids, run_game_bounds, run_game_ids
+from chess_crawl.storage.acquisition import associate_run_game, run_game_bounds, run_has_game
 from chess_crawl.storage.db import Connection, transaction
+from chess_crawl.storage.game_evidence import game_source_needs_refresh, is_latest_game_source, store_game_evidence
+from chess_crawl.storage.normalization import begin_normalization, processed_items, mark_item, finish_normalization
 from chess_crawl.storage.raw import insert_source_record, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import (
     find_existing_game,
@@ -20,10 +23,11 @@ from chess_crawl.storage.repository import (
     upsert_game_participant,
     upsert_provider_user,
     upsert_rating_at_game,
+    normalization_transaction,
 )
 
 
-PARSER_VERSION = "games-normalizer-v2"
+PARSER_VERSION = "games-normalizer-v5/" + EVIDENCE_VERSION
 
 
 class TimeControlArgs(TypedDict):
@@ -59,75 +63,67 @@ def normalize_games_payload(
     else:
         return []
 
-    with transaction(conn):
-        acquired = run_game_ids(conn, crawl_run_id) if crawl_run_id is not None else set()
-        bounds = (
-            run_game_bounds(conn, crawl_run_id, provider=raw.provider, requested=max_games)
-            if crawl_run_id is not None else None
-        )
-        remaining = bounds.remaining if bounds is not None else max_games
-        # Provenance proves that a row was processed, not which parser produced
-        # it. Reuse IDs only when the complete payload is current. A partial
-        # upgrade leaves the old version in place until every supported game
-        # has been processed by this parser; otherwise stale rows could be
-        # silently certified by a later bounded replay.
-        current_parser = (
-            raw.parser_version == PARSER_VERSION
-            and raw.normalization_status in {"parsed", "skipped"}
-        )
-        processed = payload_game_ids(conn, raw_payload_id) if current_parser else set()
-        game_ids: list[int] = []
-        complete = True
-        supported = False
-        for index, game in enumerate(games):
-            if game.variant_key == "bughouse":
+    observed = begin_normalization(conn, raw_payload_id, PARSER_VERSION)
+    checkpoints = processed_items(conn, raw_payload_id, PARSER_VERSION, observed)
+    game_ids: list[int] = []
+    remaining_request = max_games
+    pointers = [f"/games/{index}" if raw.endpoint_type == "monthly_archive"
+                else "" if raw.endpoint_type == "game" else f"/{index}"
+                for index in range(len(games))]
+    for pointer, game in zip(pointers, games):
+        # A conservative read avoids interpreting games the persisted window
+        # or exhausted selection cannot admit. The write rechecks these bounds.
+        preflight = (run_game_bounds(conn, crawl_run_id, provider=raw.provider, requested=remaining_request)
+                     if crawl_run_id is not None else None)
+        if preflight is not None and not preflight.includes(game.end_time, created_ms=game.source_data.get("createdAt")):
+            continue
+        allowance = preflight.remaining if preflight is not None else remaining_request
+        if allowance == 0:
+            existing = find_existing_game(conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash)
+            if (crawl_run_id is None or existing is None
+                    or not run_has_game(conn, crawl_run_id, int(existing["id"]))):
                 continue
-            supported = True
-            existing = find_existing_game(
-                conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash,
-            )
+        # Parsing occurs outside writes. Checkpointed background/run replay can
+        # reuse its immutable evidence; explicit standalone replay repairs data.
+        reusable = pointer in checkpoints and (crawl_run_id is not None or conn._job_fence is not None)
+        prepared = None if reusable else parse_game_evidence(game)
+        with normalization_transaction(conn, raw.provider, [game], crawl_run_id=crawl_run_id):
+            bounds = (run_game_bounds(conn, crawl_run_id, provider=raw.provider, requested=remaining_request)
+                      if crawl_run_id is not None else None)
+            existing = find_existing_game(conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash)
             existing_id = int(existing["id"]) if existing is not None else None
-            if bounds is not None and not bounds.includes(game.end_time):
-                complete = complete and existing_id in processed
+            already_acquired = (crawl_run_id is not None and existing_id is not None
+                                and run_has_game(conn, crawl_run_id, existing_id))
+            if bounds is not None and not bounds.includes(game.end_time, created_ms=game.source_data.get("createdAt")):
                 continue
-            already_acquired = existing_id in acquired
-            if already_acquired and existing_id in processed:
+            allowance = bounds.remaining if bounds is not None else remaining_request
+            if not already_acquired and allowance == 0:
                 continue
-            if not already_acquired and remaining == 0:
-                complete = complete and existing_id in processed
-                continue
-            if crawl_run_id is not None and existing_id is not None and existing_id in processed:
-                game_id = existing_id
+            refresh_current = (reusable and existing_id is not None
+                               and game_source_needs_refresh(conn, existing_id, raw_payload_id))
+            if reusable and not refresh_current:
+                game_id = checkpoints[pointer]
             else:
                 game_id = _normalize_game(
-                    conn,
-                    game,
-                    raw_payload_id=raw_payload_id,
-                    endpoint_type=raw.endpoint_type,
-                    source_key=raw.canonical_source_key,
-                    json_pointer=f"/games/{index}" if raw.endpoint_type == "monthly_archive" else f"/{index}",
-                    fetched_at=raw.fetched_at,
+                    conn, game, raw_payload_id=raw_payload_id, endpoint_type=raw.endpoint_type,
+                    source_key=raw.canonical_source_key, json_pointer=pointer,
+                    fetched_at=raw.fetched_at, evidence=prepared,
                 )
-                processed.add(game_id)
+            mark_item(conn, raw_payload_id, PARSER_VERSION, pointer, observed, game_id)
+            checkpoints[pointer] = game_id
             if already_acquired:
                 continue
             if crawl_run_id is not None:
                 associate_run_game(conn, crawl_run_id, game_id)
-                acquired.add(game_id)
             game_ids.append(game_id)
-            if remaining is not None:
-                remaining -= 1
-
-        if complete:
-            update_raw_payload_status(
-                conn,
-                raw_payload_id,
-                status="parsed" if supported else "skipped",
-                parser_version=PARSER_VERSION,
-                normalized_at=int(time.time()),
-            )
-        elif raw.normalization_status != "pending":
-            update_raw_payload_status(conn, raw_payload_id, status="pending")
+            if remaining_request is not None:
+                remaining_request -= 1
+    with transaction(conn):
+        if finish_normalization(conn, raw_payload_id, PARSER_VERSION, observed, pointers):
+            update_raw_payload_status(conn, raw_payload_id, status="parsed" if games else "skipped",
+                                      parser_version=PARSER_VERSION, normalized_at=int(time.time()))
+        # begin_normalization already marked this attempt pending. A stale
+        # observation must not overwrite a newer generation's parsed status.
     return game_ids
 
 
@@ -140,6 +136,7 @@ def _normalize_game(
     source_key: str,
     json_pointer: str,
     fetched_at: int,
+    evidence: GameEvidence | None = None,
 ) -> int:
     canonical_variant, mapped = map_variant(game.provider, game.variant_raw)
     variant_id = get_or_create_variant(
@@ -151,6 +148,8 @@ def _normalize_game(
     )
     clock = parse_time_control(game.time_control_raw, game.time_class)
     time_control_id = get_or_create_time_control(conn, **clock)
+    existing = find_existing_game(conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash)
+    update_current = existing is None or is_latest_game_source(conn, int(existing["id"]), raw_payload_id)
     game_id = upsert_game(
         conn,
         provider=game.provider,
@@ -169,7 +168,8 @@ def _normalize_game(
         opening_name=game.opening_name,
         opening_ply=game.opening_ply,
         now=fetched_at,
-    )
+        replace_nullable_fields=_supplied_nullable_facts(game),
+    ) if update_current else int(existing["id"])  # type: ignore[index]
     insert_source_record(
         conn,
         entity_type="game",
@@ -181,9 +181,44 @@ def _normalize_game(
         raw_payload_id=raw_payload_id,
         first_seen_at=fetched_at,
     )
-    _normalize_participant(conn, game_id, game.provider, game.white, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
-    _normalize_participant(conn, game_id, game.provider, game.black, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at)
+    store_game_evidence(conn, game_id=game_id, game=game, raw_payload_id=raw_payload_id,
+                        json_pointer=json_pointer, fetched_at=fetched_at, evidence=evidence)
+    if update_current:
+        _normalize_participant(conn, game_id, game.provider, game.white, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at,
+                               replace_result_raw=_supplied_participant_result(game, game.white))
+        _normalize_participant(conn, game_id, game.provider, game.black, game.outcome, raw_payload_id, endpoint_type, source_key, fetched_at,
+                               replace_result_raw=_supplied_participant_result(game, game.black))
     return game_id
+
+
+def _supplied_nullable_facts(game: NormalizedGame) -> frozenset[str]:
+    """Replace native nulls without confusing omissions or malformed values with null."""
+    source = game.source_data
+    fields: set[str] = set()
+    native_times = {"created_at": "createdAt", "ended_at": "lastMoveAt"} if game.provider == "lichess" else {
+        "created_at": "start_time", "ended_at": "end_time",
+    }
+    fields.update(field for field, native in native_times.items() if native in source and source[native] is None)
+    if game.is_live:
+        # A known active state cannot inherit a previous completed state's end.
+        fields.add("ended_at")
+    if game.provider == "lichess" and "opening" in source:
+        opening = source["opening"]
+        opening_fields = {"eco": "eco", "opening_name": "name", "opening_ply": "ply"}
+        if opening is None:
+            fields.update(opening_fields)
+        elif isinstance(opening, dict):
+            fields.update(field for field, native in opening_fields.items() if native in opening and opening[native] is None)
+    elif game.provider == "chess.com" and "eco" in source and source["eco"] is None:
+        fields.add("eco")
+    return frozenset(fields)
+
+
+def _supplied_participant_result(game: NormalizedGame, participant: NormalizedParticipant) -> bool:
+    if game.provider == "lichess":
+        return game.is_live or game.outcome == "draw" or "winner" in game.source_data
+    native = game.source_data.get(participant.color)
+    return isinstance(native, dict) and "result" in native
 
 
 def _normalize_participant(
@@ -196,6 +231,8 @@ def _normalize_participant(
     endpoint_type: str,
     source_key: str,
     fetched_at: int,
+    *,
+    replace_result_raw: bool = False,
 ) -> None:
     user_id = None
     if participant.username_normalized:
@@ -216,6 +253,7 @@ def _normalize_participant(
         result_raw=participant.result_raw,
         is_winner=_is_winner(participant.color, outcome),
         is_ai=participant.is_ai,
+        replace_result_raw=replace_result_raw,
     )
     insert_source_record(
         conn,
@@ -239,7 +277,7 @@ def _normalize_participant(
 
 def parse_time_control(raw_label: str | None, time_class: str) -> TimeControlArgs:
     label = raw_label or time_class
-    if "/" in label:
+    if "/" in label and time_class == "correspondence":
         try:
             _, seconds = label.split("/", 1)
             days = max(1, int(int(seconds) / 86400))
@@ -265,12 +303,13 @@ def parse_time_control(raw_label: str | None, time_class: str) -> TimeControlArg
     initial: int | None = None
     increment: int | None = 0
     try:
-        if "+" in label:
-            base, inc = label.split("+", 1)
+        first_period = label.split(":", 1)[0].split("/", 1)[-1]
+        if "+" in first_period:
+            base, inc = first_period.split("+", 1)
             initial = int(base)
             increment = int(inc)
         else:
-            initial = int(label)
+            initial = int(first_period)
     except (TypeError, ValueError):
         initial = None
         increment = None

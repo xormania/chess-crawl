@@ -3,7 +3,7 @@
 [README](../README.md) · [CLI guide](cli.md) ·
 [Contributing](../CONTRIBUTING.md)
 
-`chess-crawl` supplies an authenticated JSON API, a serial acquisition worker,
+`chess-crawl` supplies an authenticated JSON API, concurrent durable workers,
 and a durable Mercure event publisher. Its Docker Compose deployment owns these
 services and its archive. A future Symfony application using Symfony Docker
 can consume the API and events while keeping its own deployment, configuration,
@@ -37,7 +37,7 @@ deployment and end-user token issuance belong to the deploying application.
 | `postgres` | Persist archive data using PostgreSQL 18 on the private Compose network. |
 | `init` | Wait for PostgreSQL readiness, apply archive migrations, then exit successfully. |
 | `api` | Authenticated HTTP submissions and archive reads. |
-| `worker` | Hold the executor lock and acquire provider data serially. |
+| `worker` | Claim fenced jobs, coordinate provider pacing, and process local data. |
 | `events` | Deliver committed outbox entries to Mercure. |
 | `mercure` | Serve private event subscriptions using `dunglas/mercure`. |
 
@@ -270,13 +270,16 @@ meanings.
 
 ## Worker and recovery
 
-One executor owns an archive at a time. The worker and acquisition CLI share a
-PostgreSQL session advisory lock; a second executor cannot take ownership merely
-because a heartbeat is old. An idle worker remains alive: `/v1/worker` separates
-heartbeat liveness from whether any job is currently executing. API readiness
-alone does not prove that acquisition is running.
+Multiple workers can process independent jobs. Each job has session-owned
+PostgreSQL advisory locks and a fencing token; a second worker cannot take its
+ownership merely because a heartbeat is old. Provider acquisition is coordinated
+per provider, while local normalization ignores provider cooldowns. An idle
+worker remains alive: `/v1/worker` separates heartbeat liveness from activity
+and includes individual workers and their aggregate active count. API readiness
+alone does not prove that acquisition is running. See [execution](execution.md).
 
-On startup, the worker acquires the lock and recovers orphaned in-progress work.
+On startup and while idle, the worker recovers orphaned in-progress work only
+after obtaining the orphan's job lock.
 It preserves cancelled runs. Transient failures have durable retry counters
 and deadlines; provider cooldowns survive restarts and apply to later jobs for
 the same provider. Retries are bounded, and exhausted jobs become errors.
@@ -299,8 +302,9 @@ listed by `uv run python -m chess_crawl.jobs.worker --help`. Compose exposes
 (5 seconds), `CHESS_CRAWL_JOB_MAX_RETRIES` (3), `CHESS_CRAWL_RETRY_BASE`
 (30 seconds), and `CHESS_CRAWL_RETRY_MAX` (3600 seconds). The retry maximum caps
 the exponential component; a provider delay can require a longer wait.
-Stop the existing worker before intentionally using a separate CLI executor for
-the same archive.
+Use `--stage acquisition` or `--stage processing` for separate local worker
+pools. Optional SQS dispatch and offline data upgrades are documented in
+[execution and upgrades](execution.md).
 
 The game limit stops further game acquisition, but retained run games still
 drive local opponent discovery after a restart. Each run counts the edges it
@@ -376,9 +380,9 @@ when an existing archive must be retained unchanged.
 
 PostgreSQL is the only supported storage engine. Each deployment should use its
 own database. API, worker, and publisher use independent connections to the same
-database; PostgreSQL session advisory locks retain one acquisition executor and
-one publisher. A disconnected ownership session cannot continue processing with
-its old lock. The database is configured independently of Compose, so a
+database; PostgreSQL session advisory locks retain per-job acquisition/processing
+rights and one event publisher. A disconnected ownership session cannot continue
+processing with its old token. The database is configured independently of Compose, so a
 separately managed PostgreSQL server can be used through
 `CHESS_CRAWL_DATABASE_URL` and the password secret.
 

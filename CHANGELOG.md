@@ -7,6 +7,62 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Concurrent durable workers with per-job session ownership and fencing,
+  independent provider acquisition and local processing stages, persistent
+  request/retry pacing, and aggregate worker liveness. Migration `0009` must
+  precede starting the new workers; stop old serial executors before upgrading.
+- Durable job dispatch outbox with optional SQS publication and consumption.
+  Duplicate deliveries reuse database job state; local polling remains available.
+- Checkpointed offline normalization upgrades with fixed source high-water marks
+  and workspace-scoped source selection; upgrades do not fetch provider data.
+- Resumable full-history, incremental, and explicit backfill acquisition with
+  durable resource coverage. Closed Chess.com monthly sources are reused and
+  parser upgrades replay their archived bodies locally. Lichess pagination
+  preserves millisecond boundaries and timestamp ties, with individual
+  follow-ups for unfinished games that complete after an incremental watermark.
+  Completed history watermarks remain monotonic; later full jobs reuse stored
+  history locally and request only newer ranges. Sealed monthly collection
+  adopts newer archived sources without downloading them again.
+  Proven finite and partially acquired Lichess intervals are subtracted from
+  later collection requests; missing gaps and oldest timestamp ties remain
+  explicit. Reused broad pages respect exact creation-time run selection.
+
+- Immutable gzip source archives with local filesystem and optional S3 adapters,
+  verified original/encoded checksums, import evidence references, and resumable
+  offline relocation of existing PostgreSQL payload bodies. Inline storage stays
+  compatible by default; object-backed archives require backing up their objects
+  alongside PostgreSQL. See [archive storage](docs/archive-storage.md).
+- Immutable game evidence revisions, queryable PGN move/variation trees,
+  headers, comments, NAGs, provider metadata and lexical tokens. Precise clock
+  and reported elapsed observations retain conflicting sources, malformed
+  values, and decimal resolution. Migration 0006 preserves existing archives;
+  replay fills the new records locally. Standard chess supports legal replay;
+  Chess960/other variants retain notation and clocks with explicit unsupported
+  board interpretation. PGN exports can be reconstructed from the database.
+  Recurring source bodies refresh the current revision and game metadata even
+  when the same run already acquired the game and has exhausted its allowance.
+- Complete queryable provider profile/statistics facts, typed rating records,
+  alias evidence, and observation history retaining recurring values and
+  conditional refreshes. Migration `0008_player_resources` recovers retained
+  fetch occurrences; local parser replay populates newly normalized fields.
+- A registered supplementary player-resource catalog and collectors for
+  Chess.com clubs, team matches, tournaments, and online status, plus Lichess
+  rating history, performance statistics, activity, and teams. Complete native
+  JSON, rating-history source points, and explicit coverage/failure evidence
+  remain available without treating unknown or unavailable data as empty.
+- Ownership for raw player resources and authenticated team observations,
+  OAuth credential/workspace binding, and preservation with quarantine of
+  unowned legacy Lichess profile relationship facts. Public profiles request
+  all documented public extensions independently of OAuth relationship data.
+  See [player data](docs/player-data.md) for migration and ownership details.
+- Current Chess.com statistics alongside profile facts in the rich player read;
+  statistics replay preserves account identity and display names after renames.
+- Migration-time quarantine of historical Lichess profile captures until safe
+  source replay, provider-native verification/streaming flags, and queryable
+  highest/lowest tactics and lessons ratings.
+- Public resource requests omit configured OAuth credentials; private resource
+  collection does not publish its timestamps in shared alias history.
+
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
   project's `.venv`; Docker Compose continues to own the application services.
@@ -38,6 +94,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   See [PostgreSQL operations](docs/postgresql-operations.md).
 
 ### Changed
+
+- Game normalization prepares PGN evidence outside write transactions, commits
+  each game's evidence and run attribution with its source checkpoint, and
+  resumes remaining items after interruption. Account reconciliation takes
+  exclusive provider ownership only for confirmed renames or placeholder merges.
 
 - Full CI and Devbox smoke now run after pushes to `master` and support manual
   runs. Push/manual checks validate the selected commit without PR merge-history
@@ -92,6 +153,30 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Archive relocation selects pending payloads through a partial ordered index
+  and checks continuation without counting the entire remaining queue per batch.
+  Its JSON result adds `has_more`; `remaining` is null while work remains unless
+  `--count-remaining` explicitly requests an exact reporting scan.
+
+- Configured local archival requires an explicit absolute directory and rejects
+  missing, blank, or relative locations, preventing source-run processes from
+  silently selecting different archives based on their working directory.
+
+- Object reuse rechecks publication and readback before relocation releases an
+  inline backup, restoring missing objects and retaining inline evidence on
+  corruption. Archive settings currently apply to source-run clients and
+  operational helpers; the existing Compose stack continues inline storage.
+
+
+- Object publication and verification run before database write transactions,
+  keeping API/job mutations responsive during slow archive storage. Raw-response
+  deduplication skips object I/O; callers owning outer transactions must prepare
+  external objects beforehand so source references still roll back atomically.
+
+- Restore explicitly null current game times, opening facts, and participant
+  results when a previously observed body becomes current again. Sparse omitted
+  facts remain preserved; known live observations cannot retain a stale completed
+  end time. The v5 game normalizer can repair existing facts by offline replay.
 - Reconcile renamed accounts with username-only placeholders while preserving
   their game, snapshot, source, and discovery history. Conflicting stable
   provider account IDs produce an explicit error instead of overwriting identity.

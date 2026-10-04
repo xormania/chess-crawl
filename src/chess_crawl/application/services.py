@@ -23,7 +23,7 @@ from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
 from chess_crawl.providers.registry import list_provider_infos
 from chess_crawl.storage import application as submissions
 from chess_crawl.storage import queries
-from chess_crawl.storage.db import Connection, Row, consistent_read, transaction
+from chess_crawl.storage.db import Connection, Row, consistent_read, operation_lock, transaction
 from chess_crawl.storage.events import archive_id
 
 
@@ -88,9 +88,10 @@ def _submit(
     create: Callable[[], tuple[int, list[int]]],
 ) -> dict[str, Any]:
     canonical = json.dumps(asdict(request), sort_keys=True, separators=(",", ":"))
-    # The archive transaction lock serializes the identity check with creation
-    # across concurrent adapters. Identity survives terminal job/run states.
+    # Serialize this submission identity while allowing unrelated work to write.
+    # Identity survives terminal job/run states.
     with transaction(conn):
+        operation_lock(conn, "submission", key)
         existing = submissions.get_submission(conn, key)
         if existing is not None:
             if existing["operation"] != operation or existing["request_json"] != canonical:
