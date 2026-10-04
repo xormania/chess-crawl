@@ -1,9 +1,12 @@
 """Evidence retention, immutable revisions, precise clocks and local replay."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from decimal import Decimal
 import json
 from pathlib import Path
+from threading import Event
 
 import pytest
 import psycopg
@@ -12,7 +15,7 @@ from chess_crawl.normalize.game_evidence import parse_game_evidence
 from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.providers.lichess.parser import parse_game
-from chess_crawl.storage.db import Connection, require_row, transaction
+from chess_crawl.storage.db import Connection, connection, require_row, transaction
 from chess_crawl.jobs import state
 from chess_crawl.storage.acquisition import run_game_ids
 from chess_crawl.storage.game_evidence import export_game_version_pgn, read_game_version
@@ -368,6 +371,72 @@ def test_unreferenced_version_removal_can_cascade(initialized_conn: Connection) 
         initialized_conn.execute("UPDATE games SET current_version_id = NULL WHERE id = %s", (game_id,))
         initialized_conn.execute("DELETE FROM game_versions WHERE game_id = %s", (game_id,))
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM game_versions"))[0] == 0
+
+
+@pytest.mark.parametrize("operation", ["read", "export"])
+@pytest.mark.parametrize("inherited", [False, True], ids=["autocommit", "inherited-read-committed"])
+def test_evidence_snapshot_survives_concurrent_current_switch_and_version_removal(
+    database_url: str, monkeypatch: pytest.MonkeyPatch, operation: str, inherited: bool,
+) -> None:
+    selected, committed = Event(), Event()
+    with connection(database_url, mode="rw") as setup:
+        _, game_id = _store(setup, _data("1. e4 {[%clk 0:00:00.000000001]} *"), 100)
+        before = read_game_version(setup, game_id)
+        assert before is not None
+        version_id = before["id"]
+        with transaction(setup):
+            setup.execute(
+                "INSERT INTO game_derived_timings(version_id,node_index,method_version,seconds,"
+                "input_observation_ids,assumptions) VALUES(%s,1,'snapshot-test',0.000000001,'[]','{}')",
+                (version_id,),
+            )
+        before = read_game_version(setup, game_id)
+        exported = export_game_version_pgn(setup, game_id)
+
+    def replace_and_remove() -> None:
+        try:
+            assert selected.wait(10), "reader did not reach its selected-version barrier"
+            with connection(database_url, mode="rw") as writer:
+                _store(writer, _data("1. d4 d5 *", status="resign", winner="white"), 200)
+                # Derived calculations are independently removable; then the
+                # unreferenced immutable version can cascade to its evidence.
+                with transaction(writer):
+                    writer.execute("DELETE FROM game_derived_timings WHERE version_id=%s", (version_id,))
+                    writer.execute("DELETE FROM game_versions WHERE id=%s", (version_id,))
+                assert require_row(writer.execute("SELECT COUNT(*) FROM game_versions WHERE id=%s", (version_id,)))[0] == 0
+        finally:
+            committed.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool, connection(database_url, mode="rw") as reader:
+        future = pool.submit(replace_and_remove)
+        original_execute = reader.execute
+
+        def pause_after_selection(query, *args, **kwargs):
+            cursor = original_execute(query, *args, **kwargs)
+            if "FROM game_versions v JOIN games g" in str(query) and not selected.is_set():
+                # PostgreSQL has returned the selected-version query. Allow a
+                # different connection to commit deletion before fetching the
+                # remaining evidence or reconstructing the export.
+                selected.set()
+                assert committed.wait(10), "concurrent writer did not finish"
+                future.result(timeout=1)
+            return cursor
+
+        monkeypatch.setattr(reader, "execute", pause_after_selection)
+        # Native outer READ COMMITTED intentionally supplies no archive write
+        # lock. The read must remain coherent without upgrading its caller.
+        with reader.transaction() if inherited else nullcontext():
+            if inherited:
+                assert require_row(reader.execute("SHOW transaction_isolation"))[0] == "read committed"
+            if operation == "read":
+                assert read_game_version(reader, game_id) == before
+            else:
+                assert export_game_version_pgn(reader, game_id) == exported
+        assert selected.is_set() and not reader.in_transaction
+        future.result(timeout=1)
+        fresh = read_game_version(reader, game_id)
+        assert fresh is not None and fresh["id"] != version_id
+        assert read_game_version(reader, game_id, version_id) is None
 
 
 def test_committed_evidence_cannot_gain_extra_tokens(initialized_conn: Connection) -> None:

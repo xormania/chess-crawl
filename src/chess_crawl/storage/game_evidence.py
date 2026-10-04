@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 from chess_crawl.normalize.codes import canonical_hash
 from chess_crawl.normalize.game_evidence import EVIDENCE_VERSION, GameEvidence, MoveNode, parse_game_evidence
 from chess_crawl.providers.base import NormalizedGame
-from chess_crawl.storage.db import Connection, atomic, require_row
+from chess_crawl.storage.db import Connection, atomic, consistent_read, require_row
 
 
 @atomic
@@ -124,31 +124,56 @@ def game_source_needs_refresh(conn: Connection, game_id: int, raw_payload_id: in
     return current is None and is_latest_game_source(conn, game_id, raw_payload_id)
 
 
+@consistent_read
 def read_game_version(conn: Connection, game_id: int, version_id: int | None = None) -> dict[str, Any] | None:
-    """Return a revision belonging to this game; decimal evidence stays exact."""
+    """Return one coherent revision belonging to this game; decimals stay exact."""
+    result = _read_game_version_snapshot(conn, game_id, version_id)
+    if result is not None:
+        result.pop("_pgn_tokens")
+    return result
+
+
+def _read_game_version_snapshot(
+    conn: Connection, game_id: int, version_id: int | None,
+) -> dict[str, Any] | None:
+    """One statement remains coherent even inside an inherited READ COMMITTED transaction."""
     row = conn.execute(
-        """SELECT v.* FROM game_versions v JOIN games g ON g.id = v.game_id
-           WHERE g.id = %s AND v.id = COALESCE(%s,g.current_version_id)""", (game_id, version_id),
+        """SELECT v.*,
+           COALESCE((SELECT jsonb_agg(to_jsonb(n) ORDER BY n.node_index)
+             FROM game_move_nodes n WHERE n.version_id=v.id),'[]'::jsonb) AS nodes,
+           COALESCE((SELECT jsonb_agg(to_jsonb(c) || jsonb_build_object(
+               'seconds',c.seconds::text,'precision_seconds',c.precision_seconds::text) ORDER BY c.id)
+             FROM game_clock_observations c WHERE c.version_id=v.id),'[]'::jsonb) AS clocks,
+           COALESCE((SELECT jsonb_agg(to_jsonb(t) || jsonb_build_object('seconds',t.seconds::text)
+               ORDER BY t.node_index,t.method_version)
+             FROM game_derived_timings t WHERE t.version_id=v.id),'[]'::jsonb) AS derived_timings,
+           COALESCE((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.raw_payload_id,s.json_pointer)
+             FROM game_version_sources s WHERE s.version_id=v.id),'[]'::jsonb) AS sources,
+           COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.token_index)
+             FROM game_pgn_tokens p WHERE p.version_id=v.id),'[]'::jsonb) AS _pgn_tokens
+           FROM game_versions v JOIN games g ON g.id = v.game_id
+           WHERE g.id = %s AND v.id = COALESCE(%s,g.current_version_id)""",
+        (game_id, version_id),
     ).fetchone()
     if row is None:
         return None
     result = dict(row)
-    selected = int(row["id"])
-    result["nodes"] = [dict(item) for item in conn.execute(
-        "SELECT * FROM game_move_nodes WHERE version_id = %s ORDER BY node_index", (selected,))]
-    result["clocks"] = [_exact_values(dict(item)) for item in conn.execute(
-        "SELECT * FROM game_clock_observations WHERE version_id = %s ORDER BY id", (selected,))]
-    result["derived_timings"] = [_exact_values(dict(item)) for item in conn.execute(
-        "SELECT * FROM game_derived_timings WHERE version_id = %s ORDER BY node_index,method_version", (selected,))]
-    result["sources"] = [dict(item) for item in conn.execute(
-        "SELECT * FROM game_version_sources WHERE version_id = %s ORDER BY raw_payload_id,json_pointer", (selected,))]
+    result["clocks"] = [_exact_values(item, numeric_fields=("seconds", "precision_seconds"))
+                        for item in result["clocks"]]
+    result["derived_timings"] = [_exact_values(item, numeric_fields=("seconds",))
+                                for item in result["derived_timings"]]
     return result
 
 
-def _exact_values(values: dict[str, Any]) -> dict[str, Any]:
+def _exact_values(values: dict[str, Any], *, numeric_fields: tuple[str, ...] = ()) -> dict[str, Any]:
+    # NUMERIC enters JSON as text, never through binary floating point. Decimal
+    # restores the existing string notation, including very small exponents.
+    values = {key: Decimal(value) if key in numeric_fields and value is not None else value
+              for key, value in values.items()}
     return {key: str(value) if isinstance(value, Decimal) else value for key, value in values.items()}
 
 
+@consistent_read
 def export_game_version_pgn(
     conn: Connection, game_id: int, version_id: int | None = None, *, allow_partial: bool = False,
 ) -> str:
@@ -158,13 +183,12 @@ def export_game_version_pgn(
     syntax. Whitespace is normalized. Partial/unsupported exports need explicit
     permission so callers cannot confuse preserved notation with legal replay.
     """
-    revision = read_game_version(conn, game_id, version_id)
+    revision = _read_game_version_snapshot(conn, game_id, version_id)
     if revision is None:
         raise ValueError("Game evidence version does not exist")
     if revision["parse_status"] != "complete" and not allow_partial:
         raise ValueError("Game evidence is not completely interpreted; explicit partial export is required")
-    tokens = conn.execute("SELECT kind,token_text FROM game_pgn_tokens WHERE version_id = %s ORDER BY token_index",
-                          (revision["id"],)).fetchall()
+    tokens = revision["_pgn_tokens"]
     if not tokens:
         raise ValueError("Game move evidence is unavailable")
     output = []

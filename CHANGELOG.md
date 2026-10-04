@@ -173,10 +173,20 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   deduplication skips object I/O; callers owning outer transactions must prepare
   external objects beforehand so source references still roll back atomically.
 
+- Read game revisions and reconstruct PGN from one complete database snapshot,
+  including when a concurrent writer replaces and removes an old unreferenced
+  version. Read/export helpers remain coherent inside READ COMMITTED callers
+  and preserve exact clock and derived-timing decimal strings.
 - Restore explicitly null current game times, opening facts, and participant
   results when a previously observed body becomes current again. Sparse omitted
   facts remain preserved; known live observations cannot retain a stale completed
   end time. The v5 game normalizer can repair existing facts by offline replay.
+- SQS workers poll durable database jobs after missing or unclaimable delivery
+  hints, preventing expired or dead-lettered messages from stranding runnable work.
+
+- Rejected offline upgrade identities preserve another job's progress; failure
+  reporting updates only the requesting job's provider and ownership scope.
+
 - Reconcile renamed accounts with username-only placeholders while preserving
   their game, snapshot, source, and discovery history. Conflicting stable
   provider account IDs produce an explicit error instead of overwriting identity.

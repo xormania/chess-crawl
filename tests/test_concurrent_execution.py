@@ -11,6 +11,7 @@ import pytest
 from chess_crawl.jobs import state
 from chess_crawl.jobs.dispatch import SqsConsumer, SqsDispatcher
 from chess_crawl.jobs.runner import JobRunner
+from chess_crawl.jobs.worker import Worker
 from chess_crawl.ingest import installed_parser_target
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage.raw import store_raw_payload, insert_fetch_log
@@ -174,6 +175,46 @@ def test_dispatch_failure_preserves_outbox_and_duplicate_terminal_delivery_is_ac
     assert calls == [job_id] and sqs.deleted == ["0"]
 
 
+@pytest.mark.parametrize("hint", ["expired", "busy-provider"])
+def test_sqs_worker_polls_database_after_missing_or_unclaimable_hint(database_url: str, hint: str) -> None:
+    sqs = FakeSqs()
+    with connection(database_url, mode="rw") as owner:
+        raw_id = store_raw_payload(owner, RawRecord(
+            provider="lichess", endpoint_type="user_profile", request_url="https://lichess.org/api/user/stored",
+            canonical_source_key="lichess/user/stored/profile",
+            body=json.dumps({"id": "stored", "username": "Stored"}).encode(), media_type="application/json",
+        ))
+        local = state.enqueue_job(
+            owner, provider="lichess", kind="normalize_payload", target=str(raw_id), priority=20,
+        ).job_id
+        blocked = None
+        if hint == "expired":
+            assert SqsDispatcher(sqs, "queue").publish_one(owner)
+            assert require_row(owner.execute("SELECT delivered_at FROM dispatch_outbox WHERE job_id=%s", (local,)))[0] is not None
+            sqs.messages.clear()  # Published hint expired or moved to the DLQ.
+        else:
+            active = state.enqueue_job(
+                owner, provider="lichess", kind="fetch_user_profile", target="active", priority=1,
+            ).job_id
+            blocked = state.enqueue_job(
+                owner, provider="lichess", kind="fetch_user_profile", target="blocked", priority=2,
+            ).job_id
+            assert state.claim_next_job(owner, worker_id="other-acquisition", job_id=active) is not None
+            sqs.messages = [{"Body": json.dumps({"job_id": blocked}), "ReceiptHandle": "busy"}]
+        try:
+            assert Worker(database_url, queue_consumer=SqsConsumer(sqs, "queue", wait_seconds=0)).run(once=True) == 1
+        finally:
+            state.release_job_ownership(owner)
+        completed = state.get_job(owner, local)
+        assert completed is not None and completed.state == "done"
+        assert require_row(owner.execute("SELECT normalization_status FROM raw_payloads WHERE id=%s", (raw_id,)))[0] == "parsed"
+        assert require_row(owner.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == 0
+        if blocked is not None:
+            pending = state.get_job(owner, blocked)
+            assert pending is not None and pending.state == "pending"
+            assert sqs.deleted == []
+
+
 def test_processing_jobs_ignore_provider_backoff(initialized_conn) -> None:
     state.defer_provider(initialized_conn, "lichess", not_before=1000, reason="provider unavailable", now=1)
     state.enqueue_job(initialized_conn, provider="lichess", kind="fetch_user_profile", target="remote", priority=1)
@@ -257,6 +298,44 @@ def test_offline_upgrade_resume_rejects_changed_installed_manifest(initialized_c
     assert runner.run(max_jobs=1).errors == 1
     progress = require_row(initialized_conn.execute("SELECT * FROM data_upgrades WHERE id='pinned-parser'"))
     assert progress["processed"] == 1 and progress["state"] == "error"
+
+
+@pytest.mark.parametrize("second_scope", ["workspace-alpha", "workspace-beta"])
+def test_offline_upgrade_identity_rejection_preserves_existing_progress(initialized_conn, second_scope) -> None:
+    first = state.enqueue_job(
+        initialized_conn, provider="lichess", kind="reprocess_archive", target="upgrade-shared",
+        params={"owner_scope": "workspace-alpha"},
+    ).job_id
+    runner = JobRunner(initialized_conn, stage="processing")
+    assert runner.run(max_jobs=1).done == 1
+    before = dict(require_row(initialized_conn.execute("SELECT * FROM data_upgrades WHERE id='upgrade-shared'")))
+    assert before["job_id"] == first and before["state"] == "done"
+
+    second = state.enqueue_job(
+        initialized_conn, provider="lichess", kind="reprocess_archive", target="upgrade-shared",
+        params={"owner_scope": second_scope},
+    ).job_id
+    assert second != first
+    assert runner.run(max_jobs=1).errors == 1
+    assert dict(require_row(initialized_conn.execute("SELECT * FROM data_upgrades WHERE id='upgrade-shared'"))) == before
+    rejected = state.get_job(initialized_conn, second)
+    assert rejected is not None and rejected.state == "error"
+
+
+def test_offline_upgrade_owned_replay_failure_records_its_error(initialized_conn) -> None:
+    store_raw_payload(initialized_conn, RawRecord(
+        provider="lichess", endpoint_type="user_profile", request_url="https://lichess.org/api/user/broken",
+        canonical_source_key="lichess/user/broken/profile", body=b"not-json", media_type="application/json",
+    ))
+    job_id = state.enqueue_job(
+        initialized_conn, provider="lichess", kind="reprocess_archive", target="upgrade-broken",
+        params={"owner_scope": "workspace-alpha"},
+    ).job_id
+    assert JobRunner(initialized_conn, stage="processing").run(max_jobs=1).errors == 1
+    progress = require_row(initialized_conn.execute("SELECT * FROM data_upgrades WHERE id='upgrade-broken'"))
+    assert progress["job_id"] == job_id and progress["owner_scope"] == "workspace-alpha"
+    assert progress["state"] == "error" and progress["error"]
+    assert progress["processed"] == 0
 
 
 def test_dispatch_ignores_stale_revisions_and_routes_stages(initialized_conn) -> None:
