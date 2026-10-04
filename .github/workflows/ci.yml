@@ -8,18 +8,21 @@ on:
       - dev
       - 'work/**'
       - master
+  push:
+    branches: [master]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   promotion-source:
     name: Require dev -> master
-    if: github.base_ref == 'master'
+    if: github.event_name == 'pull_request' && github.base_ref == 'master'
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -54,7 +57,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.13"]
     steps:
-      - name: Checkout merge result and its parents
+      - name: Checkout tested revision and its parents
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
@@ -62,19 +65,24 @@ jobs:
       - name: Determine affected checks
         id: scope
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
-        run: python .github/scripts/ci_scope.py --base-ref "$BASE_REF"
+        run: python .github/scripts/ci_scope.py --event-name "$EVENT_NAME" --base-ref "$BASE_REF"
 
       - name: Validate CI prerequisites
         env:
           SCOPE_RESULT: ${{ steps.scope.outcome }}
           RUN_CHECK: ${{ steps.scope.outputs.offline }}
+          EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           PROMOTION_RESULT: ${{ needs.promotion-source.result }}
         run: |
           test "$SCOPE_RESULT" = success
           test "$RUN_CHECK" = true || test "$RUN_CHECK" = false
-          test "$BASE_REF" != master || test "$PROMOTION_RESULT" = success
+          test "$EVENT_NAME" = pull_request || test "$RUN_CHECK" = true
+          if [ "$EVENT_NAME" = pull_request ] && [ "$BASE_REF" = master ]; then
+            test "$PROMOTION_RESULT" = success
+          fi
           echo "Offline checks selected: $RUN_CHECK" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Python
@@ -170,7 +178,7 @@ jobs:
       CI_VARIANT: compose
       COMPOSE_FILE: compose.yaml:.github/compose.ci.yaml
     steps:
-      - name: Checkout merge result and its parents
+      - name: Checkout tested revision and its parents
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
@@ -178,19 +186,24 @@ jobs:
       - name: Determine affected checks
         id: scope
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
-        run: python .github/scripts/ci_scope.py --base-ref "$BASE_REF"
+        run: python .github/scripts/ci_scope.py --event-name "$EVENT_NAME" --base-ref "$BASE_REF"
 
       - name: Validate CI prerequisites
         env:
           SCOPE_RESULT: ${{ steps.scope.outcome }}
           RUN_CHECK: ${{ steps.scope.outputs.compose }}
+          EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           PROMOTION_RESULT: ${{ needs.promotion-source.result }}
         run: |
           test "$SCOPE_RESULT" = success
           test "$RUN_CHECK" = true || test "$RUN_CHECK" = false
-          test "$BASE_REF" != master || test "$PROMOTION_RESULT" = success
+          test "$EVENT_NAME" = pull_request || test "$RUN_CHECK" = true
+          if [ "$EVENT_NAME" = pull_request ] && [ "$BASE_REF" = master ]; then
+            test "$PROMOTION_RESULT" = success
+          fi
           echo "Compose smoke selected: $RUN_CHECK" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Python

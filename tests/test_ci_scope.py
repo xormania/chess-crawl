@@ -63,11 +63,18 @@ def repo(tmp_path: Path) -> Path:
     return repository(tmp_path, {"src/original.py": "content\n", "docs/original.md": "content\n"})
 
 
-def _run(repo: Path, base_ref: str = "dev") -> tuple[subprocess.CompletedProcess[str], str, str]:
+def _run(
+    repo: Path, base_ref: str | None = "dev", *, event_name: str | None = "pull_request",
+) -> tuple[subprocess.CompletedProcess[str], str, str]:
     output = repo.parent / "outputs"
     summary = repo.parent / "summary"
+    command = [sys.executable, str(SCRIPT)]
+    if event_name is not None:
+        command.extend(["--event-name", event_name])
+    if base_ref is not None:
+        command.extend(["--base-ref", base_ref])
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--base-ref", base_ref],
+        command,
         cwd=repo,
         env={**os.environ, "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)},
         capture_output=True, text=True, timeout=10,
@@ -152,7 +159,67 @@ def test_promotion_runs_all_checks_for_documentation(repo: Path) -> None:
     assert output == "offline=true\ncompose=true\n"
 
 
-def test_non_merge_head_fails_without_outputs(repo: Path) -> None:
+@pytest.mark.parametrize("history", ["root", "squash", "merge", "shallow"])
+@pytest.mark.parametrize("event_name", ["push", "workflow_dispatch"])
+def test_non_pr_events_always_run_all_checks(
+    repo: Path, tmp_path: Path, history: str, event_name: str,
+) -> None:
+    if history == "squash":
+        _write(repo, "docs/new.md")
+        _commit(repo)
+        _git(repo, "checkout", "dev")
+        _git(repo, "merge", "--squash", "feature")
+        _commit(repo)
+        assert len(_git(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()) == 2
+    elif history in {"merge", "shallow"}:
+        _write(repo, "docs/new.md")
+        _merge(repo)
+        if history == "shallow":
+            shallow = tmp_path / "shallow"
+            _git(tmp_path, "clone", "--depth=1", repo.as_uri(), str(shallow))
+            repo = shallow
+    result, output, summary = _run(repo, None, event_name=event_name)
+    assert result.returncode == 0, result.stderr
+    assert output == "offline=true\ncompose=true\n"
+    assert event_name in summary
+
+
+@pytest.mark.parametrize("event_name", ["push", "workflow_dispatch"])
+def test_non_pr_scope_does_not_consult_git(tmp_path: Path, event_name: str) -> None:
+    # A directory without Git metadata makes any Git-dependent classification
+    # fail, even if the implementation were to accidentally accept linear HEADs.
+    directory = tmp_path / "no-repository"
+    directory.mkdir()
+    result, output, _ = _run(directory, "", event_name=event_name)
+    assert result.returncode == 0, result.stderr
+    assert output == "offline=true\ncompose=true\n"
+
+
+@pytest.mark.parametrize("event_name", [None, "", "pull_request_target", "repository_dispatch"])
+def test_missing_or_unsupported_event_fails_without_outputs(
+    repo: Path, event_name: str | None,
+) -> None:
+    _write(repo, "docs/new.md")
+    _merge(repo)
+    result, output, summary = _run(repo, event_name=event_name)
+    assert result.returncode != 0
+    assert output == summary == ""
+
+
+@pytest.mark.parametrize("base_ref", [None, ""])
+def test_pr_requires_a_base_ref(repo: Path, base_ref: str | None) -> None:
+    _write(repo, "docs/new.md")
+    _merge(repo)
+    result, output, summary = _run(repo, base_ref)
+    assert result.returncode != 0
+    assert output == summary == ""
+
+
+@pytest.mark.parametrize("history", ["root", "linear"])
+def test_non_merge_pr_head_fails_without_outputs(repo: Path, history: str) -> None:
+    if history == "linear":
+        _write(repo, "docs/new.md")
+        _commit(repo)
     result, output, summary = _run(repo)
     assert result.returncode != 0
     assert "two-parent" in result.stderr
