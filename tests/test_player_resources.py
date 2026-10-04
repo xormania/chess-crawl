@@ -9,6 +9,7 @@ from datetime import date
 import httpx
 import pytest
 
+from chess_crawl import ingest
 from chess_crawl.config import Config
 from chess_crawl.ingest import fetch_user_profile, fetch_user_resource, replay_raw_payload
 from chess_crawl.normalize.resources import normalize_resource_payload
@@ -525,6 +526,16 @@ def test_fresh_deduplicated_resource_belongs_to_current_username_holder(initiali
     assert require_row(conn.execute(
         "SELECT provider_user_id FROM user_resource_snapshots WHERE id = %s", (snapshot,),
     ))[0] == current
+    assert [row["observed_at"] for row in resource_history(conn, former)] == [110]
+    assert [row["observed_at"] for row in resource_history(conn, current)] == [400]
+    current_profile = player_profile(conn, "chess.com", "Alice")
+    assert current_profile is not None
+    alice_alias = next(row for row in current_profile["aliases"] if row["username_normalized"] == "alice")
+    assert alice_alias["first_seen_at"] == 300
+
+    replay_raw_payload(conn, duplicate_id)
+    assert [row["observed_at"] for row in resource_history(conn, former)] == [110]
+    assert [row["observed_at"] for row in resource_history(conn, current)] == [400]
 
 
 def test_resource_attempt_history_stays_with_renamed_account(initialized_conn: Connection) -> None:
@@ -544,6 +555,49 @@ def test_resource_attempt_history_stays_with_renamed_account(initialized_conn: C
     assert int(renamed["id"]) == former and int(reused["id"]) == current
     assert [row["status_code"] for row in renamed["resource_attempts"]] == [404]
     assert reused["resource_attempts"] == []
+
+
+def test_conditional_resource_refresh_after_username_reuse_binds_current_account(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    former, _ = _profile(conn, {"username": "Alice", "player_id": 1}, provider="chess.com", at=100)
+    responses = iter([
+        httpx.Response(200, headers={"etag": '"clubs"'}, json={"clubs": []}),
+        httpx.Response(304, headers={"etag": '"clubs"'}),
+    ])
+    transport = httpx.MockTransport(lambda request: next(responses))
+    fetch_user_resource(conn, "chess.com", "Alice", "clubs", config=_config(), transport=transport)
+    _profile(conn, {"username": "FormerAlice", "player_id": 1}, provider="chess.com", at=200)
+    current, _ = _profile(conn, {"username": "Alice", "player_id": 2}, provider="chess.com", at=300)
+    result = fetch_user_resource(conn, "chess.com", "Alice", "clubs", config=_config(), transport=transport)
+    assert result.status_code == 304
+    assert len(resource_history(conn, former)) == 1
+    assert len(resource_history(conn, current)) == 1
+
+
+def test_deferred_resource_replay_uses_account_bound_at_acquisition(
+    initialized_conn: Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = initialized_conn
+    former, _ = _profile(conn, {"username": "Alice", "player_id": 1}, provider="chess.com", at=100)
+    original = ingest.normalize_resource_payload
+
+    def stop(*args, **kwargs):
+        raise RuntimeError("stop")
+
+    with monkeypatch.context() as failed:
+        failed.setattr(ingest, "normalize_resource_payload", stop)
+        with pytest.raises(RuntimeError, match="stop"):
+            ingest.fetch_user_resource(
+                conn, "chess.com", "Alice", "clubs", config=_config(),
+                transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"clubs": []})),
+            )
+    raw_id = int(require_row(conn.execute("SELECT id FROM raw_payloads WHERE endpoint_type='user_resource'"))[0])
+    _profile(conn, {"username": "FormerAlice", "player_id": 1}, provider="chess.com", at=200)
+    current, _ = _profile(conn, {"username": "Alice", "player_id": 2}, provider="chess.com", at=300)
+    assert ingest.normalize_resource_payload is original
+    replay_raw_payload(conn, raw_id)
+    assert len(resource_history(conn, former)) == 1
+    assert resource_history(conn, current) == []
 
 
 @pytest.mark.parametrize("key,parameters,data", [("activity", None, []), ("performance", {"perf": "blitz"}, {})])

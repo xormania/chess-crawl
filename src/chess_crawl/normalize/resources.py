@@ -8,7 +8,7 @@ from datetime import date
 
 from chess_crawl.providers.resources import get_resource, resource_owner_scope
 from chess_crawl.storage.db import Connection, transaction
-from chess_crawl.storage.player_profiles import record_alias, resource_account, store_resource_snapshot
+from chess_crawl.storage.player_profiles import record_alias, resource_account, resource_accounts, store_resource_snapshot
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user
 
@@ -18,6 +18,7 @@ PARSER_VERSION = "player-resources-normalizer-v1"
 
 def normalize_resource_payload(
     conn: Connection, raw_payload_id: int, *, prefer_observed_identity: bool = True,
+    fetch_log_id: int | None = None,
 ) -> int:
     raw = read_raw_payload(conn, raw_payload_id)
     if raw.endpoint_type != "user_resource":
@@ -44,28 +45,37 @@ def normalize_resource_payload(
             note = f"{len(issues)} uninterpreted rating history element(s): " + "; ".join(issues[:5])
     with transaction(conn):
         observed_at = payload_observed_at(conn, raw_payload_id)
-        user_id = resource_account(
-            conn, raw.provider, username, raw_payload_id,
-            prefer_observed_identity=prefer_observed_identity,
-        )
-        if user_id is None:
-            user_id = upsert_provider_user(conn, provider=raw.provider, username=username, now=observed_at)
-        if owner_scope == "public":
-            record_alias(conn, user_id, username, observed_at=observed_at,
-                         raw_payload_id=raw_payload_id, first_observed_at=raw.fetched_at)
-        snapshot_id = store_resource_snapshot(
-            conn, user_id=user_id, resource_key=resource_key, parameters=parameters, native_data=data,
-            coverage_status=status, coverage_note=note, parser_version=PARSER_VERSION, raw_payload_id=raw_payload_id,
-            rating_points=points, owner_scope=owner_scope,
-        )
-        insert_source_record(
-            conn, entity_type="user_resource", entity_id=snapshot_id, provider=raw.provider,
-            endpoint_type=raw.endpoint_type, raw_payload_id=raw_payload_id, source_key=raw.canonical_source_key,
-        )
+        user_ids = resource_accounts(conn, raw_payload_id) if prefer_observed_identity else []
+        replaying_bound_accounts = bool(user_ids)
+        if not user_ids:
+            user_id = resource_account(
+                conn, raw.provider, username, raw_payload_id,
+                prefer_observed_identity=prefer_observed_identity,
+            )
+            if user_id is None:
+                user_id = upsert_provider_user(conn, provider=raw.provider, username=username, now=observed_at)
+            user_ids = [user_id]
+        snapshot_ids = []
+        for user_id in user_ids:
+            if owner_scope == "public" and not replaying_bound_accounts:
+                record_alias(
+                    conn, user_id, username, observed_at=observed_at, raw_payload_id=raw_payload_id,
+                    first_observed_at=raw.fetched_at if prefer_observed_identity else observed_at,
+                )
+            snapshot_id = store_resource_snapshot(
+                conn, user_id=user_id, resource_key=resource_key, parameters=parameters, native_data=data,
+                coverage_status=status, coverage_note=note, parser_version=PARSER_VERSION, raw_payload_id=raw_payload_id,
+                rating_points=points, owner_scope=owner_scope, fetch_log_id=fetch_log_id,
+            )
+            snapshot_ids.append(snapshot_id)
+            insert_source_record(
+                conn, entity_type="user_resource", entity_id=snapshot_id, provider=raw.provider,
+                endpoint_type=raw.endpoint_type, raw_payload_id=raw_payload_id, source_key=raw.canonical_source_key,
+            )
         update_raw_payload_status(
             conn, raw_payload_id, status="parsed", parser_version=PARSER_VERSION, normalized_at=int(time.time()),
         )
-    return snapshot_id
+    return snapshot_ids[0]
 
 
 def _username(source_key: str) -> str:

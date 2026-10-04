@@ -138,3 +138,17 @@ def test_fresh_deduplicated_stats_belong_to_current_username_holder(initialized_
     assert int(renamed["id"]) == former and int(reused["id"]) == current
     assert reused["statistics"] is not None
     assert reused["statistics"]["native_data"] == stats
+    observations = conn.execute(
+        """SELECT provider_user_id, array_agg(captured_at ORDER BY captured_at) AS times
+           FROM user_observations WHERE endpoint_type = 'user_stats'
+           GROUP BY provider_user_id ORDER BY provider_user_id"""
+    ).fetchall()
+    assert [row["provider_user_id"] for row in observations] == [former, current]
+    assert all(len(row["times"]) == 1 for row in observations)
+    assert observations[0]["times"][0] <= observations[1]["times"][0]
+    replay_raw_payload(conn, first.raw_payload_id)
+    replayed = conn.execute(
+        """SELECT provider_user_id, COUNT(*) AS count FROM user_observations
+           WHERE endpoint_type = 'user_stats' GROUP BY provider_user_id ORDER BY provider_user_id"""
+    ).fetchall()
+    assert [(row["provider_user_id"], row["count"]) for row in replayed] == [(former, 1), (current, 1)]

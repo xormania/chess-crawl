@@ -88,34 +88,34 @@ def record_alias(
 
 
 @atomic
-def record_profile_observations(conn: Connection, user_id: int, snapshot_id: int, raw_payload_id: int) -> None:
+def record_profile_observations(
+    conn: Connection, user_id: int, snapshot_id: int, raw_payload_id: int, *, fetch_log_id: int | None = None,
+) -> None:
     conn.execute(
         """INSERT INTO user_observations(provider_user_id, snapshot_id, raw_payload_id, fetch_log_id,
                    observation_key, captured_at, endpoint_type)
            SELECT %s, %s, f.raw_payload_id, f.id, 'fetch:' || f.id, f.attempted_at, r.endpoint_type
            FROM fetch_logs f JOIN raw_payloads r ON r.id = f.raw_payload_id
            WHERE f.raw_payload_id = %s AND f.status_code IN (200,304)
+             AND (%s::bigint IS NULL OR f.id = %s)
+             AND (f.provider_user_id IS NULL OR f.provider_user_id = %s)
            ON CONFLICT(observation_key) DO UPDATE SET provider_user_id = excluded.provider_user_id,
              snapshot_id = excluded.snapshot_id
            WHERE user_observations.snapshot_id <> excluded.snapshot_id
-             OR user_observations.provider_user_id <> excluded.provider_user_id""",
-        (user_id, snapshot_id, raw_payload_id),
+             AND user_observations.provider_user_id = excluded.provider_user_id""",
+        (user_id, snapshot_id, raw_payload_id, fetch_log_id, fetch_log_id, user_id),
     )
     conn.execute(
         """INSERT INTO user_observations(provider_user_id, snapshot_id, raw_payload_id,
                    observation_key, captured_at, endpoint_type)
            SELECT %s, %s, r.id, 'raw:' || r.id, r.fetched_at, r.endpoint_type FROM raw_payloads r
            WHERE r.id = %s AND NOT EXISTS(SELECT 1 FROM fetch_logs f WHERE f.raw_payload_id = r.id AND f.status_code IN (200,304))
+           AND %s::bigint IS NULL
            ON CONFLICT(observation_key) DO UPDATE SET provider_user_id = excluded.provider_user_id,
              snapshot_id = excluded.snapshot_id
            WHERE user_observations.snapshot_id <> excluded.snapshot_id
-             OR user_observations.provider_user_id <> excluded.provider_user_id""",
-        (user_id, snapshot_id, raw_payload_id),
-    )
-    conn.execute(
-        """DELETE FROM user_observations o WHERE o.observation_key = %s
-           AND EXISTS(SELECT 1 FROM fetch_logs f WHERE f.raw_payload_id = o.raw_payload_id AND f.status_code IN (200,304))""",
-        (f"raw:{raw_payload_id}",),
+             AND user_observations.provider_user_id = excluded.provider_user_id""",
+        (user_id, snapshot_id, raw_payload_id, fetch_log_id),
     )
 
 
@@ -137,7 +137,7 @@ def store_resource_snapshot(
     conn: Connection, *, user_id: int, resource_key: str, parameters: dict[str, Any],
     native_data: object, coverage_status: str, coverage_note: str | None, parser_version: str,
     raw_payload_id: int, rating_points: list[tuple[int, int, str, date, int, str]],
-    owner_scope: str = "public",
+    owner_scope: str = "public", fetch_log_id: int | None = None,
 ) -> int:
     snapshot = require_row(conn.execute(
         """INSERT INTO user_resource_snapshots(provider_user_id, owner_scope, resource_key, parameters, parameters_hash,
@@ -161,32 +161,39 @@ def store_resource_snapshot(
                     rating_date, rating, source_pointer) VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                 [(snapshot_id, *point) for point in rating_points],
             )
-    record_resource_observations(conn, snapshot_id, raw_payload_id)
+    record_resource_observations(conn, snapshot_id, raw_payload_id, fetch_log_id=fetch_log_id)
     return snapshot_id
 
 
 @atomic
-def record_resource_observations(conn: Connection, snapshot_id: int, raw_payload_id: int) -> None:
+def record_resource_observations(
+    conn: Connection, snapshot_id: int, raw_payload_id: int, *, fetch_log_id: int | None = None,
+) -> None:
     conn.execute(
         """INSERT INTO user_resource_observations(snapshot_id, raw_payload_id, fetch_log_id, observation_key, captured_at)
            SELECT %s, f.raw_payload_id, f.id, 'fetch:' || f.id, f.attempted_at FROM fetch_logs f
            WHERE f.raw_payload_id = %s AND f.status_code IN (200,304)
+             AND (%s::bigint IS NULL OR f.id = %s)
+             AND (f.provider_user_id IS NULL OR f.provider_user_id = (
+                 SELECT provider_user_id FROM user_resource_snapshots WHERE id = %s))
            ON CONFLICT(observation_key) DO UPDATE SET snapshot_id = excluded.snapshot_id
-           WHERE user_resource_observations.snapshot_id <> excluded.snapshot_id""",
-        (snapshot_id, raw_payload_id),
+           WHERE user_resource_observations.snapshot_id <> excluded.snapshot_id
+             AND (SELECT provider_user_id FROM user_resource_snapshots
+                  WHERE id = user_resource_observations.snapshot_id) =
+                 (SELECT provider_user_id FROM user_resource_snapshots WHERE id = excluded.snapshot_id)""",
+        (snapshot_id, raw_payload_id, fetch_log_id, fetch_log_id, snapshot_id),
     )
     conn.execute(
         """INSERT INTO user_resource_observations(snapshot_id, raw_payload_id, observation_key, captured_at)
            SELECT %s, r.id, 'raw:' || r.id, r.fetched_at FROM raw_payloads r WHERE r.id = %s
+           AND %s::bigint IS NULL
            AND NOT EXISTS(SELECT 1 FROM fetch_logs f WHERE f.raw_payload_id = r.id AND f.status_code IN (200,304))
            ON CONFLICT(observation_key) DO UPDATE SET snapshot_id = excluded.snapshot_id
-           WHERE user_resource_observations.snapshot_id <> excluded.snapshot_id""",
-        (snapshot_id, raw_payload_id),
-    )
-    conn.execute(
-        """DELETE FROM user_resource_observations o WHERE o.observation_key = %s
-           AND EXISTS(SELECT 1 FROM fetch_logs f WHERE f.raw_payload_id = o.raw_payload_id AND f.status_code IN (200,304))""",
-        (f"raw:{raw_payload_id}",),
+           WHERE user_resource_observations.snapshot_id <> excluded.snapshot_id
+             AND (SELECT provider_user_id FROM user_resource_snapshots
+                  WHERE id = user_resource_observations.snapshot_id) =
+                 (SELECT provider_user_id FROM user_resource_snapshots WHERE id = excluded.snapshot_id)""",
+        (snapshot_id, raw_payload_id, fetch_log_id),
     )
 
 
@@ -201,7 +208,7 @@ def refresh_resource_observations(conn: Connection, raw_payload_id: int) -> None
 
 
 @atomic
-def record_resource_attempt(conn: Connection, record: RawRecord, raw_payload_id: int | None) -> None:
+def record_resource_attempt(conn: Connection, record: RawRecord, raw_payload_id: int | None) -> int:
     """Keep failed/unavailable resources distinguishable from an empty listing."""
     from chess_crawl.storage.repository import upsert_provider_user
 
@@ -225,6 +232,7 @@ def record_resource_attempt(conn: Connection, record: RawRecord, raw_payload_id:
         (user_id, record.provider, record.target_username, record.owner_scope, params["resource_key"], Jsonb(values),
          canonical_hash(values), record.canonical_source_key, record.fetched_at, record.http_status, raw_payload_id),
     )
+    return user_id
 
 
 def resource_attempts(conn: Connection, provider_user_id: int, *, owner_scope: str = "public") -> list[dict[str, Any]]:
@@ -301,6 +309,23 @@ def resource_account(
     return int(aliases[0]["provider_user_id"]) if len(aliases) == 1 else None
 
 
+def resource_accounts(conn: Connection, raw_payload_id: int) -> list[int]:
+    """Accounts already bound to retained occurrences of one resource body."""
+    return [int(row["provider_user_id"]) for row in conn.execute(
+        """SELECT provider_user_id, MAX(observed_at) AS last_observed_at FROM (
+             SELECT s.provider_user_id, o.captured_at AS observed_at
+             FROM user_resource_observations o
+             JOIN user_resource_snapshots s ON s.id = o.snapshot_id
+             WHERE o.raw_payload_id = %s
+             UNION ALL
+             SELECT f.provider_user_id, f.attempted_at FROM fetch_logs f
+             WHERE f.raw_payload_id = %s AND f.status_code IN (200,304)
+               AND f.provider_user_id IS NOT NULL
+           ) evidence GROUP BY provider_user_id ORDER BY MAX(observed_at) DESC, provider_user_id""",
+        (raw_payload_id, raw_payload_id),
+    )]
+
+
 def stats_account(
     conn: Connection, provider: str, username: str, raw_payload_id: int, *,
     prefer_observed_identity: bool = True,
@@ -324,6 +349,24 @@ def stats_account(
            WHERE p.provider = %s AND a.username_normalized = %s LIMIT 2""", (provider, username.lower()),
     ).fetchall()
     return dict(aliases[0]) if len(aliases) == 1 else None
+
+
+def stats_accounts(conn: Connection, raw_payload_id: int) -> list[dict[str, Any]]:
+    """Accounts already bound to retained occurrences of one statistics body."""
+    return [dict(row) for row in conn.execute(
+        """SELECT p.* FROM provider_users p JOIN (
+             SELECT provider_user_id, MAX(observed_at) AS last_observed_at FROM (
+               SELECT o.provider_user_id, o.captured_at AS observed_at FROM user_observations o
+               WHERE o.raw_payload_id = %s AND o.endpoint_type = 'user_stats'
+               UNION ALL
+               SELECT f.provider_user_id, f.attempted_at FROM fetch_logs f
+               WHERE f.raw_payload_id = %s AND f.endpoint_type = 'user_stats'
+                 AND f.status_code IN (200,304) AND f.provider_user_id IS NOT NULL
+             ) evidence GROUP BY provider_user_id
+           ) bound ON bound.provider_user_id = p.id
+           ORDER BY bound.last_observed_at DESC, p.id""",
+        (raw_payload_id, raw_payload_id),
+    )]
 
 
 def player_profile(conn: Connection, provider: str, username: str, *, owner_scope: str = "public") -> dict[str, Any] | None:

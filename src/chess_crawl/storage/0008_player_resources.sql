@@ -1,5 +1,7 @@
 -- Profile bodies are deduplicated; observations retain every successful fetch.
 ALTER TABLE raw_payloads ADD COLUMN owner_scope TEXT NOT NULL DEFAULT 'public';
+ALTER TABLE fetch_logs ADD COLUMN provider_user_id BIGINT REFERENCES provider_users(id);
+CREATE INDEX idx_fetch_log_provider_user ON fetch_logs(provider_user_id, id);
 -- Historical request captures cannot prove whether OAuth was used, and bodies
 -- may be compressed or external. Keep all old Lichess profiles out of public
 -- reads until a source replay verifies the absence of caller-relative fields.
