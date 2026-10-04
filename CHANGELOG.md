@@ -26,6 +26,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 - Migration-time quarantine of historical Lichess profile captures until safe
   source replay, provider-native verification/streaming flags, and queryable
   highest/lowest tactics and lessons ratings.
+- Fresh statistics/resources follow the account currently holding a username
+  even when raw-body deduplication reuses older bytes; acquisition attempts stay
+  attached to stable account identity across renames and username reuse.
 - Public resource requests omit configured OAuth credentials; private resource
   collection does not publish its timestamps in shared alias history.
 

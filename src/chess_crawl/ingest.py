@@ -284,7 +284,10 @@ def _store_and_normalize(
     if game_payload:
         normalized = normalizer(conn, raw_payload_id, crawl_run_id=crawl_run_id, max_games=max_games)
     else:
-        normalized = normalizer(conn, raw_payload_id)
+        # A network acquisition belongs to the account currently holding the
+        # requested username. Explicit raw replay keeps the retained observed
+        # identity instead (see replay_raw_payload()).
+        normalized = normalizer(conn, raw_payload_id, prefer_observed_identity=False)
     normalized_ids = _normalized_ids(normalized)
     return IngestResult(
         provider=record.provider,

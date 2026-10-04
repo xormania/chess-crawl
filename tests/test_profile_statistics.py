@@ -11,8 +11,10 @@ import pytest
 
 from chess_crawl.config import Config
 from chess_crawl.ingest import fetch_chesscom_stats, replay_raw_payload
-from chess_crawl.normalize.users import PARSER_VERSION
-from chess_crawl.storage.raw import read_raw_payload, update_raw_payload_status
+from chess_crawl.normalize.users import PARSER_VERSION, normalize_user_payload
+from chess_crawl.providers.base import RawRecord
+from chess_crawl.storage.player_profiles import player_profile
+from chess_crawl.storage.raw import insert_fetch_log, read_raw_payload, store_raw_payload, update_raw_payload_status
 
 
 @pytest.mark.parametrize(("stats", "expected"), [
@@ -96,3 +98,43 @@ def test_preexisting_v2_stats_are_repaired_without_duplicate_snapshots(
     assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
     assert read_raw_payload(conn, first.raw_payload_id).parser_version == PARSER_VERSION
     assert PARSER_VERSION != "users-normalizer-v2"
+
+
+def test_fresh_deduplicated_stats_belong_to_current_username_holder(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+
+    def profile(username: str, player_id: int, at: int) -> int:
+        raw_id = store_raw_payload(conn, RawRecord(
+            provider="chess.com", endpoint_type="user_profile",
+            request_url=f"https://api.chess.com/pub/player/{username.lower()}",
+            canonical_source_key=f"chess.com/player/{username.lower()}/profile",
+            target_username=username, fetched_at=at,
+            body=json.dumps({"username": username, "player_id": player_id}).encode(),
+        ))
+        insert_fetch_log(conn, provider="chess.com", endpoint_type="user_profile",
+                         url=f"https://api.chess.com/pub/player/{username.lower()}",
+                         raw_payload_id=raw_id, status_code=200, attempted_at=at)
+        user_id = normalize_user_payload(conn, raw_id)
+        assert user_id is not None
+        return user_id
+
+    former = profile("Alice", 1, 100)
+    stats = {"chess_blitz": {"last": {"rating": 1500}, "record": {"win": 1, "loss": 0, "draw": 0}}}
+    first = fetch_chesscom_stats(
+        conn, "Alice", config=Config(chesscom_delay_s=0, max_retries=0),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=stats)),
+    )
+    assert first.raw_payload_id is not None
+    profile("FormerAlice", 1, 200)
+    current = profile("Alice", 2, 300)
+    second = fetch_chesscom_stats(
+        conn, "Alice", config=Config(chesscom_delay_s=0, max_retries=0),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=stats)),
+    )
+    assert second.raw_payload_id == first.raw_payload_id
+    renamed = player_profile(conn, "chess.com", "FormerAlice")
+    reused = player_profile(conn, "chess.com", "Alice")
+    assert renamed is not None and reused is not None
+    assert int(renamed["id"]) == former and int(reused["id"]) == current
+    assert reused["statistics"] is not None
+    assert reused["statistics"]["native_data"] == stats

@@ -22,7 +22,9 @@ from chess_crawl.storage.player_profiles import (
 PARSER_VERSION = "users-normalizer-v5"
 
 
-def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
+def normalize_user_payload(
+    conn: Connection, raw_payload_id: int, *, prefer_observed_identity: bool = True,
+) -> int | None:
     raw = read_raw_payload(conn, raw_payload_id)
     if raw.provider == "lichess" and raw.endpoint_type == "user_profile":
         data = json.loads(raw.body)
@@ -49,7 +51,13 @@ def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
         if not isinstance(native_data, dict):
             raise ValueError("user profiles and statistics must be JSON objects")
         observed_at = payload_observed_at(conn, raw_payload_id)
-        account = stats_account(conn, user.provider, user.display_username, raw_payload_id) if raw.endpoint_type == "user_stats" else None
+        account = (
+            stats_account(
+                conn, user.provider, user.display_username, raw_payload_id,
+                prefer_observed_identity=prefer_observed_identity,
+            )
+            if raw.endpoint_type == "user_stats" else None
+        )
         provider_user_id = upsert_provider_user(
             conn,
             provider=user.provider,

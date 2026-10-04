@@ -341,7 +341,9 @@ def test_unavailable_resource_is_not_normalized_as_empty(initialized_conn: Conne
         transport=httpx.MockTransport(lambda request: httpx.Response(404)),
     )
     assert result.status_code == 404 and result.raw_payload_id is None
-    evidence = resource_attempts(initialized_conn, "chess.com", "Alice")
+    user = player_profile(initialized_conn, "chess.com", "Alice")
+    assert user is not None
+    evidence = resource_attempts(initialized_conn, int(user["id"]))
     assert len(evidence) == 1 and evidence[0]["status_code"] == 404
     assert evidence[0]["raw_payload_id"] is None
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM user_resource_snapshots"))[0] == 0
@@ -498,6 +500,50 @@ def test_private_resource_does_not_publish_collection_timestamps_as_alias_histor
     assert public["aliases"] == before["aliases"]
     assert profile_history(conn, user_id) == before_history
     assert public["resources"] == [] and public["resource_attempts"] == []
+
+
+def test_fresh_deduplicated_resource_belongs_to_current_username_holder(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    former, _ = _profile(conn, {"username": "Alice", "player_id": 1}, provider="chess.com", at=100)
+    _, raw_id = _resource(conn, "chess.com", "clubs", {"clubs": []}, at=110)
+    assert resource_current(conn, former)
+
+    _profile(conn, {"username": "FormerAlice", "player_id": 1}, provider="chess.com", at=200)
+    current, _ = _profile(conn, {"username": "Alice", "player_id": 2}, provider="chess.com", at=300)
+    duplicate_id = store_raw_payload(conn, RawRecord(
+        provider="chess.com", endpoint_type="user_resource",
+        request_url=get_resource("chess.com", "clubs").url("Alice", None),
+        canonical_source_key=resource_source_key("chess.com", "Alice", "clubs", None),
+        request_params={"resource_key": "clubs", "parameters": {}, "authenticated": False,
+                        "owner_scope": "public"},
+        target_username="Alice", fetched_at=400, body=json.dumps({"clubs": []}).encode(),
+    ))
+    assert duplicate_id == raw_id
+    insert_fetch_log(conn, provider="chess.com", endpoint_type="user_resource", url="https://example.test/resource",
+                     raw_payload_id=duplicate_id, status_code=200, attempted_at=400)
+    snapshot = normalize_resource_payload(conn, duplicate_id, prefer_observed_identity=False)
+    assert require_row(conn.execute(
+        "SELECT provider_user_id FROM user_resource_snapshots WHERE id = %s", (snapshot,),
+    ))[0] == current
+
+
+def test_resource_attempt_history_stays_with_renamed_account(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    former, _ = _profile(conn, {"username": "Alice", "player_id": 1}, provider="chess.com", at=100)
+    result = fetch_user_resource(
+        conn, "chess.com", "Alice", "clubs", config=_config(),
+        transport=httpx.MockTransport(lambda request: httpx.Response(404)),
+    )
+    assert result.status_code == 404
+    _profile(conn, {"username": "FormerAlice", "player_id": 1}, provider="chess.com", at=200)
+    current, _ = _profile(conn, {"username": "Alice", "player_id": 2}, provider="chess.com", at=300)
+
+    renamed = player_profile(conn, "chess.com", "FormerAlice")
+    reused = player_profile(conn, "chess.com", "Alice")
+    assert renamed is not None and reused is not None
+    assert int(renamed["id"]) == former and int(reused["id"]) == current
+    assert [row["status_code"] for row in renamed["resource_attempts"]] == [404]
+    assert reused["resource_attempts"] == []
 
 
 @pytest.mark.parametrize("key,parameters,data", [("activity", None, []), ("performance", {"perf": "blitz"}, {})])

@@ -106,6 +106,7 @@ CREATE TABLE user_resource_observations (
 CREATE INDEX idx_user_resource_observation_history ON user_resource_observations(snapshot_id, captured_at DESC, id DESC);
 
 CREATE TABLE user_resource_acquisition (
+    provider_user_id BIGINT NOT NULL REFERENCES provider_users(id),
     provider TEXT NOT NULL REFERENCES providers(key),
     username_normalized TEXT NOT NULL,
     owner_scope TEXT NOT NULL,
@@ -116,8 +117,10 @@ CREATE TABLE user_resource_acquisition (
     attempted_at BIGINT NOT NULL,
     status_code INTEGER NOT NULL,
     raw_payload_id BIGINT REFERENCES raw_payloads(id),
-    PRIMARY KEY(provider, username_normalized, owner_scope, resource_key, parameters_hash)
+    PRIMARY KEY(provider_user_id, owner_scope, resource_key, parameters_hash)
 );
+CREATE INDEX idx_resource_acquisition_username
+    ON user_resource_acquisition(provider, username_normalized);
 
 CREATE TABLE rating_history_points (
     snapshot_id BIGINT NOT NULL REFERENCES user_resource_snapshots(id),

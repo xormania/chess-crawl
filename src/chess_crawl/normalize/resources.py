@@ -16,7 +16,9 @@ from chess_crawl.storage.repository import upsert_provider_user
 PARSER_VERSION = "player-resources-normalizer-v1"
 
 
-def normalize_resource_payload(conn: Connection, raw_payload_id: int) -> int:
+def normalize_resource_payload(
+    conn: Connection, raw_payload_id: int, *, prefer_observed_identity: bool = True,
+) -> int:
     raw = read_raw_payload(conn, raw_payload_id)
     if raw.endpoint_type != "user_resource":
         raise ValueError("supplementary player normalizer requires user_resource")
@@ -42,7 +44,10 @@ def normalize_resource_payload(conn: Connection, raw_payload_id: int) -> int:
             note = f"{len(issues)} uninterpreted rating history element(s): " + "; ".join(issues[:5])
     with transaction(conn):
         observed_at = payload_observed_at(conn, raw_payload_id)
-        user_id = resource_account(conn, raw.provider, username, raw_payload_id)
+        user_id = resource_account(
+            conn, raw.provider, username, raw_payload_id,
+            prefer_observed_identity=prefer_observed_identity,
+        )
         if user_id is None:
             user_id = upsert_provider_user(conn, provider=raw.provider, username=username, now=observed_at)
         if owner_scope == "public":
