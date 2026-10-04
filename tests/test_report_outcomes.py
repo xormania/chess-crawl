@@ -12,7 +12,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from support import seed_game
-from chess_crawl import cli
 from chess_crawl.api import create_app
 from chess_crawl.application import list_opponents
 from chess_crawl.config import Config
@@ -95,28 +94,6 @@ def test_report_outcome_and_activity_are_independent(
     assert (black_player["wins"], black_player["losses"]) == (losses, wins)
     assert black_player["no_result"] == no_result
     assert black_player["in_progress"] == in_progress
-
-
-def test_cli_labels_missing_results_separately_from_activity(
-    database_url: str, capsys: pytest.CaptureFixture[str],
-) -> None:
-    with open_database(database_url, writable=True) as conn:
-        for status in ("aborted", "unrecognized-provider-status", "started"):
-            normalize_game(conn, status=status)
-
-    assert cli.run(["report", "user", "lichess", "alice", "--database-url", str(database_url)]) == 0
-    user = capsys.readouterr().out
-    assert "W/D/L/no result: 0/0/0/3" in user
-    assert "In progress: 1" in user
-    for arguments in (
-        ["report", "opponents", "lichess", "alice"],
-        ["report", "games-by-month", "--provider", "lichess"],
-    ):
-        assert cli.run([*arguments, "--database-url", str(database_url)]) == 0
-        table = capsys.readouterr().out
-        assert "NO_RESULT" in table
-        assert "IN_PROGRESS" in table
-        assert "UNFINISHED" not in table
 
 
 def test_http_opponents_expose_result_and_activity_counts(database_url: str) -> None:

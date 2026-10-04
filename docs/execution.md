@@ -18,15 +18,17 @@ after acquiring its job lock, which PostgreSQL releases on session death.
 Recovery also runs while the queue is idle, so a lost delivery cannot strand a
 crashed job. Use direct connections or a pool preserving complete sessions.
 
-Acquisition also owns a provider-specific session lock. HTTP pacing and retry
+Acquisition also owns a provider-specific session lock throughout the claimed
+job, including network requests and waits. HTTP pacing and retry
 deadlines are committed before sleeping and survive worker changes. Each HTTP
 attempt checks execution rights before contacting a provider. Different
 providers and local normalization jobs can execute independently. Ordinary
-normalization uses a shared provider gate and deterministically ordered locks
-for the affected games and accounts. Independent games and player profiles from
-the same provider can commit concurrently. A certified rename or placeholder
-merge restarts before mutation with the provider gate held exclusively.
-Provider gates are never held while waiting for network responses.
+normalization uses a separate shared gate for account identity and
+deterministically ordered locks for the affected games and accounts. Independent
+games and player profiles from the same provider can commit concurrently. A
+certified rename or placeholder
+merge restarts before mutation with the identity gate held exclusively.
+These short identity/write transactions do not span provider network requests.
 
 PGN interpretation occurs outside write transactions. Each selected game commits
 its evidence, source checkpoint, and run association atomically. An interrupted
@@ -55,13 +57,13 @@ synchronous normalization so its strict total game cap remains enforceable.
 
 ## SQS dispatch
 
-Install the `s3` dependency extra (the same Boto3 SDK supplies SQS) and configure
-`CHESS_CRAWL_SQS_QUEUE_URL`:
+Install the `s3` dependency extra, which supplies Boto3 for both S3 and SQS,
+and configure `CHESS_CRAWL_SQS_QUEUE_URL`:
 
 ```bash
-uv sync --locked --group dev --extra api --extra s3
-python -m chess_crawl.jobs.dispatch
-python -m chess_crawl.jobs.worker --stage all
+uv sync --locked --extra api --extra s3
+uv run python -m chess_crawl.jobs.dispatch
+uv run python -m chess_crawl.jobs.worker --stage all
 ```
 
 Both modules accept `--queue-url` and `--once`. The SDK uses its default

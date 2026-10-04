@@ -66,6 +66,8 @@ def _execute_schema(conn: Connection, sql: str) -> None:
 
 
 def current_version(conn: Connection) -> int:
+    if not require_row(conn.execute("SELECT to_regclass('schema_migrations') IS NOT NULL"))[0]:
+        return 0
     row = require_row(conn.execute("SELECT MAX(version) AS version FROM schema_migrations"))
     return int(row["version"] or 0)
 

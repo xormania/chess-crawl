@@ -1,6 +1,6 @@
 # Standalone backend and integration contract
 
-[README](../README.md) · [CLI guide](cli.md) ·
+[README](../README.md) · [Operations guide](cli.md) ·
 [Contributing](../CONTRIBUTING.md)
 
 `chess-crawl` supplies an authenticated JSON API, concurrent durable workers,
@@ -79,8 +79,9 @@ Compose supports these host settings, in addition to the request ceilings below:
 | `CHESS_CRAWL_MERCURE_TOPIC_PREFIX` | `https://chess-crawl.local` |
 | `CHESS_CRAWL_MERCURE_HISTORY_SIZE` | `10000` |
 
-Compose reads this repository's `.env` for interpolation. The CLI and bootstrap
-script do not load `.env` themselves. Export matching secrets-directory and
+Compose reads this repository's `.env` for interpolation. Source-run services,
+administration commands, and bootstrap do not load `.env` themselves. Export
+matching secrets-directory and
 topic-prefix settings before running bootstrap and Compose; JWT topic scopes
 must match the publisher's prefix. No Symfony configuration is required.
 
@@ -172,9 +173,11 @@ spaces. Provider and username are normalized before comparing requests.
 | `POST /v1/crawls` | Import fields plus `max_depth`, `max_users`, `max_jobs` |
 
 `provider` is `chess.com` or `lichess`. Timestamps are integer **Unix seconds**.
-The interval includes `since` and excludes `until`: `[since, until)`. The game
-selection for bounded imports/crawls uses each game's end time. A game whose end time cannot establish
-membership in the interval is not attributed to that run.
+The interval includes `since` and excludes `until`: `[since, until)`.
+Bounded import/crawl selection uses each game's end time. A game whose end time
+cannot establish membership in the interval is not attributed to that bounded
+run. Full/incremental/backfill collection has separate provider-specific window
+semantics, including Lichess creation-time pagination; see [collection](collection.md).
 
 For example, enqueue a January 2024 import:
 
@@ -201,8 +204,8 @@ provider requests. Repeating the same normalized request with the same key
 returns the original IDs and `replayed: true`, including after completion.
 Using that key for a different request or operation returns HTTP `409`.
 
-`max_games` caps distinct games attributed to the run, including games already
-present in the archive. Replaying a chunk does not charge that run twice for
+For bounded imports and crawls, `max_games` caps distinct games attributed to the
+run, including games already present in the archive. Replaying a chunk does not charge that run twice for
 the same game. Chess.com still supplies whole monthly responses: their full raw
 bytes are preserved, but only games within the requested interval and remaining
 budget are normalized and attributed. A partially processed raw response stays
@@ -218,6 +221,7 @@ Default server ceilings are configurable:
 | `CHESS_CRAWL_MAX_JOBS` | 200 |
 | `CHESS_CRAWL_MAX_DATE_SPAN_DAYS` | 366 |
 | `CHESS_CRAWL_PAGE_SIZE` | 100 |
+| `CHESS_CRAWL_MAX_WORKING_SET_MEMBERS` | 10000 |
 
 The caller still supplies explicit positive acquisition limits; crawl depth
 may be zero. Page size defaults to 50, or the configured ceiling if lower.
@@ -238,12 +242,13 @@ Compose passes these settings to the API service.
 | `GET /v1/users` | Paginated provider-scoped users; optional `provider`. |
 | `GET /v1/users/{provider}/{username}/opponents` | Paginated opponents from normalized games. |
 
-The game, user, and opponent collection routes above accept `after` and `limit`
-and return `items`, `next_cursor`, `total`, and `freshness`. Other lists use
+The `/games`, `/users`, and `/users/{provider}/{username}/opponents` lists accept
+`after` and `limit`. Responses contain `items`,
+`next_cursor`, `total`, and `freshness`; pass a non-null `next_cursor` as the
+next request's `after`. Other archive/history/catalog routes use their documented
 bounded page envelopes; not every list includes a total or freshness field.
-Pass a non-null `next_cursor` as the next request's `after`. Freshness describes
-recorded observations and pending or failed payloads, rather than asserting that
-a provider was checked now.
+Freshness describes recorded observations and pending
+or failed payloads, rather than asserting that a provider was checked now.
 
 Each response's related reads share a database snapshot. Pagination across
 separate requests does not freeze the archive while the worker adds data.
@@ -257,7 +262,8 @@ route and request-shape reference.
 
 ### Report result counts
 
-CLI reports and opponent API responses expose two distinct counts:
+Player summaries, month reports, and opponent API responses expose two distinct
+counts:
 
 | Field | Meaning |
 | --- | --- |
@@ -267,8 +273,7 @@ CLI reports and opponent API responses expose two distinct counts:
 These counts overlap. A missing result does not establish that play is ongoing,
 and an unrecognized status does not establish that play has finished. The
 existing API field `unfinished` remains a compatibility alias for `no_result`;
-new consumers should use the explicit fields. CLI labels use the explicit
-meanings.
+new consumers should use the explicit fields.
 
 ## Worker and recovery
 
@@ -286,6 +291,10 @@ It preserves cancelled runs. Transient failures have durable retry counters
 and deadlines; provider cooldowns survive restarts and apply to later jobs for
 the same provider. Retries are bounded, and exhausted jobs become errors.
 Provider `Retry-After` requirements and the Lichess cooldown floor are respected.
+The API validates requests, records submissions/selections/results, and reads
+stored snapshots. It does not run acquisition, parser-upgrade jobs, engines, or
+models inside an HTTP request. Acquisition and processing workers share durable
+PostgreSQL state; adding SQS changes delivery, not this ownership boundary.
 
 Graceful shutdown stops new claims and finishes the active acquisition unit.
 Completed monthly checkpoints remain durable so a later executor can resume.
@@ -308,8 +317,9 @@ Use `--stage acquisition` or `--stage processing` for separate local worker
 pools. Optional SQS dispatch and offline data upgrades are documented in
 [execution and upgrades](execution.md).
 
-The game limit stops further game acquisition, but retained run games still
-drive local opponent discovery after a restart. Each run counts the edges it
+For bounded imports and opponent crawls, the total game limit stops further
+acquisition, but retained run games still drive local opponent discovery after a
+restart. Each run counts the edges it
 actually processes, even when another run already discovered the same edge.
 The archive-wide graph remains deduplicated.
 
@@ -389,7 +399,7 @@ separately managed PostgreSQL server can be used through
 `CHESS_CRAWL_DATABASE_URL` and the password secret.
 
 Compose's `init` service applies the packaged PostgreSQL schema and migrations
-at startup. For source-run services, run `uv run chess-crawl init` against the
+at startup. For source-run services, run `uv run chess-crawl-admin migrate` against the
 selected database before starting the upgraded backend. The previous file-based
 storage configuration and `--db` option are removed. Existing SQLite archives
 are not automatically imported; retain their files separately if needed.

@@ -38,6 +38,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   Proven finite and partially acquired Lichess intervals are subtracted from
   later collection requests; missing gaps and oldest timestamp ties remain
   explicit. Reused broad pages respect exact creation-time run selection.
+- A focused `chess-crawl-admin` entrypoint for packaged schema migrations,
+  read-only readiness inspection, and resumable compressed-backup relocation.
+  Product collection, archive reads, exports, and working selections now use
+  the authenticated API; the old direct-fetch and product CLI are retired.
+  Worker and event publisher process entrypoints remain available.
 
 - Immutable gzip source archives with local filesystem and optional S3 adapters,
   verified original/encoded checksums, import evidence references, and resumable
@@ -112,6 +117,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   resumes remaining items after interruption. Account reconciliation takes
   exclusive provider ownership only for confirmed renames or placeholder merges.
 
+- The usage and contributor guides now describe the product API, dedicated
+  archive administration, per-job worker ownership, provider acquisition gates,
+  and staged processing. Collection examples distinguish HTTP limits from
+  internal executor settings and documented page/total budgets.
 - Full CI and Devbox smoke now run after pushes to `master` and support manual
   runs. Push/manual checks validate the selected commit without PR merge-history
   assumptions; PR scope, promotion policy, and required check names are retained.

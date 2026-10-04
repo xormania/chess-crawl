@@ -17,7 +17,7 @@ api = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1"]
 s3 = ["boto3>=1.36,<2"]
 
 [project.scripts]
-chess-crawl = "chess_crawl.cli:main"
+chess-crawl-admin = "chess_crawl.operations:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

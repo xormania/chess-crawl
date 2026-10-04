@@ -1,14 +1,17 @@
 # Incremental and full-history collection
 
-The collector runs asynchronous `fetch_user_games` jobs. Set their stored `collection_mode`
-to `full`, `incremental`, or `backfill` to use resumable collection rather than
-the legacy bounded fetch. Opening a profile or reading archived games never
-starts a collection request.
+Chess Dog submits `POST /v1/imports` with a provider, username, positive
+`max_games`, and optional collection settings. Set `collection_mode` to `full`,
+`incremental`, or `backfill` for resumable history collection; the default
+`bounded` mode requires explicit dates and a total game cap. The backend queues
+`fetch_user_games` internally. Callers do not select arbitrary job kinds or URLs.
+Opening a profile or reading archived games never starts collection.
 
-Each execution handles at most `batch_size` monthly archives (default 4, maximum
-100), one Lichess stream page, or `batch_size` preserved source pages or
-unfinished-game follow-ups. The
-same job returns to pending until its durable checkpoint is complete. Provider
+The HTTP `batch_size` defaults to 1 and allows 1–12. Each execution handles at
+most that many monthly archives, preserved source pages, or unfinished-game
+follow-ups, or one Lichess stream page. Internal executor callers have a separate
+default of 4 and ceiling of 100. The same job returns to pending until its
+durable checkpoint is complete. Provider
 failure does not advance that checkpoint. Raw source acquisition and queued
 normalization are separate; `collection_coverage.state = complete` means the
 source unit was acquired, not that interpretation or analysis has finished.
@@ -42,11 +45,12 @@ individual games more precisely without requesting the month again.
 An old parser version or incomplete normalization causes local replay (or a
 normalization job when acquisition is running separately). No historical
 network fetch is needed to extract information already present in a preserved
-source. A `backfill` explicitly refreshes even sealed months. Optional `months`
-selects a list of `YYYY/MM` resources; absent requested months are recorded as
-missing. Include an `upgrade_id` in backfill parameters to connect the request
-to a provider-data upgrade. Network acquisition is not performed inside a SQL
-schema migration. A listed monthly source returning 404/410 is recorded as
+source. A `backfill` explicitly refreshes even sealed months. Internally scheduled
+backfills can additionally select `months` as a list of `YYYY/MM` resources or
+record an `upgrade_id`; those fields are not exposed by the current HTTP import
+body. Absent requested months are recorded as missing. Network acquisition is
+not performed inside a SQL schema migration. A listed monthly source returning
+404/410 is recorded as
 missing and does not prevent later available months from being acquired.
 
 ## Lichess
@@ -73,7 +77,7 @@ range strictly newer than its oldest timestamp, leaving that oldest millisecond
 open for the safe tie overlap. Disjoint intervals never certify an unknown
 older prefix; only their contiguous union from the beginning certifies history.
 Each request recomputes missing intervals so another job's committed acquisition
-can be reused between checkpoints. Explicit `since_ms` and `until_ms` restrict a window; `since` and
+can be reused between checkpoints. Internal `since_ms` and `until_ms` restrict a window; HTTP `since` and
 `until` Unix-second bounds are converted without rounding. A partial window
 does not certify an uncollected full history.
 Completed history watermarks only increase. An older backfill or a delayed
@@ -85,16 +89,18 @@ window. This applies equally to local replay and deferred processing.
 
 Pages request `sort=dateDesc`, `pgnInJson=true`, `opening=true`, `division=true`,
 `ongoing=true`, and `finished=true`. Clock, evaluation, and accuracy flags retain
-the configured provider evidence settings. `page_size` defaults to 1000 and
-allows 1–10000. A supplied `max_games` is used as the initial
-page budget when `page_size` is absent, not as a total full-history game cap.
+the configured provider evidence settings. HTTP `max_games` is the initial page
+budget, subject to the configured server ceiling, and is not a total full-history
+game cap. Internal executor parameters also support `page_size` (default 1000,
+range 1–10000) and `max_page_size`; these are not fields in the current HTTP body.
 The next upper bound overlaps the oldest
 timestamp by one millisecond. The limit grows to include already observed
 boundary games plus new games. This avoids losing games sharing the same
 timestamp. It can temporarily exceed `page_size`, up to `max_page_size`
 (default 10000, maximum 100000). If a tied boundary exceeds that budget, the job
 reports an error and retains its checkpoint and raw data; it never claims the
-history is complete. Increase the budget and resume to resolve the boundary.
+history is complete. Resolving that error requires an operator-managed retry
+with a larger internal boundary budget.
 
 Ongoing games are tracked individually. Every later collection refreshes those
 game IDs before scanning the newer creation-time window. This prevents an old
