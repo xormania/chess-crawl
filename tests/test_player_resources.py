@@ -11,7 +11,13 @@ import pytest
 
 from chess_crawl import ingest
 from chess_crawl.config import Config
-from chess_crawl.ingest import fetch_user_profile, fetch_user_resource, replay_raw_payload
+from chess_crawl.ingest import (
+    _persist_response,
+    fetch_chesscom_stats,
+    fetch_user_profile,
+    fetch_user_resource,
+    replay_raw_payload,
+)
 from chess_crawl.normalize.resources import normalize_resource_payload
 from chess_crawl.normalize.users import normalize_user_payload
 from chess_crawl.providers.base import RawRecord
@@ -61,6 +67,24 @@ def _resource(
     insert_fetch_log(conn, provider=provider, endpoint_type="user_resource", url="https://example.test/resource",
                      raw_payload_id=raw_id, status_code=200, attempted_at=at)
     return normalize_resource_payload(conn, raw_id), raw_id
+
+
+def _account_bound_record(username: str, kind: str, *, at: int) -> RawRecord:
+    if kind == "resource":
+        return RawRecord(
+            provider="chess.com", endpoint_type="user_resource",
+            request_url=get_resource("chess.com", "clubs").url(username, None),
+            canonical_source_key=resource_source_key("chess.com", username, "clubs"),
+            request_params={"resource_key": "clubs", "parameters": {}, "authenticated": False,
+                            "owner_scope": "public"},
+            target_username=username, body=b'{"clubs":[]}', fetched_at=at,
+        )
+    return RawRecord(
+        provider="chess.com", endpoint_type="user_stats",
+        request_url=f"https://api.chess.com/pub/player/{username.lower()}/stats",
+        canonical_source_key=f"chess.com/player/{username.lower()}/stats",
+        target_username=username, body=b'{"chess_blitz":{"last":{"rating":1500}}}', fetched_at=at,
+    )
 
 
 def test_complete_public_profile_facts_and_unknown_fields_are_queryable(initialized_conn: Connection) -> None:
@@ -495,12 +519,72 @@ def test_private_resource_does_not_publish_collection_timestamps_as_alias_histor
     before = player_profile(conn, "lichess", "Alice")
     assert before is not None
     before_history = profile_history(conn, user_id)
-    _resource(conn, "lichess", "teams", [{"id": "hidden-team"}], at=200, authenticated=True, owner_scope="alpha")
+    fetch_user_resource(
+        conn, "lichess", "Alice", "teams", owner_scope="alpha",
+        config=_config(token="secret-token", owner_scope="alpha"),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=[{"id": "hidden-team"}])),
+    )
     public = player_profile(conn, "lichess", "Alice")
-    assert public is not None
-    assert public["aliases"] == before["aliases"]
+    assert public == before
     assert profile_history(conn, user_id) == before_history
-    assert public["resources"] == [] and public["resource_attempts"] == []
+
+
+def test_private_only_resource_identity_is_invisible_outside_its_scope(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    fetch_user_resource(
+        conn, "lichess", "PrivateOnly", "teams", owner_scope="alpha",
+        config=_config(token="secret-token", owner_scope="alpha"),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=[{"id": "hidden-team"}])),
+    )
+    owned = player_profile(conn, "lichess", "PrivateOnly", owner_scope="alpha")
+    assert owned is not None and len(owned["resources"]) == 1
+    assert player_profile(conn, "lichess", "PrivateOnly") is None
+    assert player_profile(conn, "lichess", "PrivateOnly", owner_scope="beta") is None
+
+
+@pytest.mark.parametrize("kind", ["resource", "stats"])
+def test_acquisition_placeholder_merges_into_stable_identity(initialized_conn: Connection, kind: str) -> None:
+    conn = initialized_conn
+    stable, _ = _profile(conn, {"username": "OldDave", "player_id": 7}, provider="chess.com", at=100)
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, json={"clubs": []} if kind == "resource" else {"chess_blitz": {"last": {"rating": 1500}}},
+    ))
+    if kind == "resource":
+        fetch_user_resource(conn, "chess.com", "Dave", "clubs", config=_config(), transport=transport)
+    else:
+        fetch_chesscom_stats(conn, "Dave", config=_config(), transport=transport)
+    merged, _ = _profile(conn, {"username": "Dave", "player_id": 7}, provider="chess.com", at=300)
+    assert merged == stable
+    if kind == "resource":
+        assert len(resource_history(conn, stable)) == 1
+    else:
+        assert len([row for row in profile_history(conn, stable) if row["endpoint_type"] == "user_stats"]) == 1
+
+
+@pytest.mark.parametrize("kind", ["resource", "stats"])
+def test_deferred_normalization_honors_acquisition_identity_after_rename(
+    initialized_conn: Connection, kind: str,
+) -> None:
+    conn = initialized_conn
+    original, _ = _profile(conn, {"username": "Eve", "player_id": 8}, provider="chess.com", at=100)
+    raw_id, fetch_id = _persist_response(
+        conn, _account_bound_record("Eve", kind, at=110), job_id=None, crawl_run_id=None,
+    )
+    assert raw_id is not None and fetch_id is not None
+    _profile(conn, {"username": "FormerEve", "player_id": 8}, provider="chess.com", at=200)
+    current, _ = _profile(conn, {"username": "Eve", "player_id": 9}, provider="chess.com", at=300)
+    if kind == "resource":
+        normalize_resource_payload(conn, raw_id, prefer_observed_identity=False, fetch_log_id=fetch_id)
+        original_history = resource_history(conn, original)
+        current_history = resource_history(conn, current)
+    else:
+        normalize_user_payload(conn, raw_id, prefer_observed_identity=False, fetch_log_id=fetch_id)
+        original_history = [row for row in profile_history(conn, original) if row["endpoint_type"] == "user_stats"]
+        current_history = [row for row in profile_history(conn, current) if row["endpoint_type"] == "user_stats"]
+    assert [row["observed_at"] for row in original_history] == [110]
+    assert current_history == []
+    current_profile = player_profile(conn, "chess.com", "Eve")
+    assert current_profile is not None and current_profile["aliases"][0]["first_seen_at"] == 300
 
 
 def test_fresh_deduplicated_resource_belongs_to_current_username_holder(initialized_conn: Connection) -> None:

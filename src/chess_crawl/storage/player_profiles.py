@@ -216,9 +216,14 @@ def record_resource_attempt(conn: Connection, record: RawRecord, raw_payload_id:
     values = params.get("parameters") or {}
     if not record.target_username:
         raise ValueError("player resource attempt is missing its target username")
-    user_id = upsert_provider_user(
-        conn, provider=record.provider, username=record.target_username,
-        now=record.fetched_at,
+    existing = None
+    if record.owner_scope != "public":
+        existing = conn.execute(
+            "SELECT id FROM provider_users WHERE provider = %s AND username_normalized = %s",
+            (record.provider, record.target_username.strip().lower()),
+        ).fetchone()
+    user_id = int(existing["id"]) if existing is not None else upsert_provider_user(
+        conn, provider=record.provider, username=record.target_username, now=record.fetched_at,
     )
     conn.execute(
         """INSERT INTO user_resource_acquisition(provider_user_id, provider, username_normalized, owner_scope, resource_key,
@@ -250,6 +255,7 @@ def merge_player_evidence(conn: Connection, survivor: int, replaced: int) -> Non
         record_alias(conn, survivor, alias["display_username"], observed_at=alias["first_seen_at"], raw_payload_id=alias["raw_payload_id"])
         record_alias(conn, survivor, alias["display_username"], observed_at=alias["last_seen_at"], raw_payload_id=alias["raw_payload_id"])
     conn.execute("DELETE FROM provider_user_aliases WHERE provider_user_id = %s", (replaced,))
+    conn.execute("UPDATE fetch_logs SET provider_user_id = %s WHERE provider_user_id = %s", (survivor, replaced))
     conn.execute("UPDATE user_observations SET provider_user_id = %s WHERE provider_user_id = %s", (survivor, replaced))
     conn.execute(
         """INSERT INTO user_resource_acquisition(provider_user_id, provider, username_normalized, owner_scope,
@@ -324,6 +330,22 @@ def resource_accounts(conn: Connection, raw_payload_id: int) -> list[int]:
            ) evidence GROUP BY provider_user_id ORDER BY MAX(observed_at) DESC, provider_user_id""",
         (raw_payload_id, raw_payload_id),
     )]
+
+
+def fetch_log_account(
+    conn: Connection, fetch_log_id: int, raw_payload_id: int,
+) -> tuple[dict[str, Any], int] | None:
+    """Return the account and occurrence time bound when a response was acquired."""
+    row = conn.execute(
+        """SELECT p.*, f.attempted_at AS observation_time FROM fetch_logs f
+           JOIN provider_users p ON p.id = f.provider_user_id
+           WHERE f.id = %s AND f.raw_payload_id = %s AND f.status_code IN (200,304)""",
+        (fetch_log_id, raw_payload_id),
+    ).fetchone()
+    if row is None:
+        return None
+    account = dict(row)
+    return account, int(account.pop("observation_time"))
 
 
 def stats_account(
@@ -416,6 +438,11 @@ def player_profile(conn: Connection, provider: str, username: str, *, owner_scop
            ORDER BY r.performance, o.captured_at DESC,
              o.fetch_log_id DESC NULLS LAST, o.id DESC""", (user_id,),
     )]
+    if not any((
+        result["profile"], result["statistics"], result["aliases"], result["resources"],
+        result["resource_attempts"], result["ratings"],
+    )):
+        return None
     return result
 
 

@@ -8,7 +8,13 @@ from datetime import date
 
 from chess_crawl.providers.resources import get_resource, resource_owner_scope
 from chess_crawl.storage.db import Connection, transaction
-from chess_crawl.storage.player_profiles import record_alias, resource_account, resource_accounts, store_resource_snapshot
+from chess_crawl.storage.player_profiles import (
+    fetch_log_account,
+    record_alias,
+    resource_account,
+    resource_accounts,
+    store_resource_snapshot,
+)
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user
 
@@ -45,7 +51,12 @@ def normalize_resource_payload(
             note = f"{len(issues)} uninterpreted rating history element(s): " + "; ".join(issues[:5])
     with transaction(conn):
         observed_at = payload_observed_at(conn, raw_payload_id)
-        user_ids = resource_accounts(conn, raw_payload_id) if prefer_observed_identity else []
+        bound = None if fetch_log_id is None else fetch_log_account(conn, fetch_log_id, raw_payload_id)
+        if bound is not None:
+            account, observed_at = bound
+            user_ids = [int(account["id"])]
+        else:
+            user_ids = resource_accounts(conn, raw_payload_id) if prefer_observed_identity else []
         replaying_bound_accounts = bool(user_ids)
         if not user_ids:
             user_id = resource_account(

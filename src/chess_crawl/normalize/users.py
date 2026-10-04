@@ -14,7 +14,8 @@ from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
 from chess_crawl.storage.player_profiles import (
-    publish_verified_legacy_profile, quarantine_unowned_profile, record_alias, record_profile_observations,
+    fetch_log_account, publish_verified_legacy_profile, quarantine_unowned_profile, record_alias,
+    record_profile_observations,
     stats_account, stats_accounts, store_profile_facts, store_rating_records,
 )
 
@@ -55,7 +56,11 @@ def normalize_user_payload(
         accounts: list[dict[str, Any] | None] = [None]
         if raw.endpoint_type == "user_stats":
             accounts = []
-            if prefer_observed_identity:
+            bound = None if fetch_log_id is None else fetch_log_account(conn, fetch_log_id, raw_payload_id)
+            if bound is not None:
+                bound_account, observed_at = bound
+                accounts.append(bound_account)
+            elif prefer_observed_identity:
                 accounts.extend(stats_accounts(conn, raw_payload_id))
             if not accounts:
                 accounts.append(stats_account(
