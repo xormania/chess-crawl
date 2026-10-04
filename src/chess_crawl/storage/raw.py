@@ -32,6 +32,7 @@ class StoredRawPayload:
     compression: str
     normalization_status: str
     parser_version: str | None
+    owner_scope: str = "public"
 
 
 def compute_body_hash(body: bytes) -> str:
@@ -53,10 +54,10 @@ def store_raw_payload(
     existing = conn.execute(
         """
         SELECT id FROM raw_payloads
-        WHERE provider = %s AND endpoint_type = %s AND canonical_source_key = %s AND body_hash = %s
+        WHERE provider = %s AND endpoint_type = %s AND canonical_source_key = %s AND body_hash = %s AND owner_scope = %s
         ORDER BY id LIMIT 1
         """,
-        (record.provider, record.endpoint_type, record.canonical_source_key, body_hash),
+        (record.provider, record.endpoint_type, record.canonical_source_key, body_hash, record.owner_scope),
     ).fetchone()
     if existing is not None:
         return int(existing["id"])
@@ -74,9 +75,9 @@ def store_raw_payload(
           provider, endpoint_type, provider_url, canonical_source_key,
           request_params, response_status, response_headers, content_type,
           fetched_at, body_hash, body_compression, raw_body, body_bytes,
-          parser_version, normalization_status
+          parser_version, normalization_status, owner_scope
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
@@ -95,6 +96,7 @@ def store_raw_payload(
             len(record.body),
             parser_version,
             normalization_status,
+            record.owner_scope,
         ),
     )
     row = cursor.fetchone()
@@ -132,6 +134,7 @@ def read_raw_payload(conn: Connection, raw_payload_id: int) -> StoredRawPayload:
         compression=row["body_compression"],
         normalization_status=row["normalization_status"],
         parser_version=row["parser_version"],
+        owner_scope=row["owner_scope"],
     )
 
 

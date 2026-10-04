@@ -13,13 +13,21 @@ from chess_crawl.providers.base import NormalizedUser
 from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
+from chess_crawl.storage.player_profiles import (
+    quarantine_unowned_profile, record_alias, record_profile_observations, store_profile_facts, store_rating_records,
+)
 
 
-PARSER_VERSION = "users-normalizer-v3"
+PARSER_VERSION = "users-normalizer-v4"
 
 
 def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
     raw = read_raw_payload(conn, raw_payload_id)
+    if raw.provider == "lichess" and raw.endpoint_type == "user_profile":
+        data = json.loads(raw.body)
+        if isinstance(data, dict) and any(key in data for key in ("following", "blocking", "followable")):
+            quarantine_unowned_profile(conn, raw_payload_id)
+            raise ValueError("account-relative profile relationships require scoped ownership before normalization")
     if raw.endpoint_type == "user_profile":
         if raw.provider == "chess.com":
             user = chesscom_parser.parse_user_profile(raw.body)
@@ -36,6 +44,9 @@ def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
         return None
 
     with transaction(conn):
+        native_data = json.loads(raw.body)
+        if not isinstance(native_data, dict):
+            raise ValueError("user profiles and statistics must be JSON objects")
         observed_at = payload_observed_at(conn, raw_payload_id)
         provider_user_id = upsert_provider_user(
             conn,
@@ -67,6 +78,11 @@ def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
             content_hash=snapshot["content_hash"],
             raw_payload_id=raw_payload_id,
         )
+        store_profile_facts(conn, snapshot_id, native_data=native_data, facts=_profile_facts(native_data, user))
+        store_rating_records(conn, snapshot_id, _rating_records(native_data, user.provider))
+        record_profile_observations(conn, provider_user_id, snapshot_id, raw_payload_id)
+        record_alias(conn, provider_user_id, user.display_username, observed_at=observed_at, raw_payload_id=raw_payload_id,
+                     first_observed_at=raw.fetched_at)
         insert_source_record(
             conn,
             entity_type="user",
@@ -109,7 +125,7 @@ def _chesscom_profile_snapshot(body: bytes, user: NormalizedUser) -> dict[str, A
     return {
         "followers": _int_or_none(data.get("followers")),
         "perfs_or_stats": payload,
-        "content_hash": canonical_hash(payload),
+        "content_hash": canonical_hash({"kind": "profile", "native_data": data}),
     }
 
 
@@ -123,16 +139,6 @@ def _lichess_profile_snapshot(body: bytes, user: NormalizedUser) -> dict[str, An
     for key in ("profile", "disabled", "verified", "tosViolation"):
         if key in data:
             profile_facts[key] = data[key]
-    payload = {
-        "kind": "profile",
-        "username": user.display_username,
-        "status": user.account_status_raw,
-        "title": user.title,
-        "country": user.country,
-        "patron": data.get("patron"),
-        "count": count,
-        **profile_facts,
-    }
     return {
         "patron": bool(data.get("patron")) if data.get("patron") is not None else None,
         "count_all": _int_or_none(count.get("all")),
@@ -141,7 +147,7 @@ def _lichess_profile_snapshot(body: bytes, user: NormalizedUser) -> dict[str, An
         "count_loss": _int_or_none(count.get("loss")),
         "count_draw": _int_or_none(count.get("draw")),
         "perfs_or_stats": profile_facts,
-        "content_hash": canonical_hash(payload),
+        "content_hash": canonical_hash({"kind": "profile", "native_data": data}),
     }
 
 
@@ -222,3 +228,64 @@ def _int_or_none(value: object) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _profile_facts(data: dict[str, Any], user: NormalizedUser) -> dict[str, Any]:
+    profile_data = data.get("profile")
+    profile = profile_data if isinstance(profile_data, dict) else {}
+    return {
+        "created_at": user.created_at,
+        "last_seen_at": user.last_seen_at,
+        "real_name": _string_or_none(data.get("name") if user.provider == "chess.com" else profile.get("realName")),
+        "location": _string_or_none(data.get("location") if user.provider == "chess.com" else profile.get("location")),
+        "avatar_url": _string_or_none(data.get("avatar")),
+        "profile_url": _string_or_none(data.get("url")),
+        "is_verified": user.is_verified,
+        "is_streamer": data.get("is_streamer") if isinstance(data.get("is_streamer"), bool) else None,
+        # Chess.com's fide is a self-reported rating, never a federation ID.
+        "fide_rating": _strict_integer(data.get("fide") if user.provider == "chess.com" else profile.get("fideRating")),
+    }
+
+
+def _string_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _strict_integer(value: object) -> int | None:
+    return value if type(value) is int else None
+
+
+def _rating_records(data: dict[str, Any], provider: str) -> list[dict[str, Any]]:
+    perfs = data.get("perfs") if provider == "lichess" else data
+    if not isinstance(perfs, dict):
+        return []
+    records = []
+    for performance, value in perfs.items():
+        if not isinstance(value, dict):
+            continue
+        if provider == "chess.com":
+            if not any(key in value for key in ("last", "best", "record")):
+                continue
+            last = _dictionary(value.get("last"))
+            best = _dictionary(value.get("best"))
+            score = _dictionary(value.get("record"))
+            wins, losses, draws = (_strict_integer(score.get(field)) for field in ("win", "loss", "draw"))
+            games = None if wins is None or losses is None or draws is None else wins + losses + draws
+            current, deviation, provisional, progress = last.get("rating"), last.get("rd"), None, None
+        else:
+            best, wins, losses, draws = {}, None, None, None
+            current, deviation, provisional, progress = value.get("rating"), value.get("rd"), value.get("prov"), value.get("prog")
+            games = _strict_integer(value.get("games"))
+        records.append({
+            "performance": performance, "rating": _strict_integer(current),
+            "best_rating": _strict_integer(best.get("rating")), "best_at": _strict_integer(best.get("date")),
+            "rating_deviation": deviation if type(deviation) in {int, float} else None,
+            "provisional": provisional if type(provisional) is bool else None,
+            "games": games, "wins": wins, "losses": losses, "draws": draws,
+            "progress": _strict_integer(progress), "native_data": value,
+        })
+    return records
+
+
+def _dictionary(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}

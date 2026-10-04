@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from psycopg.types.json import Jsonb
 
 from chess_crawl.storage.db import Connection, Row, atomic, require_row
 from chess_crawl.storage.migrations import current_version
+from chess_crawl.storage.player_profiles import merge_player_evidence
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,7 @@ def _merge_source_records(conn: Connection, entity_type: str, survivor: int, rep
 def _merge_user_placeholder(conn: Connection, survivor: int, replaced: int) -> None:
     """Reconcile a certified same-provider placeholder inside the caller's transaction."""
     conn.execute("UPDATE game_participants SET provider_user_id = %s WHERE provider_user_id = %s", (survivor, replaced))
+    merge_player_evidence(conn, survivor, replaced)
     for snapshot in conn.execute("SELECT * FROM user_snapshots WHERE provider_user_id = %s", (replaced,)).fetchall():
         matching = conn.execute(
             "SELECT id, captured_at FROM user_snapshots WHERE provider_user_id = %s AND content_hash = %s",
@@ -145,12 +148,23 @@ def _merge_user_placeholder(conn: Connection, survivor: int, replaced: int) -> N
                 fields = (
                     "captured_at", "observed_username", "status", "title", "country", "followers", "patron",
                     "count_all", "count_rated", "count_win", "count_loss", "count_draw", "perfs_or_stats", "raw_payload_id",
+                    "native_data", "created_at", "last_seen_at", "real_name", "location", "avatar_url", "profile_url",
+                    "is_verified", "is_streamer", "fide_rating",
                 )
                 conn.execute(
                     f"UPDATE user_snapshots SET {', '.join(f'{field} = %s' for field in fields)} WHERE id = %s",  # nosec B608 # Columns come only from the literal tuple above; values are bound.
-                    (*[snapshot[field] for field in fields], matching["id"]),
+                    (*[Jsonb(snapshot[field]) if field == "native_data" and snapshot[field] is not None
+                       else snapshot[field] for field in fields], matching["id"]),
                 )
             _merge_source_records(conn, "user_snapshot", int(matching["id"]), int(snapshot["id"]))
+            conn.execute("UPDATE user_observations SET snapshot_id = %s WHERE snapshot_id = %s", (matching["id"], snapshot["id"]))
+            conn.execute(
+                """INSERT INTO user_rating_records SELECT %s, performance, rating, best_rating, best_at,
+                     rating_deviation, provisional, games, wins, losses, draws, progress, native_data
+                   FROM user_rating_records WHERE snapshot_id = %s
+                   ON CONFLICT(snapshot_id, performance) DO NOTHING""", (matching["id"], snapshot["id"]),
+            )
+            conn.execute("DELETE FROM user_rating_records WHERE snapshot_id = %s", (snapshot["id"],))
             conn.execute("DELETE FROM user_snapshots WHERE id = %s", (snapshot["id"],))
     _merge_source_records(conn, "user", survivor, replaced)
     affected_runs = _merge_user_edges(conn, survivor, replaced)

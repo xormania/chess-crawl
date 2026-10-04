@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Any, Mapping
 
 import httpx
 
@@ -10,6 +10,7 @@ from chess_crawl.config import ProviderSettings
 from chess_crawl.providers.base import FetchPolicy, RawRecord
 from chess_crawl.providers.http import HttpClient, HttpFetchResult
 from chess_crawl.providers.lichess import endpoints
+from chess_crawl.providers.resources import get_resource, resource_owner_scope, resource_source_key
 
 
 PROVIDER = "lichess"
@@ -64,17 +65,21 @@ class LichessClient:
 
     def get_user_profile(self, username: str) -> RawRecord:
         normalized = _username(username)
+        params = {"trophies": "true", "profile": "true", "rank": "true", "fideId": "true"}
         result = self.http.request(
             "GET",
-            endpoints.user_profile(username),
+            endpoints.user_profile(username, **params),
             endpoint_type="user_profile",
-            headers=self._headers("application/json"),
+            # OAuth adds account-relative following/blocking information. This
+            # collector captures the broad public profile independently.
+            headers={"Accept": "application/json"},
         )
         return _raw_record(
             result,
             endpoint_type="user_profile",
             canonical_source_key=f"lichess/user/{normalized}/profile",
             target_username=normalized,
+            request_params=params,
         )
 
     def get_user_stats(self, username: str) -> RawRecord:
@@ -136,6 +141,32 @@ class LichessClient:
     def close(self) -> None:
         self.http.close()
 
+    def get_user_resource(
+        self, username: str, resource_key: str, *, parameters: dict[str, Any] | None = None,
+        owner_scope: str = "public", etag: str | None = None, last_modified: str | None = None,
+    ) -> RawRecord:
+        resource = get_resource(PROVIDER, resource_key)
+        values = resource.parameters(parameters)
+        scope = resource_owner_scope(resource, owner_scope)
+        if resource.authentication == "required" and not self.settings.oauth_token:
+            raise ValueError(f"resource {resource_key} requires an OAuth token")
+        if resource.access_scope == "workspace" and scope != self.settings.oauth_owner_scope:
+            raise ValueError("provider OAuth credentials belong to a different workspace")
+        result = self.http.request(
+            "GET", resource.url(username, values), endpoint_type="user_resource", headers=self._headers("application/json"),
+        )
+        return _raw_record(
+            result, endpoint_type="user_resource",
+            canonical_source_key=resource_source_key(
+                PROVIDER, username, resource_key, values, owner_scope=scope, authenticated=bool(self.settings.oauth_token),
+            ),
+            target_username=_username(username), request_params={
+                "resource_key": resource_key, "parameters": values, "owner_scope": scope,
+                "authenticated": bool(self.settings.oauth_token),
+            },
+            owner_scope=scope,
+        )
+
     def _evidence_params(self) -> dict[str, str]:
         return {
             "clocks": str(self.settings.include_clocks).lower(),
@@ -159,6 +190,7 @@ def _raw_record(
     target_game_id: str | None = None,
     archive_unit: str | None = None,
     request_params: Mapping[str, object] | None = None,
+    owner_scope: str = "public",
 ) -> RawRecord:
     return RawRecord(
         provider=PROVIDER,
@@ -178,6 +210,7 @@ def _raw_record(
         archive_unit=archive_unit,
         response_headers=result.headers,
         fetch_attempts=result.attempts,
+        owner_scope=owner_scope,
     )
 
 

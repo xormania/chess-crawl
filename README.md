@@ -150,6 +150,7 @@ are retained even when only part of that response fits the run's bounds.
 | `CHESS_CRAWL_CONTACT` | Contact included in the provider User-Agent; set before live acquisition. |
 | `CHESS_CRAWL_USER_AGENT` | Optional full User-Agent override for source-run clients. |
 | `CHESS_CRAWL_LICHESS_TOKEN` | Optional Lichess account token. |
+| `CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE` | Workspace owning that token; defaults to `local`. Required to match for private team resources. |
 
 The CLI reads exported environment variables and does not automatically load
 `.env`. Compose reads `.env` for interpolation and passes the configured contact

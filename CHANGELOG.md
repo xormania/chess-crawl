@@ -7,6 +7,21 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Complete queryable provider profile/statistics facts, typed rating records,
+  alias evidence, and observation history retaining recurring values and
+  conditional refreshes. Migration `0008_player_resources` recovers retained
+  fetch occurrences; local parser replay populates newly normalized fields.
+- A registered supplementary player-resource catalog and collectors for
+  Chess.com clubs, team matches, tournaments, and online status, plus Lichess
+  rating history, performance statistics, activity, and teams. Complete native
+  JSON, rating-history source points, and explicit coverage/failure evidence
+  remain available without treating unknown or unavailable data as empty.
+- Ownership for raw player resources and authenticated team observations,
+  OAuth credential/workspace binding, and preservation with quarantine of
+  unowned legacy Lichess profile relationship facts. Public profiles request
+  all documented public extensions independently of OAuth relationship data.
+  See [player data](docs/player-data.md) for migration and ownership details.
+
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
   project's `.venv`; Docker Compose continues to own the application services.
