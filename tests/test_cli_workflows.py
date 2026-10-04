@@ -4,6 +4,7 @@ from chess_crawl.storage.db import open_database, require_row
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -130,6 +131,7 @@ class _FixtureProviderFactory:
 class _ChessComFixtureClient:
     def __init__(self, factory: _FixtureProviderFactory) -> None:
         self.factory = factory
+        self.http = SimpleNamespace(before_request=None, persist_deadline=None)
 
     def get_user_profile(
         self,
@@ -201,6 +203,7 @@ class _ChessComFixtureClient:
 class _LichessFixtureClient:
     def __init__(self, factory: _FixtureProviderFactory) -> None:
         self.factory = factory
+        self.http = SimpleNamespace(before_request=None, persist_deadline=None)
 
     def get_user_profile(self, username: str) -> RawRecord:
         normalized = username.strip().lower()

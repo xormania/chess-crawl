@@ -135,6 +135,13 @@ class Worker:
                             count = self.queue_consumer.run_once(
                                 conn, lambda job_id: runner.run(max_jobs=1, job_id=job_id, resume_stale=True).claimed,
                             )
+                            # SQS is only a delivery hint. The durable row may
+                            # outlive an expired/DLQ'd message, or a delivery
+                            # may arrive while its scoped lock is unavailable.
+                            # Poll PostgreSQL after an empty/unclaimable hint so
+                            # eligible work cannot remain pending forever.
+                            if not count:
+                                count = runner.run(max_jobs=1).claimed
                         claimed += count
                         if once:
                             break

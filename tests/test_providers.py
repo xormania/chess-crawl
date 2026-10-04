@@ -305,7 +305,7 @@ def test_chesscom_monthly_archive_normalizes_game(fixtures_dir: Path, initialize
     assert require_row(conn.execute("SELECT rating FROM ratings_at_game WHERE game_id = %s AND color = 'white'", (game["id"],)))[0] == 1510
 
 
-def test_game_normalization_failure_rolls_back_partial_normalized_rows(
+def test_game_normalization_failure_keeps_completed_game_pending_source(
     fixtures_dir: Path,
     initialized_conn,
     monkeypatch,
@@ -340,9 +340,10 @@ def test_game_normalization_failure_rolls_back_partial_normalized_rows(
 
     assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
     assert require_row(conn.execute("SELECT normalization_status FROM raw_payloads"))[0] == "pending"
-    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 0
-    assert require_row(conn.execute("SELECT COUNT(*) FROM provider_users"))[0] == 0
-    assert require_row(conn.execute("SELECT COUNT(*) FROM source_records"))[0] == 0
+    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM provider_users"))[0] == 2
+    assert require_row(conn.execute("SELECT COUNT(*) FROM source_records"))[0] == 3
+    assert require_row(conn.execute("SELECT COUNT(*) FROM normalization_items"))[0] == 1
 
 
 def test_lichess_games_ndjson_normalizes_ms_timestamps(fixtures_dir: Path, initialized_conn) -> None:
