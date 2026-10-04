@@ -39,6 +39,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Changed
 
+- Full CI and Devbox smoke now run after pushes to `master` and support manual
+  runs. Push/manual checks validate the selected commit without PR merge-history
+  assumptions; PR scope, promotion policy, and required check names are retained.
+  Concurrency separates event types and branches so manual checks cannot cancel
+  post-merge validation.
 - External PostgreSQL connections require certificate-chain and hostname
   verification by default. A separate Compose overlay omits the bundled
   database and mounts its operator-supplied CA certificate, retaining migration

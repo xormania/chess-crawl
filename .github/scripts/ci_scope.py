@@ -1,4 +1,4 @@
-"""Select CI work from the checked-out PR merge result, conservatively."""
+"""Scope pull requests; fully validate push and manually selected revisions."""
 
 from __future__ import annotations
 
@@ -70,14 +70,28 @@ def changed_paths() -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-ref", required=True)
+    parser.add_argument(
+        "--event-name", required=True,
+        choices=("pull_request", "push", "workflow_dispatch"),
+    )
+    parser.add_argument("--base-ref", default="")
     args = parser.parse_args()
     try:
-        paths = changed_paths()
-        offline, compose = classify(paths, args.base_ref)
+        if args.event_name == "pull_request":
+            if not args.base_ref:
+                raise ValueError("Pull-request CI scope requires a base branch.")
+            paths = changed_paths()
+            offline, compose = classify(paths, args.base_ref)
+            reason = f"{len(paths)} changed paths in the pull-request merge result."
+        else:
+            # Pushes and manual runs validate the selected commit itself. Its
+            # history may be a squash, fast-forward, root, or merge commit;
+            # neither a PR base nor a changed-files comparison is needed.
+            offline = compose = True
+            reason = f"Full validation for {args.event_name} at the checked-out commit."
         outputs = f"offline={str(offline).lower()}\ncompose={str(compose).lower()}\n"
         summary = (
-            f"CI scope: {len(paths)} changed paths in the pull-request merge result.\n\n"
+            f"CI scope: {reason}\n\n"
             f"Offline checks: {'run' if offline else 'skip (no offline inputs)'}.\n\n"
             f"Compose smoke: {'run' if compose else 'skip (no container inputs)'}.\n"
         )

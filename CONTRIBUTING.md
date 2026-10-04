@@ -64,7 +64,8 @@ An additional Linux CI smoke check replaces an existing non-Devbox Python 3.13
 virtual environment, runs setup and source checks,
 exercises pytest argument forwarding without a database, and verifies that setup
 preserves both lock files. It runs when the toolchain, dependency files, check
-script, or its workflow changes. The existing CI jobs retain the full database
+script, or its workflow changes, and on every push to `master` or manual Devbox
+run. The existing CI jobs retain the full database
 suite and Compose integration checks.
 
 ### Without Devbox
@@ -153,6 +154,23 @@ sides of renames:
 | Only `Dockerfile`, `compose.yaml`, `.dockerignore`, `.env.example`, `docker/mercure-entrypoint.sh`, or the CI Compose overlay | Omitted | Run |
 | Application, dependencies, Python deployment helpers, shared CI, `README.md`, `LICENSE`, or any unrecognized path | Run | Run |
 | Any promotion to `master`, or an empty merge diff | Run | Run |
+
+Every push to `master` also runs the full offline suite, analysis, security
+checks, Compose integration smoke, and Devbox smoke against the resulting
+commit. This records checks on the actual branch commit after a merge; it works
+with squash, fast-forward, and merge commits. Pushes to other branches rely on
+their PR checks and do not start duplicate push runs.
+
+For an on-demand check, open **Actions → CI → Run workflow**, select the branch,
+and run it. Manual CI always runs the full offline and Compose checks, including
+for documentation-only revisions. **Actions → Devbox → Run workflow** runs the
+development-environment check independently. These controls become available
+once the workflow changes reach the default branch. Changelog and promotion
+source policies apply to PRs, where the source and target branches are known.
+
+Concurrency separates PRs, master pushes, and manual runs by event and PR/ref.
+A newer run replaces an older run in the same group, while a manual check cannot
+cancel a master-push check or a different branch's manual check.
 
 Mixed changes take the union of the applicable checks. Required checks retain
 their names and report their scope even when no application work is needed. A scope-classification error fails those required
