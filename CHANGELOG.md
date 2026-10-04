@@ -7,6 +7,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- A locked Devbox development environment with Python 3.13, uv, Git, and
+  PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
+  project's `.venv`; Docker Compose continues to own the application services.
 - Pinned Bandit security checks for application, deployment, and CI Python,
   with reviewed, rule-specific exceptions, complete-scan validation, and stage
   timings in the existing required offline check. Compose smoke now rejects

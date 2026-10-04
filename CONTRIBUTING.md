@@ -5,22 +5,72 @@ Start with the [README](README.md) for the project overview and
 
 ## Development setup
 
-Use Python 3.11 or newer, Git, and [uv](https://docs.astral.sh/uv/).
-CI exercises Python 3.11 and 3.13 against real PostgreSQL 18. Docker with the
-Compose plugin provides the recommended application environment. Database tests
-require a dedicated disposable PostgreSQL server; they do not use file fixtures.
+Use [Devbox](https://www.jetify.com/docs/devbox/installing-devbox) for the pinned
+development toolchain. Install Devbox as your normal user; it also requires Nix
+and offers to install it if missing. On Windows, install and run it inside WSL2,
+with the checkout in the Linux filesystem (for example, `~/src/chess-crawl`).
+Use Docker Desktop's WSL integration or a working Linux Docker engine with the
+Compose v2 plugin. Docker is a separate host prerequisite, not a Devbox service.
+The lock includes Linux x86-64/ARM64 and Apple Silicon macOS packages. Use the
+[direct uv setup](#without-devbox) on Intel macOS.
+
+Devbox provides Python 3.13, uv, Git, and PostgreSQL 18 tools such as `psql`,
+`pg_dump`, and `pg_restore`. `devbox.lock` pins the tool packages; `uv.lock` pins
+the Python dependencies. uv creates and manages the project's ignored `.venv`.
+Devbox's Python and PostgreSQL plugins are disabled, so entering the environment
+does not create another virtual environment or start a database. Docker Compose
+provides the application services; tests require a separate disposable database.
+uv is directed to Devbox's exact Python executable with interpreter downloads
+disabled. Setup replaces an existing `.venv` if it uses a different interpreter.
+
+Use your host Git for the initial checkout, then enter the pinned environment:
 
 ```bash
 git clone https://github.com/xormania/chess-crawl.git
 cd chess-crawl
 git switch dev
 git switch -c docs/my-change
-uv sync --locked --group dev
+devbox shell
+devbox run setup
 uv run chess-crawl --help
 ```
 
-Choose a descriptive branch name for the actual work. Install `--extra api`
-as well when running the HTTP server outside Docker:
+Choose a descriptive branch name for the actual work. `devbox run setup` installs
+the development group and API extra with the existing lock file. Run it after
+pulling dependency changes. Shell entry does not install Python dependencies or
+start services. Use `uv run ...` inside the shell; no manual `.venv` activation
+is needed. You can also use `devbox run` commands from outside the shell:
+
+```bash
+devbox run setup
+devbox run check
+# After configuring the disposable test database below:
+devbox run test -q
+devbox run test -q -k provider
+```
+
+`check` runs Ruff, Mypy, Bandit, and CLI help, stopping at the first failure.
+`test` forwards its arguments to pytest. The PostgreSQL tools use explicit
+connection settings; they do not automatically connect to Compose's unpublished
+database port. Follow the [operations guide](docs/postgresql-operations.md) for
+container-based backup and restore commands.
+
+Keep `devbox.json`, `devbox.lock`, and `uv.lock` in Git; keep `.devbox/` and `.venv/`
+local. To upgrade a pinned tool, change its version in `devbox.json`, run
+`devbox install`, and review both Devbox files together. Use uv for Python
+dependency upgrades. CI still exercises Python 3.11 and 3.13 against real
+PostgreSQL 18, and the package continues to support Python 3.11 or newer.
+An additional Linux CI smoke check replaces an existing non-Devbox Python 3.13
+virtual environment, runs setup and source checks,
+exercises pytest argument forwarding without a database, and verifies that setup
+preserves both lock files. It runs when the toolchain, dependency files, check
+script, or its workflow changes. The existing CI jobs retain the full database
+suite and Compose integration checks.
+
+### Without Devbox
+
+Devbox is the recommended contributor setup, but direct uv use remains
+supported. Install Python 3.11+, Git, uv, and the PostgreSQL tools yourself, then:
 
 ```bash
 uv sync --locked --group dev --extra api
