@@ -215,7 +215,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   Internal delayed replay can target its exact successful fetch occurrence;
   the existing worker retains the same captured identity through parsing.
   Private-only profile lookups remain invisible outside the owning scope;
-  public identities with supplied zero dates or game observations remain visible.
+  public user lookups, listings, exports, and user totals also exclude those
+  identities until public evidence exists, while authorized scoped reads retain them.
+  Public identities with supplied zero dates or game observations remain visible.
 - Deferred normalization queues preserve the captured fetch identity through
   worker resumes. New observations schedule a successor when older processing
   is still running, so a source rejected as out of date cannot remain pending
