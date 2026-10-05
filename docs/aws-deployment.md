@@ -145,7 +145,8 @@ with UID/GID 10001 and mode 0700 so ECS copies writable application permissions.
 Scratch data, including finite export spools and worker process bindings, is
 removed with its task. The default Fargate ephemeral allocation also holds the
 image; review concurrent export limits and scratch capacity before increasing
-workloads. Local Compose continues using its own `/tmp` tmpfs.
+workloads. Local Compose uses a `/tmp` tmpfs with explicit UID/GID 10001 and mode
+0700 because a mounted tmpfs hides the image directory's ownership.
 The API probes authenticated readiness, and the worker probe checks its own
 local process incarnation and database heartbeat. An unrelated live worker
 cannot satisfy that task's health check.

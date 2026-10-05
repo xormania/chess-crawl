@@ -145,6 +145,8 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 - Fargate tasks use supported task-scoped ephemeral scratch volumes instead of
   unsupported tmpfs settings, with image-defined UID 10001 write permissions.
+  Local Compose sets the same private application ownership explicitly on its
+  tmpfs so worker process identity files and API export spools remain writable.
   Worker task health verifies its own process incarnation and database heartbeat.
   The ALB idle timeout leaves headroom for bounded API export preparation.
 - Local Compose stores compressed source objects in a persistent archive volume,
@@ -298,7 +300,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   Internal delayed replay can target its exact successful fetch occurrence;
   the existing worker retains the same captured identity through parsing.
   Private-only profile lookups remain invisible outside the owning scope;
-  public identities with supplied zero dates or game observations remain visible.
+  public user lookups, listings, exports, and user totals also exclude those
+  identities until public evidence exists, while authorized scoped reads retain them.
+  Public identities with supplied zero dates or game observations remain visible.
 
 - Failed Chess.com statistics requests retain request evidence without creating
   or refreshing a player account. Local Lichess profile replay also populates

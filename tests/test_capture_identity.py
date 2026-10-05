@@ -1,6 +1,7 @@
 """Capture identity, reconciliation and private timestamps retain their evidence."""
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -11,6 +12,7 @@ from chess_crawl.ingest import (
     fetch_user_resource,
     replay_raw_payload,
 )
+from chess_crawl.export.writers import export_users_jsonl
 from chess_crawl.normalize.resources import normalize_resource_payload
 from chess_crawl.normalize.users import normalize_user_payload
 from chess_crawl.providers.base import RawRecord
@@ -21,6 +23,7 @@ from chess_crawl.storage.player_profiles import (
     resource_history,
 )
 from chess_crawl.storage.raw import insert_fetch_log, store_raw_payload
+from chess_crawl.storage.queries import iter_users, query_user, summary_report, user_page
 from chess_crawl.storage.player_profiles import resolve_capture_account
 from support import seed_game
 from test_player_resources import _config, _profile, _resource
@@ -64,6 +67,30 @@ def _record(username, kind, at):
         body=body,
         fetched_at=at,
     )
+
+
+def _assert_public_users(conn, provider, expected_names, output: Path):
+    for selected_provider in (None, provider):
+        streamed = list(iter_users(conn, provider=selected_provider))
+        rows, total = user_page(conn, provider=selected_provider, after=0, limit=100)
+        exported = export_users_jsonl(conn, provider=selected_provider, output=output)
+        jsonl = [json.loads(line) for line in output.read_text().splitlines()]
+        actual = {
+            "iterator": {row["username_normalized"] for row in streamed},
+            "page": {row["username_normalized"] for row in rows},
+            "page_total": total,
+            "export": {row["username_normalized"] for row in jsonl},
+            "export_count": exported,
+        }
+        assert actual == {
+            "iterator": expected_names,
+            "page": expected_names,
+            "page_total": len(expected_names),
+            "export": expected_names,
+            "export_count": len(expected_names),
+        }
+    summary = summary_report(conn)
+    assert next(row["users"] for row in summary["providers"] if row["provider"] == provider) == len(expected_names)
 
 
 def test_private_acquisition_keeps_public_envelope_unchanged(initialized_conn):
@@ -119,7 +146,7 @@ def test_failed_stats_request_cannot_create_or_refresh_account(initialized_conn,
     ]
 
 
-def test_private_only_identity_does_not_expose_collection_times(initialized_conn):
+def test_private_only_identity_does_not_expose_collection_times(initialized_conn, tmp_path):
     conn = initialized_conn
     fetch_user_resource(
         conn,
@@ -139,6 +166,8 @@ def test_private_only_identity_does_not_expose_collection_times(initialized_conn
         assert public is None or (
             public["first_seen_at"] is None and public["updated_at"] is None
         )
+    _assert_public_users(conn, "lichess", set(), tmp_path / "users.jsonl")
+    assert query_user(conn, "lichess", "PrivateOnly") is None
 
 
 @pytest.mark.parametrize("kind", ["resource", "stats"])
@@ -286,7 +315,7 @@ def test_conditional_response_binds_current_username_holder(initialized_conn):
 
 
 @pytest.mark.parametrize("kind", ["profile", "resource", "game", "stats"])
-def test_public_observations_populate_private_placeholder_dates(initialized_conn, kind):
+def test_public_observations_populate_private_placeholder_dates(initialized_conn, kind, tmp_path):
     conn = initialized_conn
     provider = "chess.com" if kind == "stats" else "lichess"
     user_id = resolve_capture_account(
@@ -301,6 +330,8 @@ def test_public_observations_populate_private_placeholder_dates(initialized_conn
         "SELECT first_seen_at,updated_at FROM provider_users WHERE id=%s", (user_id,)
     ).fetchone()
     assert before["first_seen_at"] is None and before["updated_at"] is None
+    _assert_public_users(conn, provider, set(), tmp_path / "users.jsonl")
+    assert query_user(conn, provider, "PrivateOnly") is None
     if kind == "profile":
         _profile(conn, {"id": "privateonly", "username": "PrivateOnly"}, at=200)
     elif kind == "resource":
@@ -327,9 +358,12 @@ def test_public_observations_populate_private_placeholder_dates(initialized_conn
         if kind != "game"
         else public["first_seen_at"] > 100
     )
+    expected_names = {"privateonly", "opponent"} if kind == "game" else {"privateonly"}
+    _assert_public_users(conn, provider, expected_names, tmp_path / "users.jsonl")
+    assert query_user(conn, provider, "PrivateOnly").id == user_id
 
 
-def test_zero_public_identity_date_survives_private_capture(initialized_conn):
+def test_zero_public_identity_date_survives_private_capture(initialized_conn, tmp_path):
     conn = initialized_conn
     user_id = resolve_capture_account(
         conn, provider="lichess", username="Alice", observed_at=0
@@ -347,6 +381,8 @@ def test_zero_public_identity_date_survives_private_capture(initialized_conn):
     )
     assert player_profile(conn, "lichess", "Alice") == before
     assert len(resource_history(conn, user_id, owner_scope="alpha")) == 1
+    _assert_public_users(conn, "lichess", {"alice"}, tmp_path / "users.jsonl")
+    assert query_user(conn, "lichess", "Alice").id == user_id
 
 
 def test_statistics_replay_uses_each_accounts_own_capture_clock(initialized_conn):

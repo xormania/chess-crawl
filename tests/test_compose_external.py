@@ -71,6 +71,18 @@ def test_default_compose_retains_private_bundled_database_and_migration_gate(
             assert services[name]["depends_on"]["init"] == {"condition": "service_completed_successfully", "required": True}
 
 
+@pytest.mark.parametrize("external", [False, True])
+def test_compose_scratch_is_private_and_owned_by_the_runtime_user(
+    render_compose: Callable[..., subprocess.CompletedProcess[str]], external: bool,
+) -> None:
+    services = parsed(render_compose(external=external))["services"]
+    for name in (*PYTHON_SERVICES, "archive-init"):
+        assert services[name]["tmpfs"] == ["/tmp:uid=10001,gid=10001,mode=0700"]
+        assert services[name]["read_only"] is True
+    for name in PYTHON_SERVICES:
+        assert services[name]["user"] == "10001:10001"
+
+
 def test_external_compose_excludes_unused_database_and_preserves_migration_and_hub_gates(
     render_compose: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:

@@ -54,6 +54,7 @@ def query_user(conn: Connection, provider: str, username: str) -> UserReport | N
                  WHERE gp.provider_user_id = pu.id AND g.provider = pu.provider) AS games
           FROM provider_users pu
          WHERE pu.provider = %s AND pu.username_normalized = %s
+           AND (pu.first_seen_at IS NOT NULL OR pu.updated_at IS NOT NULL)
         """,
         (provider, normalized),
     ).fetchone()
@@ -129,7 +130,8 @@ def summary_report(conn: Connection, *, workspace_id: str | None = None) -> dict
         conn.execute(
             """
             SELECT p.key AS provider,
-                   (SELECT COUNT(*) FROM provider_users pu WHERE pu.provider = p.key) AS users,
+                   (SELECT COUNT(*) FROM provider_users pu WHERE pu.provider = p.key
+                      AND (pu.first_seen_at IS NOT NULL OR pu.updated_at IS NOT NULL)) AS users,
                    (SELECT COUNT(*) FROM games g WHERE g.provider = p.key) AS games
               FROM providers p
              ORDER BY p.key COLLATE "C"
@@ -324,7 +326,7 @@ def iter_games(
 def iter_users(
     conn: Connection, *, provider: str | None = None
 ) -> Generator[Row, None, None]:
-    """Stream normalized user records without loading the archive into memory."""
+    """Stream public identities without loading the archive into memory."""
     with conn.cursor() as cursor:
         stream = cast(Generator[Row, None, None], cursor.stream(
             """
@@ -332,6 +334,7 @@ def iter_users(
                    account_status, title, first_seen_at, updated_at
               FROM provider_users
              WHERE (%s::text IS NULL OR provider = %s)
+               AND (first_seen_at IS NOT NULL OR updated_at IS NOT NULL)
              ORDER BY provider COLLATE "C", username_normalized COLLATE "C"
             """,
             (provider, provider),
@@ -426,7 +429,8 @@ def user_page(
     conn: Connection, *, provider: str | None, after: int, limit: int
 ) -> tuple[list[Row], int]:
     total = int(require_row(conn.execute(
-        "SELECT COUNT(*) FROM provider_users WHERE (%s::text IS NULL OR provider = %s)", (provider, provider),
+        """SELECT COUNT(*) FROM provider_users WHERE (%s::text IS NULL OR provider = %s)
+           AND (first_seen_at IS NOT NULL OR updated_at IS NOT NULL)""", (provider, provider),
     ))[0])
     rows = list(conn.execute(
         """
@@ -438,6 +442,7 @@ def user_page(
                  WHERE gp.provider_user_id = pu.id AND g.provider = pu.provider) AS games
           FROM provider_users pu
          WHERE pu.id > %s AND (%s::text IS NULL OR pu.provider = %s)
+           AND (pu.first_seen_at IS NOT NULL OR pu.updated_at IS NOT NULL)
          ORDER BY pu.id
          LIMIT %s
         """,
