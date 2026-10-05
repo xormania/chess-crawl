@@ -535,7 +535,6 @@ def test_offline_replay_repairs_native_move_metadata_without_mutating_old_revisi
 
     with monkeypatch.context() as old:
         old.setattr(stored_evidence, "EVIDENCE_VERSION", "game-evidence-v1")
-        old.setattr(stored_evidence, "parse_game_evidence", old_evidence)
         old.setattr(games_normalizer, "parse_game_evidence", old_evidence, raising=False)
         old.setattr(games_normalizer, "PARSER_VERSION", "games-normalizer-v5/game-evidence-v1")
         raw_id, game_id = _store(initialized_conn, _parallel_notation_data("lichess"))

@@ -155,6 +155,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   the object volume alongside PostgreSQL; historical inline bodies remain readable
   and move only through the offline archive relocation helper.
 
+- Reuse validated raw-source preparation and immutable game evidence across
+  repeated observations, while retaining locked deduplication and replay repairs.
+  Deduplication telemetry counts each stored duplicate once, and game detail/PGN
+  reads select only the evidence they return in one consistent SQL statement.
 - Game normalization prepares PGN evidence outside write transactions, commits
   each game's evidence and run attribution with its source checkpoint, and
   resumes remaining items after interruption. Account reconciliation takes
