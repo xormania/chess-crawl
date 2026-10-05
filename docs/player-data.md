@@ -22,6 +22,10 @@ country. Supplied FIDE identities remain separately named native fields.
 The streamer convenience flag maps Chess.com's `is_streamer` and Lichess's
 `streaming`; the latter describes current streaming activity. Native fields
 retain these provider-specific meanings and the separate Lichess streamer data.
+The name projection uses current Lichess `realName` when supplied. For preserved
+legacy profiles without that field, it joins nonblank string `firstName` and
+`lastName`; an explicitly empty or null current name remains cleared. These
+fields changed in July 2024, and all original values remain in native JSON.
 
 `user_rating_records` makes supplied ratings, best/lowest ratings and dates, deviations,
 provisional flags, records, game totals, and progress queryable by provider
@@ -41,12 +45,41 @@ links; a raw-only source supplies one observation when no fetch was recorded.
 
 Schema migration does not download player data. Existing snapshots initially
 retain their older projections and observations; replay archived responses
-with `users-normalizer-v5` to populate complete facts and ratings. Historical
+with `users-normalizer-v7` to populate complete facts and ratings. Historical
 Lichess profile captures are conservatively quarantined at migration time,
 because retained request metadata cannot establish whether OAuth was used.
 This works for inline, compressed, and external source bodies without reading
 them inside the schema transaction. A successful relationship-free replay
 publishes the capture as public; unrelated sources remain usable throughout.
+
+Resource and statistics captures bind each successful fetch to the resolved
+account before parsing. Parsing uses that fetch's account and time even if the
+username changes between transactions. A 304 response creates a new occurrence
+for the current holder without downloading another body. Local replay handles
+every account already bound to reused bytes, preserves historical ownership,
+and derives each account's dates from its own occurrences. Certified identity
+reconciliation moves those bindings with the placeholder's other evidence.
+`users-normalizer-v7` and `player-resources-normalizer-v2` identify this local
+interpretation upgrade; existing unbound history retains its recorded account
+rather than guessing a reassignment from today's username.
+Failed statistics requests preserve their fetch/error evidence without creating
+an account, advancing its public dates, or attaching an observation without a body.
+
+Deferred jobs retain the captured fetch ID in their durable parameters. A newer
+fetch of identical bytes queues a successor even while an older worker is
+running. Stored game collection uses the latest retained successful fetch ID
+for the same scheduling distinction. Worker retries keep the capture's bound
+owner and time; explicit offline replay without a fetch ID updates every
+retained bound account.
+
+Private resource requests resolve existing identities without changing their
+public display names or dates. A private-only target has null public identity
+`first_seen_at` and `updated_at`; its real collection times remain in scoped
+resource observations and acquisition records. A profile lookup outside that
+scope returns no profile until public evidence exists. Public users and exports
+retain null dates if they include the identity placeholder. Later public profile,
+statistics, resource, or game observations populate the public dates. An explicit public
+zero timestamp remains distinct from null.
 
 The public Lichess profile collector explicitly requests profile, trophies,
 performance ranks, and public FIDE ID. It omits OAuth authorization because
@@ -131,6 +164,8 @@ authorization boundary.
 
 - [Chess.com Published-Data API](https://www.chess.com/news/view/published-data-api)
 - [Lichess public profile and optional fields](https://github.com/lichess-org/api/blob/master/doc/specs/tags/users/api-user-username.yaml)
+- [Lichess current profile names](https://github.com/lichess-org/api/blob/master/doc/specs/schemas/Profile.yaml)
+- [Lichess legacy name replacement, July 2024](https://lichess.org/page/changelog-2024)
 - [Lichess authenticated-only relationship fields](https://github.com/lichess-org/api/blob/master/doc/specs/schemas/UserExtended.yaml)
 - [Lichess rating history](https://github.com/lichess-org/api/blob/master/doc/specs/tags/users/api-user-username-rating-history.yaml)
 - [Lichess performance statistics](https://github.com/lichess-org/api/blob/master/doc/specs/tags/users/api-user-username-perf-perf.yaml)

@@ -66,6 +66,30 @@ def test_claims_serialize_provider_acquisition_but_not_processing(database_url: 
         state.release_job_ownership(other)
 
 
+@pytest.mark.parametrize("first_priority", [20, 10])
+def test_checkpointed_job_returns_behind_equal_priority_work(
+    initialized_conn: Connection, first_priority: int,
+) -> None:
+    first = state.enqueue_job(
+        initialized_conn, provider="lichess", kind="normalize_payload", target="1", priority=first_priority,
+    ).job_id
+    claimed = state.claim_next_job(initialized_conn, now=100)
+    assert claimed is not None and claimed.id == first
+    second = state.enqueue_job(
+        initialized_conn, provider="lichess", kind="normalize_payload", target="2", priority=20,
+    ).job_id
+    initialized_conn.execute(
+        "UPDATE discovery_jobs SET enqueued_at=CASE id WHEN %s THEN 100 WHEN %s THEN 150 END WHERE id IN (%s,%s)",
+        (first, second, first, second),
+    )
+    state.finish_attempt(initialized_conn, first, "pending", reason="checkpointed", now=200)
+    state.release_job_ownership(initialized_conn)
+    next_job = state.claim_next_job(initialized_conn, now=201)
+    assert next_job is not None and next_job.id == (second if first_priority == 20 else first)
+    assert next_job.priority == first_priority
+    state.release_job_ownership(initialized_conn)
+
+
 def test_heartbeat_age_cannot_steal_live_job_and_manual_release_fences_stale_owner(database_url: str) -> None:
     with connection(database_url, mode="rw") as owner, connection(database_url, mode="rw") as successor:
         job_id = state.enqueue_job(owner, provider="lichess", kind="normalize_payload", target="123").job_id

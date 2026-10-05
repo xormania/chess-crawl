@@ -161,6 +161,7 @@ def test_export_disconnect_closes_cursor_connection_and_snapshot(database_url: s
     monkeypatch.setattr(compat,"connection",tracked)
     stream = _export_chunks(database_url,"games",None,"alpha")
     assert '"provider":"lichess"' in next(stream)
+    assert len(observed)==1 and observed[0].closed
     stream.close()
     assert len(observed)==1 and observed[0].closed
 

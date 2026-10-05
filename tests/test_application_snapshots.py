@@ -132,3 +132,25 @@ def test_freshness_includes_successful_revalidation_without_replacing_raw(initia
     assert lichess["last_checked_at"] == 200
     assert lichess["last_fetched_at"] == 100
     assert application.summary(conn)["freshness"]["last_checked_at"] == 500
+
+
+@pytest.mark.parametrize("status", [200, 304])
+def test_public_freshness_excludes_unbound_and_private_attempts(initialized_conn, status) -> None:
+    conn = initialized_conn
+    public_raw = store_raw_payload(conn, RawRecord(
+        provider="lichess", endpoint_type="user_profile",
+        request_url="https://lichess.org/api/user/alice", canonical_source_key="lichess/user/alice",
+        fetched_at=100, body=b"{}", owner_scope="public",
+    ))
+    private_raw = store_raw_payload(conn, RawRecord(
+        provider="lichess", endpoint_type="user_resource",
+        request_url="https://lichess.org/api/team/of/alice", canonical_source_key="lichess/private/alpha/alice/teams",
+        fetched_at=200, body=b"[]", owner_scope="alpha",
+    ))
+    for raw_id, attempted_at in ((public_raw, 100), (None, 300), (private_raw, 400)):
+        insert_fetch_log(
+            conn, provider="lichess", endpoint_type="user_profile", url="https://lichess.org/api/user/alice",
+            attempted_at=attempted_at, status_code=status, raw_payload_id=raw_id,
+        )
+    fresh = queries.archive_freshness(conn, provider="lichess")
+    assert fresh["last_checked_at"] == fresh["last_fetched_at"] == 100

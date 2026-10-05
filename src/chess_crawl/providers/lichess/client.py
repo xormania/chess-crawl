@@ -109,7 +109,8 @@ class LichessClient:
             "GET",
             endpoints.user_games(username, **params),
             endpoint_type="user_games_stream",
-            headers=self._headers("application/x-ndjson"),
+            # Public archive inputs must not inherit account-private access.
+            headers={"Accept": "application/x-ndjson"},
         )
         return _raw_record(
             result,
@@ -128,7 +129,7 @@ class LichessClient:
             "GET",
             endpoints.game(game_id, **params),
             endpoint_type="game",
-            headers=self._headers("application/json"),
+            headers={"Accept": "application/json"},
         )
         return _raw_record(
             result,
@@ -160,7 +161,7 @@ class LichessClient:
         }
         result = self.http.request(
             "GET", endpoints.user_games(username, **params), endpoint_type="user_games_stream",
-            headers=self._headers("application/x-ndjson"),
+            headers={"Accept": "application/x-ndjson"},
         )
         return _raw_record(
             result, endpoint_type="user_games_stream",
@@ -186,7 +187,7 @@ class LichessClient:
         authenticated = resource.authentication != "none" and bool(self.settings.oauth_token)
         result = self.http.request(
             "GET", resource.url(username, values), endpoint_type="user_resource",
-            headers=self._headers("application/json") if authenticated else {"Accept": "application/json"},
+            headers=self._authenticated_headers("application/json") if authenticated else {"Accept": "application/json"},
         )
         return _raw_record(
             result, endpoint_type="user_resource",
@@ -207,7 +208,7 @@ class LichessClient:
             "accuracy": str(self.settings.include_accuracy).lower(),
         }
 
-    def _headers(self, accept: str) -> Mapping[str, str]:
+    def _authenticated_headers(self, accept: str) -> Mapping[str, str]:
         headers = {"Accept": accept}
         if self.settings.oauth_token:
             headers["Authorization"] = f"Bearer {self.settings.oauth_token}"

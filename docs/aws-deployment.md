@@ -93,7 +93,7 @@ restore, and scoped reads remain operator release checks.
 | Source evidence | Private S3 bucket, encryption, ownership enforcement, public-access block, TLS-only policy, versioning, retained on removal/replacement. No expiry policy deletes referenced evidence. |
 | Dispatch | Encrypted standard SQS queue and retained DLQ; configurable visibility and retry count. PostgreSQL remains durable job truth. |
 | API access | Internal ALB with ACM TLS listener, allowed only from the supplied frontend security group. ALB-to-container HTTP is confined to task security groups. |
-| Runtime | Separate digest-pinned Fargate API, worker, dispatcher task definitions; desired counts default to zero. Writable `/tmp` is isolated; root filesystems remain read-only. |
+| Runtime | Separate digest-pinned Fargate API, worker, dispatcher task definitions; desired counts default to zero. Task-scoped ephemeral `/tmp` is writable by UID 10001; root filesystems remain read-only. |
 | Migration | One-shot task using RDS-managed master credentials; migrates and grants the separate restricted runtime role. Runtime tasks never receive master credentials. |
 | Logs | CloudWatch log group with configurable retention; anonymous workload records enabled in cloud tasks. |
 
@@ -139,6 +139,21 @@ repository ARN in `ContainerRepositoryArn`. The image architecture is x86-64.
 unsupported Fargate combinations. Defaults are 0.5 vCPU / 1 GiB and zero tasks,
 not a claim that those sizes fit every workload.
 
+Fargate uses a task-scoped ephemeral bind volume for `/tmp`; it does not support
+the ECS `tmpfs` setting. The image declares the same path as a Docker `VOLUME`
+with UID/GID 10001 and mode 0700 so ECS copies writable application permissions.
+Scratch data, including finite export spools and worker process bindings, is
+removed with its task. The default Fargate ephemeral allocation also holds the
+image; review concurrent export limits and scratch capacity before increasing
+workloads. Local Compose continues using its own `/tmp` tmpfs.
+The API probes authenticated readiness, and the worker probe checks its own
+local process incarnation and database heartbeat. An unrelated live worker
+cannot satisfy that task's health check.
+The ALB idle timeout is explicitly 120 seconds, above the default 60-second
+export preparation deadline before response headers. If operators raise
+`CHESS_CRAWL_EXPORT_PREPARE_SECONDS`, update that timeout with additional
+scheduling/serialization headroom in the same reviewed deployment change.
+
 The migration task runs:
 
 ```bash
@@ -157,6 +172,14 @@ explicit grants (including other schemas, functions, or grant options). The help
 matching the RDS master privilege model: unsafe runtime flags are refused before
 rotation, and ALTER ROLE changes only LOGIN, inheritance and password settings.
 Repeat this task after every schema upgrade to grant access to new tables. Failure logs never print passwords or database SQL error text.
+
+The packaged migrations include work budgets (0012), worker-heartbeat retention
+(0013), and admission/capture lookup indexes (0014). Bootstrap must apply these
+before the API or workers start. Trusted quota settings use the same defaults
+as local runs; configure shared API/worker environment overrides together when
+changing policy. Operators inspect or extend retained budgets with
+`chess-crawl-admin budgets show` and `budgets resume`; see
+[work budgets](work-budgets.md). HTTP clients cannot extend those ceilings.
 
 Use a dedicated application database and runtime role. PostgreSQL retains
 standard PUBLIC privileges such as built-in function execution, language/type
@@ -261,6 +284,8 @@ per 1,000 imported games/positions and idle infrastructure before scaling.
 - [RDS TLS trust roots](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html)
 - [ECS Secrets Manager injection](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specifying-sensitive-data.html)
 - [Fargate private networking](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-task-networking.html)
-- [Fargate tmpfs support](https://aws.amazon.com/about-aws/whats-new/2026/01/amazon-ecs-tmpfs-mounts-aws-fargate-managed-instances/)
+- [Fargate task-definition constraints](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html)
+- [ECS ephemeral bind volumes and image permissions](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/bind-mounts.html)
+- [ALB idle timeout](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-load-balancer-attributes.html)
 - [SQS queue CloudFormation properties](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-sqs-queue.html)
 - [AWS Pricing Calculator](https://calculator.aws/)

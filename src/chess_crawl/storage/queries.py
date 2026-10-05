@@ -137,9 +137,8 @@ def summary_report(conn: Connection, *, workspace_id: str | None = None) -> dict
         )
     )
     raw_payloads = int(require_row(conn.execute(
-        """SELECT COUNT(*) FROM raw_payloads WHERE (%s::text IS NULL
-           OR owner_scope IN ('public',%s))""",
-        (workspace_id,workspace_id),
+        "SELECT COUNT(*) FROM raw_payloads WHERE owner_scope IN ('public',COALESCE(%s,'public'))",
+        (workspace_id,),
     ))[0])
     runs = list(
         conn.execute(

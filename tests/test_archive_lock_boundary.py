@@ -166,7 +166,8 @@ def test_response_and_fetch_evidence_still_roll_back_together(initialized_conn, 
     for table in ("archive_objects", "raw_payloads", "fetch_logs"):
         assert require_row(initialized_conn.execute(f"SELECT COUNT(*) FROM {table}"))[0] == 0
     assert len(list(tmp_path.rglob("*.gz"))) == 1
-    raw_id = _persist_response(initialized_conn, sample_record(), job_id=None, crawl_run_id=None)
+    raw_id, fetch_id = _persist_response(initialized_conn, sample_record(), job_id=None, crawl_run_id=None)
+    assert fetch_id is not None
     assert read_raw_payload(initialized_conn, raw_id).body == sample_record().body
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == 1
     assert len(list(tmp_path.rglob("*.gz"))) == 1
@@ -293,3 +294,69 @@ def test_relocation_entrypoint_exposes_continuation_and_optional_count(database_
     assert json.loads(capsys.readouterr().out) == {"moved": 1, "has_more": True, "remaining": 1}
     assert main(["--batch-size", "1"]) == 0
     assert json.loads(capsys.readouterr().out) == {"moved": 1, "has_more": False, "remaining": 0}
+
+
+def test_same_source_registration_serializes_before_read_without_blocking_other_sources(
+    initialized_conn, database_url, monkeypatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import time
+    from chess_crawl.storage import raw
+
+    first_read = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_selected = threading.Event()
+    tags: dict[int, str] = {}
+    second_pids = []
+    original = raw._existing_payload
+
+    def captured_read(conn, record, body_hash):
+        existing = original(conn, record, body_hash)
+        if conn.in_transaction and record.canonical_source_key == sample_record().canonical_source_key:
+            tag = tags[conn.pgconn.backend_pid]
+            if tag == "first" and existing is None:
+                first_read.set()
+                assert release_first.wait(10)
+            elif tag == "second":
+                second_selected.set()
+        return existing
+
+    def register(tag):
+        with connection(database_url, mode="rw") as conn:
+            tags[conn.pgconn.backend_pid] = tag
+            if tag == "second":
+                second_pids.append(conn.pgconn.backend_pid)
+                second_started.set()
+            return store_raw_payload(conn, sample_record())
+
+    monkeypatch.setattr(raw, "_existing_payload", captured_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(register, "first")
+        try:
+            assert first_read.wait(10)
+            second = pool.submit(register, "second")
+            assert second_started.wait(10)
+            with connection(database_url, mode="rw") as other:
+                other.execute("SET lock_timeout='1s'")
+                independent_id = store_raw_payload(other, RawRecord(
+                    provider="lichess", endpoint_type="user_profile", canonical_source_key="independent-source",
+                    body=b"independent source", fetched_at=124, request_url="https://lichess.org/api/user/other",
+                ))
+            deadline = time.monotonic() + 10
+            while True:
+                assert not second_selected.is_set(), "Duplicate read raced before the first source committed"
+                wait_type = require_row(initialized_conn.execute(
+                    "SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s", (second_pids[0],),
+                ))[0]
+                if wait_type == "Lock":
+                    break
+                assert time.monotonic() < deadline, "Second registration did not reach its source lock"
+                second_selected.wait(0.01)
+            release_first.set()
+            assert first.result(timeout=10) == second.result(timeout=10)
+            assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 2
+            assert independent_id != first.result()
+        finally:
+            release_first.set()

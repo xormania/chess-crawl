@@ -21,6 +21,7 @@ from chess_crawl.application.validation import (
     validate_username,
 )
 from chess_crawl.jobs import state
+from chess_crawl.jobs.budget import BudgetPolicy
 from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
 from chess_crawl.providers.registry import list_provider_infos
 from chess_crawl.storage import application as submissions
@@ -36,6 +37,7 @@ def submit_import(
     idempotency_key: str,
     limits: Limits = Limits(),
     workspace_id: str = "local",
+    budget_policy: BudgetPolicy | None = None,
 ) -> dict[str, Any]:
     request = validate_import(request, limits=limits)
     key = validate_idempotency_key(idempotency_key)
@@ -60,7 +62,7 @@ def submit_import(
         )
         return run_id, [profile.job_id, games.job_id]
 
-    return _submit(conn, key=key, operation="import", request=request, create=create, workspace_id=workspace_id)
+    return _submit(conn, key=key, operation="import", request=request, create=create, workspace_id=workspace_id, budget_policy=budget_policy)
 
 
 def submit_crawl(
@@ -70,6 +72,7 @@ def submit_crawl(
     idempotency_key: str,
     limits: Limits = Limits(),
     workspace_id: str = "local",
+    budget_policy: BudgetPolicy | None = None,
 ) -> dict[str, Any]:
     request = validate_crawl(request, limits=limits)
     key = validate_idempotency_key(idempotency_key)
@@ -85,7 +88,7 @@ def submit_crawl(
         )
         return run_id, [root_job_id]
 
-    return _submit(conn, key=key, operation="crawl", request=request, create=create, workspace_id=workspace_id)
+    return _submit(conn, key=key, operation="crawl", request=request, create=create, workspace_id=workspace_id, budget_policy=budget_policy)
 
 
 def _submit(
@@ -96,8 +99,16 @@ def _submit(
     request: ImportRequest | CrawlRequest | dict[str, Any],
     create: Callable[[], tuple[int, list[int]]],
     workspace_id: str = "local",
+    budget_policy: BudgetPolicy | None = None,
 ) -> dict[str, Any]:
+    from chess_crawl.storage.work_budgets import admit_run_budget, install_workspace_policy
+    policy = budget_policy if budget_policy is not None else BudgetPolicy.from_env()
     canonical = json.dumps(request if isinstance(request, dict) else asdict(request), sort_keys=True, separators=(",", ":"))
+    # Persist operator tightening even when a later admission is rejected. This
+    # short trusted transaction changes policy only, never usage or run limits.
+    with transaction(conn):
+        workspaces.submission_context(conn, workspace_id)
+        install_workspace_policy(conn, workspace_id, policy)
     # Serialize this scoped submission identity while unrelated work can write.
     # Identity survives terminal job/run states.
     with transaction(conn):
@@ -117,6 +128,7 @@ def _submit(
                 "replayed": True,
             }
         run_id, job_ids = create()
+        admit_run_budget(conn, run_id, workspace_id, policy)
         submissions.record_submission(
             conn, key=key, operation=operation, request_json=canonical, run_id=run_id, job_ids=job_ids, workspace_id=workspace_id,
         )
@@ -137,6 +149,8 @@ def get_run(conn: Connection, run_id: int, *, workspace_id: str = "local") -> di
     result.pop("counters_json", None)
     result["counters"] = state.run_counters(conn, run_id)
     result["job_ids"] = state.job_ids_for_run(conn, run_id)
+    from chess_crawl.storage.work_budgets import get_run_budget
+    result["budget"] = get_run_budget(conn, run_id, workspace_id)
     result["freshness"] = queries.archive_freshness(conn, provider=result["provider"], owner_scope=workspace_id)
     return result
 
@@ -152,6 +166,8 @@ def get_job(conn: Connection, job_id: int, *, workspace_id: str = "local") -> di
     result["archive_id"] = archive_id(conn)
     result["params"] = state.load_params(result.pop("params_json"))
     result["workspace_id"] = workspace_id
+    from chess_crawl.storage.work_budgets import get_job_budget
+    result["budget"] = get_job_budget(conn, job_id, workspace_id)
     for internal in ("ownership_token", "owner_worker_id", "ownership_generation", "owner_backend_pid", "worker_id", "claimed_by", "worker_backend", "backend"):
         result.pop(internal,None)
         result["params"].pop(internal,None)
@@ -247,6 +263,7 @@ def list_providers() -> list[dict[str, Any]]:
 
 def submit_upgrade(
     conn: Connection, request: dict[str, Any], *, idempotency_key: str, workspace_id: str = "local",
+    budget_policy: BudgetPolicy | None = None,
 ) -> dict[str, Any]:
     """Queue a local replay upgrade; no network work occurs in the request."""
     from typing import cast
@@ -265,11 +282,12 @@ def submit_upgrade(
         )
         return run_id, [job_id]
 
-    return _submit(conn,key=key,operation="upgrade",request=params,create=create,workspace_id=workspace_id)
+    return _submit(conn,key=key,operation="upgrade",request=params,create=create,workspace_id=workspace_id, budget_policy=budget_policy)
 
 
 def submit_resource(
     conn: Connection, request: dict[str, Any], *, idempotency_key: str, workspace_id: str = "local",
+    budget_policy: BudgetPolicy | None = None,
 ) -> dict[str, Any]:
     from typing import cast
     from chess_crawl.jobs.models import JobKind
@@ -292,12 +310,13 @@ def submit_resource(
         )
         return run_id,[job_id]
 
-    return _submit(conn,key=key,operation="resource",request=params,create=create,workspace_id=workspace_id)
+    return _submit(conn,key=key,operation="resource",request=params,create=create,workspace_id=workspace_id, budget_policy=budget_policy)
 
 
 def submit_player_refresh(
     conn: Connection, *, provider: str, username: str, statistics: bool,
     idempotency_key: str, workspace_id: str = "local",
+    budget_policy: BudgetPolicy | None = None,
 ) -> dict[str, Any]:
     """Queue exactly one known profile or statistics job, without acquisition."""
     from chess_crawl.jobs.models import JobKind
@@ -314,11 +333,12 @@ def submit_player_refresh(
         return run_id, [job_id]
 
     return _submit(conn, key=key, operation="resource", request={"provider": provider, **params},
-                   create=create, workspace_id=workspace_id)
+                   create=create, workspace_id=workspace_id, budget_policy=budget_policy)
 
 
 def submit_game_collection(
     conn: Connection, *, provider: str, game_id: str, idempotency_key: str, workspace_id: str = "local",
+    budget_policy: BudgetPolicy | None = None,
 ) -> dict[str, Any]:
     """Queue a public Lichess game export using its public eight-character ID."""
     provider,game_id = validate_game_collection(provider,game_id)
@@ -332,4 +352,4 @@ def submit_game_collection(
         )
         return run_id,[job_id]
 
-    return _submit(conn,key=key,operation="resource",request=params,create=create,workspace_id=workspace_id)
+    return _submit(conn,key=key,operation="resource",request=params,create=create,workspace_id=workspace_id, budget_policy=budget_policy)

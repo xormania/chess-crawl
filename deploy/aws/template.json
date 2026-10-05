@@ -556,6 +556,10 @@
         ],
         "LoadBalancerAttributes": [
           {
+            "Key": "idle_timeout.timeout_seconds",
+            "Value": "120"
+          },
+          {
             "Key": "deletion_protection.enabled",
             "Value": {
               "Fn::If": [
@@ -1167,20 +1171,7 @@
                 "Drop": [
                   "ALL"
                 ]
-              },
-              "Tmpfs": [
-                {
-                  "ContainerPath": "/tmp",
-                  "Size": 64,
-                  "MountOptions": [
-                    "rw",
-                    "noexec",
-                    "nosuid",
-                    "nodev",
-                    "mode=1777"
-                  ]
-                }
-              ]
+              }
             },
             "LogConfiguration": {
               "LogDriver": "awslogs",
@@ -1213,7 +1204,19 @@
               "Timeout": 5,
               "Retries": 3,
               "StartPeriod": 30
-            }
+            },
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime-tmp",
+                "ContainerPath": "/tmp",
+                "ReadOnly": false
+              }
+            ]
+          }
+        ],
+        "Volumes": [
+          {
+            "Name": "runtime-tmp"
           }
         ]
       }
@@ -1329,20 +1332,7 @@
                 "Drop": [
                   "ALL"
                 ]
-              },
-              "Tmpfs": [
-                {
-                  "ContainerPath": "/tmp",
-                  "Size": 64,
-                  "MountOptions": [
-                    "rw",
-                    "noexec",
-                    "nosuid",
-                    "nodev",
-                    "mode=1777"
-                  ]
-                }
-              ]
+              }
             },
             "LogConfiguration": {
               "LogDriver": "awslogs",
@@ -1357,7 +1347,31 @@
                 "mode": "non-blocking",
                 "max-buffer-size": "4m"
               }
+            },
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime-tmp",
+                "ContainerPath": "/tmp",
+                "ReadOnly": false
+              }
+            ],
+            "HealthCheck": {
+              "Command": [
+                "CMD",
+                "python",
+                "/app/docker/healthcheck.py",
+                "worker"
+              ],
+              "Interval": 30,
+              "Timeout": 5,
+              "Retries": 3,
+              "StartPeriod": 30
             }
+          }
+        ],
+        "Volumes": [
+          {
+            "Name": "runtime-tmp"
           }
         ]
       }
@@ -1467,20 +1481,7 @@
                 "Drop": [
                   "ALL"
                 ]
-              },
-              "Tmpfs": [
-                {
-                  "ContainerPath": "/tmp",
-                  "Size": 64,
-                  "MountOptions": [
-                    "rw",
-                    "noexec",
-                    "nosuid",
-                    "nodev",
-                    "mode=1777"
-                  ]
-                }
-              ]
+              }
             },
             "LogConfiguration": {
               "LogDriver": "awslogs",
@@ -1495,7 +1496,19 @@
                 "mode": "non-blocking",
                 "max-buffer-size": "4m"
               }
-            }
+            },
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime-tmp",
+                "ContainerPath": "/tmp",
+                "ReadOnly": false
+              }
+            ]
+          }
+        ],
+        "Volumes": [
+          {
+            "Name": "runtime-tmp"
           }
         ]
       }
@@ -1622,20 +1635,7 @@
                 "Drop": [
                   "ALL"
                 ]
-              },
-              "Tmpfs": [
-                {
-                  "ContainerPath": "/tmp",
-                  "Size": 64,
-                  "MountOptions": [
-                    "rw",
-                    "noexec",
-                    "nosuid",
-                    "nodev",
-                    "mode=1777"
-                  ]
-                }
-              ]
+              }
             },
             "LogConfiguration": {
               "LogDriver": "awslogs",
@@ -1650,7 +1650,19 @@
                 "mode": "non-blocking",
                 "max-buffer-size": "4m"
               }
-            }
+            },
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime-tmp",
+                "ContainerPath": "/tmp",
+                "ReadOnly": false
+              }
+            ]
+          }
+        ],
+        "Volumes": [
+          {
+            "Name": "runtime-tmp"
           }
         ]
       }

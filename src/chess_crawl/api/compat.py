@@ -4,19 +4,23 @@ from __future__ import annotations
 import csv
 import io
 import json
+import tempfile
+import time
 from collections.abc import Generator
 from contextlib import closing
 from dataclasses import asdict
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TextIO
 
 import anyio
-from fastapi import APIRouter, Header, Query, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from starlette.concurrency import run_in_threadpool
 from starlette.types import Receive, Scope, Send
 
 from chess_crawl import application
+from chess_crawl.jobs.budget import BudgetPolicy
+from chess_crawl.api.exports import ExportLimits, ExportSpool, check_export_bounds
 from chess_crawl.application.services import submit_game_collection, submit_player_refresh
 from chess_crawl.application.validation import (
     validate_game_collection, validate_idempotency_key, validate_page,
@@ -41,13 +45,16 @@ class GameCollectionBody(BaseModel):
 class ArchiveExportResponse(StreamingResponse):
     """Close the database iterator even when ASGI send/cancellation interrupts it."""
 
-    def __init__(self,chunks:Generator[str,None,None],*,media_type:str,headers:dict[str,str]) -> None:
+    def __init__(self,chunks:Generator[str,None,None]|ExportSpool,*,media_type:str,headers:dict[str,str],
+                 download_seconds:int = 300) -> None:
         self.chunks = chunks
+        self.download_seconds = download_seconds
         super().__init__(chunks,media_type=media_type,headers=headers)
 
     async def __call__(self,scope:Scope,receive:Receive,send:Send) -> None:
         try:
-            await super().__call__(scope,receive,send)
+            with anyio.fail_after(self.download_seconds):
+                await super().__call__(scope,receive,send)
         finally:
             # Wait for any in-flight next() before closing, including disconnect
             # cancellation. Never leave an archive snapshot waiting on GC.
@@ -55,7 +62,8 @@ class ArchiveExportResponse(StreamingResponse):
                 await run_in_threadpool(self.chunks.close)
 
 
-def register_compat_routes(router: APIRouter, archive: str, limits: application.Limits) -> None:
+def register_compat_routes(router: APIRouter, archive: str, limits: application.Limits, budget_policy: BudgetPolicy) -> None:
+    export_limits = ExportLimits.from_env()
     @router.get("/games/lookup", tags=["archive"])
     def lookup_game(provider: str, key: Annotated[str,Query(min_length=1,max_length=2048)]) -> dict[str,Any]:
         provider = validate_provider(provider)
@@ -117,7 +125,7 @@ def register_compat_routes(router: APIRouter, archive: str, limits: application.
         idempotency_key = validate_idempotency_key(idempotency_key)
         with connection(archive,mode="rw") as conn:
             result = submit_player_refresh(conn,provider=provider,username=username,statistics=statistics,
-                                           idempotency_key=idempotency_key,workspace_id=request.state.workspace_id)
+                                           idempotency_key=idempotency_key,workspace_id=request.state.workspace_id,budget_policy=budget_policy)
         response.headers["Location"] = f"/v1/runs/{result['run_id']}"
         return result
 
@@ -138,19 +146,19 @@ def register_compat_routes(router: APIRouter, archive: str, limits: application.
         idempotency_key = validate_idempotency_key(idempotency_key)
         with connection(archive,mode="rw") as conn:
             result = submit_game_collection(conn,provider=provider,game_id=game_id,idempotency_key=idempotency_key,
-                                            workspace_id=request.state.workspace_id)
+                                            workspace_id=request.state.workspace_id,budget_policy=budget_policy)
         response.headers["Location"] = f"/v1/runs/{result['run_id']}"
         return result
 
     def export(kind: Literal["games","users","graph"], request: Request, provider: str|None) -> StreamingResponse:
         provider = None if provider is None else validate_provider(provider)
-        with connection(archive) as conn,transaction(conn,write=False):
-            api_views.check_export_schema(conn)
         extension = "csv" if kind=="graph" else "jsonl"
+        chunks = _prepare_export(archive,kind,provider,request.state.workspace_id,limits=export_limits)
         return ArchiveExportResponse(
-            _export_chunks(archive,kind,provider,request.state.workspace_id),
+            chunks,
             media_type="text/csv" if kind=="graph" else "application/x-ndjson",
             headers={"Content-Disposition":f'attachment; filename="{kind}.{extension}"'},
+            download_seconds=export_limits.download_seconds,
         )
 
     @router.get("/exports/games.jsonl", tags=["exports"])
@@ -167,9 +175,45 @@ def register_compat_routes(router: APIRouter, archive: str, limits: application.
 
 
 def _export_chunks(archive: str, kind: str, provider: str|None, workspace_id: str) -> Generator[str,None,None]:
-    # The generator owns its connection/transaction until completion or close.
-    # Cursor streaming bounds memory and holds a single repeatable-read snapshot.
+    # Compatibility helper: even its first yield occurs after the DB is closed.
+    with closing(_prepare_export(archive,kind,provider,workspace_id,limits=ExportLimits.from_env())) as spool:
+        yield from spool
+
+
+def _prepare_export(archive: str, kind: str, provider: str|None, workspace_id: str,
+                    *, limits: ExportLimits) -> ExportSpool:
+    deadline = time.monotonic()+limits.prepare_seconds
+    spool = tempfile.TemporaryFile(mode="w+t",encoding="utf-8",newline="")
+    try:
+        _write_export(archive,kind,provider,workspace_id,spool=spool,limits=limits,deadline=deadline)
+        check_export_bounds(limits=limits,rows=0,bytes_written=0,deadline=deadline)
+        spool.seek(0)
+        return ExportSpool(spool)
+    except BaseException:
+        spool.close()
+        raise
+
+
+def _write_export(archive: str, kind: str, provider: str|None, workspace_id: str, *,
+                  spool: TextIO, limits: ExportLimits, deadline: float) -> None:
+    rows_written = bytes_written = 0
+
+    def write(chunk: str, *, record: bool) -> None:
+        nonlocal rows_written,bytes_written
+        rows_written += int(record)
+        bytes_written += len(chunk.encode("utf-8"))
+        check_export_bounds(limits=limits,rows=rows_written,bytes_written=bytes_written,deadline=deadline)
+        spool.write(chunk)
+
     with connection(archive) as conn,transaction(conn,write=False):
+        remaining_ms = max(1,int((deadline-time.monotonic())*1000))
+        if not api_views.admit_export_snapshot(conn,workspace_id=workspace_id,
+                                              slots=limits.workspace_slots,timeout_ms=remaining_ms):
+            raise HTTPException(status_code=429,detail="This workspace already has the maximum concurrent export preparations",
+                                headers={"Retry-After":"5"})
+        api_views.check_export_schema(conn)
+        check_export_bounds(limits=limits,rows=0,bytes_written=0,deadline=deadline)
+        api_views.set_export_timeout(conn,max(1,int((deadline-time.monotonic())*1000)))
         rows = queries.iter_games(conn,provider=provider) if kind=="games" else (
             queries.iter_users(conn,provider=provider) if kind=="users" else
             api_views.iter_owned_graph(conn,workspace_id=workspace_id,provider=provider)
@@ -177,7 +221,7 @@ def _export_chunks(archive: str, kind: str, provider: str|None, workspace_id: st
         with closing(rows):
             if kind!="graph":
                 for row in rows:
-                    yield json.dumps(dict(row),sort_keys=True,separators=(",",":"))+"\n"
+                    write(json.dumps(dict(row),sort_keys=True,separators=(",",":"))+"\n",record=True)
                 return
             buffer = io.StringIO(newline="")
             writer = csv.DictWriter(buffer,fieldnames=(
@@ -185,7 +229,7 @@ def _export_chunks(archive: str, kind: str, provider: str|None, workspace_id: st
                 "via_game_id","game_count","depth","edge_kind",
             ))
             writer.writeheader()
-            yield buffer.getvalue()
+            write(buffer.getvalue(),record=False)
             for row in rows:
                 buffer.seek(0)
                 buffer.truncate(0)
@@ -196,4 +240,4 @@ def _export_chunks(archive: str, kind: str, provider: str|None, workspace_id: st
                     if isinstance(value,str) and value.startswith(("=","+","-","@","\t","\r")):
                         values[key] = "'"+value
                 writer.writerow(values)
-                yield buffer.getvalue()
+                write(buffer.getvalue(),record=True)

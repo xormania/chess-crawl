@@ -8,6 +8,10 @@ import json
 import ssl
 from pathlib import Path
 
+import pytest
+
+from chess_crawl.api.exports import ExportLimits
+
 ROOT = Path(__file__).resolve().parents[1]
 yaml = import_module("yaml")
 
@@ -86,6 +90,37 @@ def test_runtime_has_no_master_secret_or_plaintext_database_password() -> None:
     assert len(ingress) == 1 and ingress[0]["FromPort"] == ingress[0]["ToPort"] == 443
     assert "CidrIp" not in ingress[0]
     assert resources["ApiListener"]["Properties"]["Protocol"] == "HTTPS"
+
+
+@pytest.mark.parametrize("name", ["ApiTask", "WorkerTask", "DispatcherTask", "MigrationTask"])
+def test_fargate_scratch_uses_supported_ephemeral_volume_with_application_permissions(name) -> None:
+    props = template()["Resources"][name]["Properties"]
+    assert props["RequiresCompatibilities"] == ["FARGATE"]
+    container = props["ContainerDefinitions"][0]
+    assert container["ReadonlyRootFilesystem"] is True
+    assert not {"Tmpfs", "Devices", "SharedMemorySize"} & container["LinuxParameters"].keys()
+    mounted = [item for item in container["MountPoints"] if item["ContainerPath"] == "/tmp"]
+    assert len(mounted) == 1 and mounted[0]["ReadOnly"] is False
+    volume = next(item for item in props["Volumes"] if item["Name"] == mounted[0]["SourceVolume"])
+    # No host source, Docker-managed persistence, or EFS: scratch dies with the task.
+    assert set(volume) == {"Name"}
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert 'VOLUME ["/tmp"]' in dockerfile
+    assert "chown 10001:10001 /tmp" in dockerfile and "chmod 0700 /tmp" in dockerfile
+
+
+def test_cloud_worker_probes_its_own_process_and_database_heartbeat() -> None:
+    worker = template()["Resources"]["WorkerTask"]["Properties"]["ContainerDefinitions"][0]
+    probe = worker["HealthCheck"]
+    assert probe["Command"] == ["CMD", "python", "/app/docker/healthcheck.py", "worker"]
+    assert probe["StartPeriod"] >= 30 and probe["Timeout"] == 5 and probe["Retries"] >= 3
+    assert "CHESS_CRAWL_WORKER_IDENTITY_FILE=/tmp/chess-crawl-worker.json" in (ROOT / "Dockerfile").read_text()
+
+
+def test_api_idle_timeout_allows_export_preparation_before_headers() -> None:
+    attributes = template()["Resources"]["LoadBalancer"]["Properties"]["LoadBalancerAttributes"]
+    values = {item["Key"]: item["Value"] for item in attributes}
+    assert int(values["idle_timeout.timeout_seconds"]) > ExportLimits().prepare_seconds
 
 
 def test_local_archive_shared_volume_gates_workers_and_is_readonly_for_api() -> None:

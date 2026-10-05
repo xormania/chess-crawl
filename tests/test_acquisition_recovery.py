@@ -66,7 +66,7 @@ def test_normalization_failure_preserves_response_and_can_be_replayed_offline(
     conn = initialized_conn
     normalizer = ingest.normalize_user_payload
 
-    def fail(conn, raw_id):
+    def fail(conn, raw_id, **kwargs):
         assert not conn.in_transaction
         assert require_row(conn.execute("SELECT raw_payload_id FROM fetch_logs"))[0] == raw_id
         raise RuntimeError("normalizer unavailable")
