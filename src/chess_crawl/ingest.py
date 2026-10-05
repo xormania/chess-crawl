@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -14,6 +15,8 @@ from chess_crawl.normalize.games import PARSER_VERSION as GAMES_PARSER_VERSION
 from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.normalize.users import PARSER_VERSION as USERS_PARSER_VERSION
 from chess_crawl.normalize.users import normalize_user_payload
+from chess_crawl.normalize.resources import PARSER_VERSION as RESOURCES_PARSER_VERSION
+from chess_crawl.normalize.resources import normalize_resource_payload
 from chess_crawl.providers.base import FetchAttempt, RawRecord
 from chess_crawl.providers.registry import ProviderSession, get_provider_info
 from chess_crawl.storage.db import Connection, transaction
@@ -24,6 +27,8 @@ from chess_crawl.storage.raw import (
     prepare_raw_payload,
 )
 from chess_crawl.storage.repository import insert_error
+from chess_crawl.storage.player_profiles import record_resource_attempt, resolve_capture_account
+from chess_crawl.providers.resources import resource_source_key
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,23 @@ def fetch_chesscom_stats(
             normalizer=normalize_user_payload,
             job_id=job_id,
             crawl_run_id=crawl_run_id,
+        )
+
+
+def fetch_user_resource(
+    conn: Connection, provider: str, username: str, resource_key: str, *,
+    parameters: dict[str, Any] | None = None, owner_scope: str = "public",
+    config: Config | None = None, transport: httpx.BaseTransport | None = None, sleeper=None,
+    session: ProviderSession | None = None, job_id: int | None = None, crawl_run_id: int | None = None,
+) -> IngestResult:
+    key = resource_source_key(provider, username, resource_key, parameters, owner_scope=owner_scope)
+    with _provider_client(provider, config=config, transport=transport, sleeper=sleeper, session=session) as client:
+        etag, last_modified = latest_validators(conn, key) if provider == "chess.com" else (None, None)
+        record = client.get_user_resource(
+            username, resource_key, parameters=parameters, owner_scope=owner_scope, etag=etag, last_modified=last_modified,
+        )
+        return _store_and_normalize(
+            conn, record, normalizer=normalize_resource_payload, job_id=job_id, crawl_run_id=crawl_run_id,
         )
 
 
@@ -195,6 +217,7 @@ def _provider_client(provider: str, *, config, transport, sleeper, session):
 def replay_raw_payload(
     conn: Connection, raw_payload_id: int, *,
     crawl_run_id: int | None = None, max_games: int | None = None,
+    fetch_log_id: int | None = None,
 ) -> IngestResult:
     """Normalize a durable raw payload without making or fabricating a fetch.
 
@@ -204,7 +227,9 @@ def replay_raw_payload(
     raw = read_raw_payload(conn, raw_payload_id)
     normalized: list[int] | int | None
     if raw.endpoint_type in {"user_profile", "user_stats"}:
-        normalized = normalize_user_payload(conn, raw_payload_id)
+        normalized = normalize_user_payload(conn, raw_payload_id, fetch_log_id=fetch_log_id)
+    elif raw.endpoint_type == "user_resource":
+        normalized = normalize_resource_payload(conn, raw_payload_id, fetch_log_id=fetch_log_id)
     elif raw.endpoint_type in {"monthly_archive", "user_games_stream", "game"}:
         normalized = normalize_games_payload(
             conn, raw_payload_id, crawl_run_id=crawl_run_id, max_games=max_games,
@@ -226,6 +251,8 @@ def _requires_normalization(conn: Connection, raw_payload_id: int) -> bool:
     raw = read_raw_payload(conn, raw_payload_id)
     if raw.endpoint_type in {"user_profile", "user_stats"}:
         version = USERS_PARSER_VERSION
+    elif raw.endpoint_type == "user_resource":
+        version = RESOURCES_PARSER_VERSION
     elif raw.endpoint_type == "archives_index":
         version = "chesscom-archives-index-v1"
     else:
@@ -246,17 +273,27 @@ def _store_and_normalize(
     job_id: int | None = None,
     crawl_run_id: int | None = None,
 ) -> IngestResult:
-    raw_payload_id = _persist_response(conn, record, job_id=job_id, crawl_run_id=crawl_run_id)
+    raw_payload_id, fetch_log_id = _persist_response(conn, record, job_id=job_id, crawl_run_id=crawl_run_id)
     if raw_payload_id is None:
         return _non_body_result(record)
     game_payload = record.endpoint_type in {"monthly_archive", "user_games_stream", "game"}
-    if record.http_status == 304 and not (game_payload and crawl_run_id is not None):
-        if not _requires_normalization(conn, raw_payload_id):
+    current_conditional = record.http_status == 304 and not _requires_normalization(conn, raw_payload_id)
+    if record.http_status == 304 and game_payload and crawl_run_id is None:
+        if current_conditional:
             return _non_body_result(record)
     if game_payload:
         normalized = normalizer(conn, raw_payload_id, crawl_run_id=crawl_run_id, max_games=max_games)
+    elif record.endpoint_type in {"user_profile", "user_stats", "user_resource"}:
+        # A network acquisition belongs to the account currently holding the
+        # requested username. Explicit raw replay keeps the retained observed
+        # identity instead (see replay_raw_payload()).
+        normalized = normalizer(
+            conn, raw_payload_id, prefer_observed_identity=False, fetch_log_id=fetch_log_id,
+        )
     else:
         normalized = normalizer(conn, raw_payload_id)
+    if current_conditional:
+        return _non_body_result(record)
     normalized_ids = _normalized_ids(normalized)
     return IngestResult(
         provider=record.provider,
@@ -276,7 +313,7 @@ def _store_and_mark_skipped(
     job_id: int | None = None,
     crawl_run_id: int | None = None,
 ) -> IngestResult:
-    raw_payload_id = _persist_response(conn, record, job_id=job_id, crawl_run_id=crawl_run_id)
+    raw_payload_id, _ = _persist_response(conn, record, job_id=job_id, crawl_run_id=crawl_run_id)
     if raw_payload_id is None:
         return _non_body_result(record)
     _mark_archives_skipped(conn, raw_payload_id)
@@ -304,7 +341,7 @@ def _persist_response(
     *,
     job_id: int | None,
     crawl_run_id: int | None,
-) -> int | None:
+) -> tuple[int | None, int | None]:
     prepared_object = (
         prepare_raw_payload(conn, record) if record.body is not None and record.http_status == 200 else None
     )
@@ -314,7 +351,20 @@ def _persist_response(
         raw_payload_id = _store_raw_if_present(conn, record, prepared_object=prepared_object)
         if record.http_status == 304:
             raw_payload_id = latest_raw_payload_id(conn, record.canonical_source_key)
-        _log_attempts(conn, record, raw_payload_id, job_id=job_id, crawl_run_id=crawl_run_id)
+        provider_user_id = None
+        if record.endpoint_type == "user_resource":
+            provider_user_id = record_resource_attempt(conn, record, raw_payload_id)
+        elif (
+            record.endpoint_type == "user_stats" and record.target_username
+            and record.http_status in {200, 304} and raw_payload_id is not None
+        ):
+            provider_user_id = resolve_capture_account(
+                conn, provider=record.provider, username=record.target_username, observed_at=record.fetched_at,
+            )
+        fetch_log_id = _log_attempts(
+            conn, record, raw_payload_id, provider_user_id=provider_user_id,
+            job_id=job_id, crawl_run_id=crawl_run_id,
+        )
         retry_after = _retry_after(record)
         if record.http_status in {429, 503} and retry_after is not None:
             response_at = float(record.fetched_at)
@@ -327,7 +377,7 @@ def _persist_response(
             )
     if record.http_status == 304 and raw_payload_id is None:
         raise ValueError("provider returned HTTP 304 without a stored raw payload")
-    return raw_payload_id
+    return raw_payload_id, fetch_log_id
 
 
 def _store_raw_if_present(
@@ -345,9 +395,10 @@ def _log_attempts(
     *,
     job_id: int | None = None,
     crawl_run_id: int | None = None,
-) -> None:
+    provider_user_id: int | None = None,
+) -> int | None:
     if not record.fetch_attempts:
-        insert_fetch_log(
+        return insert_fetch_log(
             conn,
             provider=record.provider,
             url=record.request_url,
@@ -361,11 +412,12 @@ def _log_attempts(
             crawl_run_id=crawl_run_id,
             raw_payload_id=raw_payload_id,
             bytes_count=len(record.body) if record.body else None,
+            provider_user_id=provider_user_id,
         )
-        return
+    successful_log_id = None
     for attempt in record.fetch_attempts:
         headers = dict(attempt.response_headers)
-        insert_fetch_log(
+        log_id = insert_fetch_log(
             conn,
             provider=attempt.provider,
             url=attempt.url,
@@ -384,7 +436,11 @@ def _log_attempts(
             crawl_run_id=crawl_run_id,
             raw_payload_id=raw_payload_id if attempt.status_code in {200, 304} else None,
             error_ref=_insert_error_for_attempt(conn, attempt),
+            provider_user_id=provider_user_id if attempt.status_code in {200, 304} else None,
         )
+        if attempt.status_code in {200, 304}:
+            successful_log_id = log_id
+    return successful_log_id
 
 
 def _insert_error_for_attempt(conn: Connection, attempt: FetchAttempt) -> int | None:

@@ -22,6 +22,31 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   board interpretation. PGN exports can be reconstructed from the database.
   Recurring source bodies refresh the current revision and game metadata even
   when the same run already acquired the game and has exhausted its allowance.
+
+- Complete queryable provider profile/statistics facts, typed rating records,
+  alias evidence, and observation history retaining recurring values and
+  conditional refreshes. Migration `0008_player_resources` recovers retained
+  fetch occurrences; local parser replay populates newly normalized fields.
+- A registered supplementary player-resource catalog and collectors for
+  Chess.com clubs, team matches, tournaments, and online status, plus Lichess
+  rating history, performance statistics, activity, and teams. Complete native
+  JSON, rating-history source points, and explicit coverage/failure evidence
+  remain available without treating unknown or unavailable data as empty.
+- Ownership for raw player resources and authenticated team observations,
+  OAuth credential/workspace binding, and preservation with quarantine of
+  unowned legacy Lichess profile relationship facts. Public profiles request
+  all documented public extensions independently of OAuth relationship data.
+  See [player data](docs/player-data.md) for migration and ownership details.
+- Current Chess.com statistics alongside profile facts in the rich player read;
+  statistics replay preserves account identity and display names after renames.
+- Migration-time quarantine of historical Lichess profile captures until safe
+  source replay, provider-native verification/streaming flags, and queryable
+  highest/lowest tactics and lessons ratings.
+- Fresh statistics/resources follow the account currently holding a username
+  even when raw-body deduplication reuses older bytes; acquisition attempts stay
+  attached to stable account identity across renames and username reuse.
+- Public resource requests omit configured OAuth credentials; private resource
+  collection does not publish its timestamps in shared alias history.
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
   project's `.venv`; Docker Compose continues to own the application services.
@@ -139,6 +164,24 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   results when a previously observed body becomes current again. Sparse omitted
   facts remain preserved; known live observations cannot retain a stale completed
   end time. The v5 game normalizer can repair existing facts by offline replay.
+
+- Player resource/statistics parsing preserves the account and time bound to
+  its acquisition across intervening renames, conditional responses, and local
+  replay of bytes reused by multiple holders. Stable identity reconciliation
+  moves fetch bindings with the other evidence. Private collection preserves
+  public identity facts; private-only placeholders have null public dates until
+  a public observation supplies them. Replay uses user parser v7 and resource
+  parser v2 without downloading stored sources again.
+  Internal delayed replay can target its exact successful fetch occurrence;
+  the existing worker retains the same captured identity through parsing.
+  Private-only profile lookups remain invisible outside the owning scope;
+  public user lookups, listings, exports, and user totals also exclude those
+  identities until public evidence exists, while authorized scoped reads retain them.
+  Public identities with supplied zero dates or game observations remain visible.
+
+- Failed Chess.com statistics requests retain request evidence without creating
+  or refreshing a player account. Local Lichess profile replay also populates
+  legacy first/last names while preserving explicit current names and native JSON.
 
 - Reconcile renamed accounts with username-only placeholders while preserving
   their game, snapshot, source, and discovery history. Conflicting stable

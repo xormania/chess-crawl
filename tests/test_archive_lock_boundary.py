@@ -166,7 +166,8 @@ def test_response_and_fetch_evidence_still_roll_back_together(initialized_conn, 
     for table in ("archive_objects", "raw_payloads", "fetch_logs"):
         assert require_row(initialized_conn.execute(f"SELECT COUNT(*) FROM {table}"))[0] == 0
     assert len(list(tmp_path.rglob("*.gz"))) == 1
-    raw_id = _persist_response(initialized_conn, sample_record(), job_id=None, crawl_run_id=None)
+    raw_id, fetch_id = _persist_response(initialized_conn, sample_record(), job_id=None, crawl_run_id=None)
+    assert fetch_id is not None
     assert read_raw_payload(initialized_conn, raw_id).body == sample_record().body
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == 1
     assert len(list(tmp_path.rglob("*.gz"))) == 1

@@ -13,13 +13,25 @@ from chess_crawl.providers.base import NormalizedUser
 from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
+from chess_crawl.storage.player_profiles import (
+    publish_verified_legacy_profile, quarantine_unowned_profile, record_alias, record_profile_observations,
+    account_observation_times, captured_fetch_account, stats_account, stats_accounts, store_profile_facts, store_rating_records,
+)
 
 
-PARSER_VERSION = "users-normalizer-v3"
+PARSER_VERSION = "users-normalizer-v7"
 
 
-def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
+def normalize_user_payload(
+    conn: Connection, raw_payload_id: int, *, prefer_observed_identity: bool = True,
+    fetch_log_id: int | None = None,
+) -> int | None:
     raw = read_raw_payload(conn, raw_payload_id)
+    if raw.provider == "lichess" and raw.endpoint_type == "user_profile":
+        data = json.loads(raw.body)
+        if isinstance(data, dict) and any(key in data for key in ("following", "blocking", "followable")):
+            quarantine_unowned_profile(conn, raw_payload_id)
+            raise ValueError("account-relative profile relationships require scoped ownership before normalization")
     if raw.endpoint_type == "user_profile":
         if raw.provider == "chess.com":
             user = chesscom_parser.parse_user_profile(raw.body)
@@ -36,55 +48,94 @@ def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
         return None
 
     with transaction(conn):
+        native_data = json.loads(raw.body)
+        if not isinstance(native_data, dict):
+            raise ValueError("user profiles and statistics must be JSON objects")
         observed_at = payload_observed_at(conn, raw_payload_id)
-        provider_user_id = upsert_provider_user(
-            conn,
-            provider=user.provider,
-            username=user.display_username,
-            provider_user_id=user.provider_user_id,
-            display_username=user.display_username,
-            account_status=user.account_status_raw,
-            title=user.title,
-            now=observed_at,
-            profile_raw_payload_id=raw_payload_id if raw.endpoint_type == "user_profile" else None,
-        )
-        snapshot_id = upsert_user_snapshot(
-            conn,
-            provider_user_id=provider_user_id,
-            captured_at=observed_at,
-            observed_username=user.display_username,
-            status=user.account_status_raw,
-            title=user.title,
-            country=user.country,
-            followers=snapshot.get("followers"),
-            patron=snapshot.get("patron"),
-            count_all=snapshot.get("count_all"),
-            count_rated=snapshot.get("count_rated"),
-            count_win=snapshot.get("count_win"),
-            count_loss=snapshot.get("count_loss"),
-            count_draw=snapshot.get("count_draw"),
-            perfs_or_stats=snapshot.get("perfs_or_stats"),
-            content_hash=snapshot["content_hash"],
-            raw_payload_id=raw_payload_id,
-        )
-        insert_source_record(
-            conn,
-            entity_type="user",
-            entity_id=provider_user_id,
-            provider=raw.provider,
-            endpoint_type=raw.endpoint_type,
-            raw_payload_id=raw_payload_id,
-            source_key=raw.canonical_source_key,
-        )
-        insert_source_record(
-            conn,
-            entity_type="user_snapshot",
-            entity_id=snapshot_id,
-            provider=raw.provider,
-            endpoint_type=raw.endpoint_type,
-            raw_payload_id=raw_payload_id,
-            source_key=raw.canonical_source_key,
-        )
+        captured_at = None
+        captured_account = None
+        if fetch_log_id is not None:
+            captured_account, captured_at = captured_fetch_account(conn, raw_payload_id, fetch_log_id)
+        accounts: list[dict[str, Any] | None] = [None]
+        if raw.endpoint_type == "user_stats":
+            accounts = []
+            if captured_account is not None:
+                accounts.append(captured_account)
+            elif fetch_log_id is not None:
+                raise ValueError("Player statistics acquisition is missing its captured account")
+            elif prefer_observed_identity:
+                accounts.extend(stats_accounts(conn, raw_payload_id))
+            if not accounts:
+                accounts.append(stats_account(
+                    conn, user.provider, user.display_username, raw_payload_id,
+                    prefer_observed_identity=prefer_observed_identity,
+                ))
+        provider_user_ids = []
+        for account in accounts:
+            first_at, account_at = ((captured_at, captured_at) if captured_at is not None else (
+                account_observation_times(conn, raw_payload_id, int(account["id"]))
+                if account is not None else (raw.fetched_at, observed_at)
+            ))
+            provider_user_id = upsert_provider_user(
+                conn,
+                provider=user.provider,
+                username=user.display_username if account is None else account["username_normalized"],
+                provider_user_id=user.provider_user_id if account is None else account["provider_user_id"],
+                display_username=user.display_username if account is None else account["display_username"],
+                account_status=user.account_status_raw,
+                title=user.title,
+                now=account_at,
+                profile_raw_payload_id=raw_payload_id if raw.endpoint_type == "user_profile" else None,
+            )
+            provider_user_ids.append(provider_user_id)
+            snapshot_id = upsert_user_snapshot(
+                conn,
+                provider_user_id=provider_user_id,
+                captured_at=account_at,
+                observed_username=user.display_username,
+                status=user.account_status_raw,
+                title=user.title,
+                country=user.country,
+                followers=snapshot.get("followers"),
+                patron=snapshot.get("patron"),
+                count_all=snapshot.get("count_all"),
+                count_rated=snapshot.get("count_rated"),
+                count_win=snapshot.get("count_win"),
+                count_loss=snapshot.get("count_loss"),
+                count_draw=snapshot.get("count_draw"),
+                perfs_or_stats=snapshot.get("perfs_or_stats"),
+                content_hash=snapshot["content_hash"],
+                raw_payload_id=raw_payload_id,
+            )
+            store_profile_facts(conn, snapshot_id, native_data=native_data, facts=_profile_facts(native_data, user))
+            store_rating_records(conn, snapshot_id, _rating_records(native_data, user.provider))
+            record_profile_observations(
+                conn, provider_user_id, snapshot_id, raw_payload_id, fetch_log_id=fetch_log_id,
+            )
+            if raw.endpoint_type == "user_profile":
+                record_alias(
+                    conn, provider_user_id, user.display_username, observed_at=account_at,
+                    raw_payload_id=raw_payload_id,
+                    first_observed_at=first_at,
+                )
+            insert_source_record(
+                conn,
+                entity_type="user",
+                entity_id=provider_user_id,
+                provider=raw.provider,
+                endpoint_type=raw.endpoint_type,
+                raw_payload_id=raw_payload_id,
+                source_key=raw.canonical_source_key,
+            )
+            insert_source_record(
+                conn,
+                entity_type="user_snapshot",
+                entity_id=snapshot_id,
+                provider=raw.provider,
+                endpoint_type=raw.endpoint_type,
+                raw_payload_id=raw_payload_id,
+                source_key=raw.canonical_source_key,
+            )
         update_raw_payload_status(
             conn,
             raw_payload_id,
@@ -92,7 +143,9 @@ def normalize_user_payload(conn: Connection, raw_payload_id: int) -> int | None:
             parser_version=PARSER_VERSION,
             normalized_at=int(time.time()),
         )
-    return provider_user_id
+        if raw.provider == "lichess" and raw.endpoint_type == "user_profile":
+            publish_verified_legacy_profile(conn, raw_payload_id)
+    return provider_user_ids[0]
 
 
 def _chesscom_profile_snapshot(body: bytes, user: NormalizedUser) -> dict[str, Any]:
@@ -109,7 +162,7 @@ def _chesscom_profile_snapshot(body: bytes, user: NormalizedUser) -> dict[str, A
     return {
         "followers": _int_or_none(data.get("followers")),
         "perfs_or_stats": payload,
-        "content_hash": canonical_hash(payload),
+        "content_hash": canonical_hash({"kind": "profile", "native_data": data}),
     }
 
 
@@ -123,16 +176,6 @@ def _lichess_profile_snapshot(body: bytes, user: NormalizedUser) -> dict[str, An
     for key in ("profile", "disabled", "verified", "tosViolation"):
         if key in data:
             profile_facts[key] = data[key]
-    payload = {
-        "kind": "profile",
-        "username": user.display_username,
-        "status": user.account_status_raw,
-        "title": user.title,
-        "country": user.country,
-        "patron": data.get("patron"),
-        "count": count,
-        **profile_facts,
-    }
     return {
         "patron": bool(data.get("patron")) if data.get("patron") is not None else None,
         "count_all": _int_or_none(count.get("all")),
@@ -141,7 +184,7 @@ def _lichess_profile_snapshot(body: bytes, user: NormalizedUser) -> dict[str, An
         "count_loss": _int_or_none(count.get("loss")),
         "count_draw": _int_or_none(count.get("draw")),
         "perfs_or_stats": profile_facts,
-        "content_hash": canonical_hash(payload),
+        "content_hash": canonical_hash({"kind": "profile", "native_data": data}),
     }
 
 
@@ -222,3 +265,82 @@ def _int_or_none(value: object) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _profile_facts(data: dict[str, Any], user: NormalizedUser) -> dict[str, Any]:
+    profile_data = data.get("profile")
+    profile = profile_data if isinstance(profile_data, dict) else {}
+    return {
+        "created_at": user.created_at,
+        "last_seen_at": user.last_seen_at,
+        "real_name": _string_or_none(data.get("name")) if user.provider == "chess.com" else _lichess_real_name(profile),
+        "location": _string_or_none(data.get("location") if user.provider == "chess.com" else profile.get("location")),
+        "avatar_url": _string_or_none(data.get("avatar")),
+        "profile_url": _string_or_none(data.get("url")),
+        "is_verified": user.is_verified,
+        "is_streamer": _boolean_or_none(data.get("is_streamer") if user.provider == "chess.com" else data.get("streaming")),
+        # Chess.com's fide is a self-reported rating, never a federation ID.
+        "fide_rating": _strict_integer(data.get("fide") if user.provider == "chess.com" else profile.get("fideRating")),
+    }
+
+
+def _lichess_real_name(profile: dict[str, Any]) -> str | None:
+    # Lichess replaced firstName/lastName with realName in July 2024.
+    # An explicit current field takes precedence, including a cleared name.
+    if "realName" in profile:
+        return _string_or_none(profile["realName"])
+    names = [
+        value.strip() for key in ("firstName", "lastName")
+        if isinstance(value := profile.get(key), str) and value.strip()
+    ]
+    return " ".join(names) or None
+
+
+def _string_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _strict_integer(value: object) -> int | None:
+    return value if type(value) is int else None
+
+
+def _boolean_or_none(value: object) -> bool | None:
+    return value if type(value) is bool else None
+
+
+def _rating_records(data: dict[str, Any], provider: str) -> list[dict[str, Any]]:
+    perfs = data.get("perfs") if provider == "lichess" else data
+    if not isinstance(perfs, dict):
+        return []
+    records = []
+    for performance, value in perfs.items():
+        if not isinstance(value, dict):
+            continue
+        if provider == "chess.com":
+            if not any(key in value for key in ("last", "best", "record", "highest", "lowest")):
+                continue
+            last = _dictionary(value.get("last"))
+            best = _dictionary(value.get("best") if "best" in value else value.get("highest"))
+            lowest = _dictionary(value.get("lowest"))
+            score = _dictionary(value.get("record"))
+            wins, losses, draws = (_strict_integer(score.get(field)) for field in ("win", "loss", "draw"))
+            games = None if wins is None or losses is None or draws is None else wins + losses + draws
+            current, deviation, provisional, progress = last.get("rating"), last.get("rd"), None, None
+        else:
+            best, lowest, wins, losses, draws = {}, {}, None, None, None
+            current, deviation, provisional, progress = value.get("rating"), value.get("rd"), value.get("prov"), value.get("prog")
+            games = _strict_integer(value.get("games"))
+        records.append({
+            "performance": performance, "rating": _strict_integer(current),
+            "best_rating": _strict_integer(best.get("rating")), "best_at": _strict_integer(best.get("date")),
+            "lowest_rating": _strict_integer(lowest.get("rating")), "lowest_at": _strict_integer(lowest.get("date")),
+            "rating_deviation": deviation if type(deviation) in {int, float} else None,
+            "provisional": provisional if type(provisional) is bool else None,
+            "games": games, "wins": wins, "losses": losses, "draws": draws,
+            "progress": _strict_integer(progress), "native_data": value,
+        })
+    return records
+
+
+def _dictionary(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}

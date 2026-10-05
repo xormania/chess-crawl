@@ -13,8 +13,10 @@ def _user(username: str) -> str:
     return quote(username.strip().lower(), safe="")
 
 
-def user_profile(username: str) -> str:
-    return f"{BASE_URL}/user/{_user(username)}"
+def user_profile(username: str, **params: object) -> str:
+    base = f"{BASE_URL}/user/{_user(username)}"
+    query = urlencode({key: value for key, value in params.items() if value is not None}, doseq=True)
+    return f"{base}?{query}" if query else base
 
 
 def user_games(username: str, **params: object) -> str:
