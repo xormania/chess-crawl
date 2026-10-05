@@ -32,7 +32,7 @@ git switch dev
 git switch -c docs/my-change
 devbox shell
 devbox run setup
-uv run chess-crawl --help
+uv run chess-crawl-admin --help
 ```
 
 Choose a descriptive branch name for the actual work. `devbox run setup` installs
@@ -49,7 +49,8 @@ devbox run test -q
 devbox run test -q -k provider
 ```
 
-`check` runs Ruff, Mypy, Bandit, and CLI help, stopping at the first failure.
+`check` runs Ruff, Mypy, Bandit, and administration-command help, stopping at the
+first failure.
 `test` forwards its arguments to pytest. The PostgreSQL tools use explicit
 connection settings; they do not automatically connect to Compose's unpublished
 database port. Follow the [operations guide](docs/postgresql-operations.md) for
@@ -78,7 +79,7 @@ uv sync --locked --group dev --extra api
 ```
 
 The development group includes the dependencies needed by the offline API
-tests. The API extra also installs the server runtime. CLI commands do not
+tests. The API extra also installs the server runtime. Administration commands do not
 automatically load `.env`; export settings as described in the guides.
 
 ## Shared implementation
@@ -127,7 +128,7 @@ uv run ruff check .
 uv run mypy .
 uv run python .github/scripts/check_bandit.py
 uv run python -m pytest -q
-uv run chess-crawl --help
+uv run chess-crawl-admin --help
 ```
 
 Tests are offline by default, block outbound connections except their dedicated
@@ -248,7 +249,7 @@ using both `--max-regression-percent` and `--min-regression-seconds`; keep gener
 limits and separate cold and warm measurements. Missing or incompatible samples
 must not be treated as proof of a speedup.
 
-A focused CLI workflow run and a coverage run are available when useful:
+A focused integration/workflow run and a coverage run are available when useful:
 
 ```bash
 uv run python -m pytest -q -m "workflow and not live and not slow"

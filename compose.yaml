@@ -57,7 +57,7 @@ services:
 
   init:
     <<: *python
-    command: ["chess-crawl", "init"]
+    command: ["python", "-m", "chess_crawl.operations", "migrate"]
     environment: *database-env
     secrets:
       - postgres_password

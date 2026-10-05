@@ -140,7 +140,7 @@ jobs:
 
       - name: Packaged CLI help
         if: steps.scope.outputs.offline == 'true'
-        run: python .github/scripts/ci_performance.py measure --label cli-help --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync chess-crawl --help
+        run: python .github/scripts/ci_performance.py measure --label cli-help --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync chess-crawl-admin --help
 
       - name: Remove disposable PostgreSQL
         if: always() && steps.scope.outputs.offline == 'true'

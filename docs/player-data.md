@@ -117,7 +117,8 @@ game corpus.
 | Lichess | `teams` | None | OAuth with `team:read`; hidden memberships depend on the authenticated caller. |
 
 Chess.com refreshes respect conditional validators and response cache headers.
-Lichess access remains serial with a full-minute wait after HTTP 429. Refreshes
+Lichess acquisition is serialized per provider with a full-minute wait after HTTP
+429; separate local-processing jobs can continue. Refreshes
 are explicit resource jobs; opening a stored player profile does not fetch
 resources or historical games.
 

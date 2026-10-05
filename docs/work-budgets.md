@@ -62,7 +62,9 @@ implicit date floor, and a cap never certifies missing history as complete.
 The operator can show the owned run budget and extend/resume it using
 `python -m chess_crawl.jobs.budget show --run-id ID` or
 `python -m chess_crawl.jobs.budget resume --run-id ID` with trusted configuration.
-There is no tenant-facing policy extension endpoint.
+The operations entrypoint also provides `chess-crawl-admin budgets show --run-id ID`
+and `chess-crawl-admin budgets resume --run-id ID` aliases with the same trusted
+operator behavior. There is no tenant-facing policy extension endpoint.
 
 Migration 0014 indexes owned budget membership, unfinished workspace jobs, and
 original successful job observations. These lookups remain selective as completed

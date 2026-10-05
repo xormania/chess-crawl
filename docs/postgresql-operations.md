@@ -1,6 +1,6 @@
 # PostgreSQL operations
 
-[Backend guide](backend.md) · [CLI guide](cli.md) ·
+[Backend guide](backend.md) · [Operations guide](cli.md) ·
 [Contributing](../CONTRIBUTING.md)
 
 This guide applies to the PostgreSQL-only backend. Run these commands from the
@@ -42,7 +42,7 @@ writers and keep them stopped through backup and verification:
 docker compose stop api worker events
 ```
 
-Also stop any separate CLI executor, submission client, or other application
+Also stop any separate worker, submission client, or other application
 instance using this database. Keeping only the worker stopped is insufficient:
 API submissions and the event publisher also mutate database state. Leave
 PostgreSQL and Mercure running. For routine online backups, the maintenance stop
@@ -115,7 +115,7 @@ choosing whether to remove it. `--single-transaction` rolls back the restore's
 changes on failure. `--no-owner --no-privileges` assigns restored objects to the
 connecting role; provision deployment-specific grants separately.
 
-Do not run `chess-crawl init` on the empty restore target before `pg_restore`.
+Do not run `chess-crawl-admin migrate` on the empty restore target before `pg_restore`.
 Restore the complete schema and data together. The dump contains migrations,
 functions, trigger definitions, identity sequence state, and the archive identity.
 Loading table data into an already initialized schema could execute event
@@ -183,7 +183,7 @@ starting a worker or publisher on the restored copy:
 CHESS_CRAWL_RESTORE_URL="postgresql://chess_crawl@postgres:5432/$CHESS_CRAWL_RESTORE_DATABASE"
 docker compose run --rm --no-deps -T \
   --env CHESS_CRAWL_DATABASE_URL="$CHESS_CRAWL_RESTORE_URL" \
-  api chess-crawl db info
+  api chess-crawl-admin info
 docker compose run --rm --no-deps -T \
   --env CHESS_CRAWL_DATABASE_URL="$CHESS_CRAWL_RESTORE_URL" \
   api python - <<'PY'
@@ -276,7 +276,7 @@ inside a protected parent directory. The overlay mounts it read-only in all
 four Python services, enforces verified transport, and omits bundled Postgres
 from the active services and startup dependencies. Application services still
 wait for successful migrations against the selected server. Keep both Compose
-files on subsequent commands. Source-run services require `chess-crawl init`
+files on subsequent commands. Source-run services require `chess-crawl-admin migrate`
 before serving requests. The migration role must own existing objects when
 applying later schema changes. See the [external database setup](backend.md#external-postgresql)
 for configuration and failure diagnostics.
