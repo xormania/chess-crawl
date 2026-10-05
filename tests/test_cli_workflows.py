@@ -131,6 +131,7 @@ class _FixtureProviderFactory:
 class _ChessComFixtureClient:
     def __init__(self, factory: _FixtureProviderFactory) -> None:
         self.factory = factory
+        # ProviderSession installs the same request hooks as on real clients.
         self.http = SimpleNamespace(before_request=None, persist_deadline=None)
 
     def get_user_profile(
@@ -140,6 +141,8 @@ class _ChessComFixtureClient:
         etag: str | None = None,
         last_modified: str | None = None,
     ) -> RawRecord:
+        if self.http.before_request is not None:
+            self.http.before_request()
         del last_modified
         normalized = username.strip().lower()
         key = f"chess.com/player/{normalized}/profile"
@@ -171,6 +174,8 @@ class _ChessComFixtureClient:
         etag: str | None = None,
         last_modified: str | None = None,
     ) -> RawRecord:
+        if self.http.before_request is not None:
+            self.http.before_request()
         del last_modified
         normalized = username.strip().lower()
         self.factory.chesscom_month_calls.append((normalized, year, month, etag))
@@ -206,6 +211,8 @@ class _LichessFixtureClient:
         self.http = SimpleNamespace(before_request=None, persist_deadline=None)
 
     def get_user_profile(self, username: str) -> RawRecord:
+        if self.http.before_request is not None:
+            self.http.before_request()
         normalized = username.strip().lower()
         return _raw_record(
             provider="lichess",
@@ -223,6 +230,8 @@ class _LichessFixtureClient:
         until: int | None,
         limit: int,
     ) -> RawRecord:
+        if self.http.before_request is not None:
+            self.http.before_request()
         normalized = username.strip().lower()
         self.factory.lichess_game_calls.append((normalized, since, until, limit))
         unit = f"since-{since or 'none'}-until-{until or 'none'}-max-{limit}"

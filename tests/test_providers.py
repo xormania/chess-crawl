@@ -305,7 +305,7 @@ def test_chesscom_monthly_archive_normalizes_game(fixtures_dir: Path, initialize
     assert require_row(conn.execute("SELECT rating FROM ratings_at_game WHERE game_id = %s AND color = 'white'", (game["id"],)))[0] == 1510
 
 
-def test_game_normalization_failure_keeps_completed_game_pending_source(
+def test_game_normalization_failure_retains_completed_evidence_and_resumes(
     fixtures_dir: Path,
     initialized_conn,
     monkeypatch,
@@ -342,8 +342,25 @@ def test_game_normalization_failure_keeps_completed_game_pending_source(
     assert require_row(conn.execute("SELECT normalization_status FROM raw_payloads"))[0] == "pending"
     assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 1
     assert require_row(conn.execute("SELECT COUNT(*) FROM provider_users"))[0] == 2
-    assert require_row(conn.execute("SELECT COUNT(*) FROM source_records"))[0] == 3
-    assert require_row(conn.execute("SELECT COUNT(*) FROM normalization_items"))[0] == 1
+    completed = dict(require_row(conn.execute("SELECT id,current_version_id FROM games")))
+    assert completed["current_version_id"] is not None
+    assert [row[0] for row in conn.execute(
+        "SELECT json_pointer FROM normalization_items WHERE raw_payload_id=%s ORDER BY json_pointer",
+        (raw_payload_id,),
+    )] == ["/games/0"]
+    assert [row[0] for row in conn.execute(
+        "SELECT json_pointer FROM game_version_sources WHERE raw_payload_id=%s ORDER BY json_pointer",
+        (raw_payload_id,),
+    )] == ["/games/0"]
+
+    monkeypatch.setattr(games_module, "_normalize_game", real_normalize_game)
+    assert len(normalize_games_payload(conn, raw_payload_id)) == 2
+    assert dict(require_row(conn.execute(
+        "SELECT id,current_version_id FROM games WHERE id=%s", (completed["id"],),
+    ))) == completed
+    assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 2
+    assert require_row(conn.execute("SELECT COUNT(*) FROM game_versions"))[0] == 2
+    assert require_row(conn.execute("SELECT normalization_status FROM raw_payloads"))[0] == "parsed"
 
 
 def test_lichess_games_ndjson_normalizes_ms_timestamps(fixtures_dir: Path, initialized_conn) -> None:
