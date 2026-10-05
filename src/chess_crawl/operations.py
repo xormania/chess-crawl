@@ -24,7 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     relocate = commands.add_parser("relocate", help="Move one resumable batch of inline backup bodies to configured storage")
     budgets = commands.add_parser("budgets", help="Inspect or resume run budgets using trusted operator access")
     budgets.add_argument("arguments", nargs=argparse.REMAINDER)
-    for command in (migrate, info, relocate):
+    prune = commands.add_parser("prune-results", help="Delete one workspace's old analysis results in a bounded batch")
+    prune.add_argument("--workspace-id", required=True)
+    prune.add_argument("--before", required=True, type=int, help="Exclusive creation-time cutoff, as Unix seconds")
+    prune.add_argument("--batch-size", type=int, default=256)
+    for command in (migrate, info, relocate, prune):
         command.add_argument("--database-url", help="PostgreSQL connection settings; prefer environment password sources")
     relocate.add_argument("--batch-size", type=int, default=100)
     relocate.add_argument("--count-remaining", action="store_true", help="Compute an optional exact pending count")
@@ -48,6 +52,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 version = current_version(conn)
             output = {"database": database_label(target), "schema_version": version,
                       "application_schema_version": SCHEMA_VERSION, "ready": version == SCHEMA_VERSION}
+        elif args.command == "prune-results":
+            from chess_crawl.storage.working_sets import prune_results
+            with connection(target, mode="rw") as conn:
+                if current_version(conn) != SCHEMA_VERSION:
+                    raise ValueError("Run chess-crawl-admin migrate before result retention")
+                output = {"workspace_id": args.workspace_id, **prune_results(
+                    conn, args.workspace_id, before=args.before, limit=args.batch_size,
+                )}
         else:
             store = configured_store()
             if store is None:

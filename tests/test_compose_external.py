@@ -147,6 +147,33 @@ def test_compose_passes_export_limits_only_to_api(
 
 @pytest.mark.parametrize("external", [False, True])
 @pytest.mark.parametrize("custom", [False, True])
+def test_compose_passes_analysis_result_quotas_to_api(
+    render_compose: Callable[..., subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch,
+    external: bool, custom: bool,
+) -> None:
+    from chess_crawl.application import Limits
+    expected = {
+        "CHESS_CRAWL_MAX_ANALYSIS_RESULTS": "7" if custom else "1000",
+        "CHESS_CRAWL_MAX_ANALYSIS_RESULT_BYTES": "8192" if custom else "67108864",
+    }
+    for name, value in expected.items():
+        if custom:
+            monkeypatch.setenv(name, value)
+        else:
+            monkeypatch.delenv(name, raising=False)
+    services = parsed(render_compose(external=external))["services"]
+    for name, value in expected.items():
+        assert services["api"]["environment"][name] == value
+        for service in ("worker", "init", "events"):
+            assert name not in services[service]["environment"]
+        monkeypatch.setenv(name, services["api"]["environment"][name])
+    limits = Limits.from_env()
+    assert limits.max_analysis_results == int(expected["CHESS_CRAWL_MAX_ANALYSIS_RESULTS"])
+    assert limits.max_analysis_result_bytes == int(expected["CHESS_CRAWL_MAX_ANALYSIS_RESULT_BYTES"])
+
+
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("custom", [False, True])
 def test_compose_passes_dispatch_cleanup_settings_only_to_worker(
     render_compose: Callable[..., subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch,
     external: bool, custom: bool,

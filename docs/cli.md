@@ -55,6 +55,30 @@ It requeues only jobs blocked by budget exhaustion and makes no provider request
 See [work budgets](work-budgets.md) for finite defaults, monthly quotas, and the
 operator steps needed before raising a ceiling.
 
+## Retain analysis results
+
+Stored calculation results have workspace count and byte ceilings. They are not
+automatically expired. After backing up any results you need, use trusted
+operator database access to remove one workspace's older results:
+
+```bash
+uv run chess-crawl-admin prune-results --workspace-id alpha --before 1767225600 --batch-size 256
+```
+
+`--before` is an exclusive Unix creation-time cutoff (the example is
+2026-01-01 00:00 UTC). Each invocation deletes at most `--batch-size` rows,
+oldest first, and prints `deleted` and `released_bytes`. The default batch is
+256 and the maximum is 10000. Repeat with the same cutoff until `deleted` is
+zero. The command requires migration `0016` and accepts `--database-url` like
+the other operations. It shares admission's workspace lock and transaction, so
+pruning and concurrent API saves cannot corrupt quota accounting.
+
+Only derived results in the selected workspace are removed. Source evidence,
+working sets, and other workspaces remain intact. Removed result IDs return
+404; exact-signature lookup misses until that result is recomputed and saved.
+Released bytes refer to the logical payload quota; PostgreSQL reclaims deleted
+tuple space through its normal vacuum/reuse process.
+
 ## Relocate compressed source backups
 
 Select `CHESS_CRAWL_ARCHIVE_BACKEND=local` with a durable shared
@@ -106,6 +130,7 @@ for configuration, verification, and backup steps.
 | Private event publication | `python -m chess_crawl.events.publisher` |
 | Schema migration, readiness, backup relocation | `chess-crawl-admin migrate`, `info`, `relocate` |
 | Trusted budget inspection and checkpoint resume | `chess-crawl-admin budgets show`, `budgets resume` |
+| Scoped retention of stored analysis results | `chess-crawl-admin prune-results` |
 | Verified transfer of existing external objects | `python -m chess_crawl.storage.archive_transfer` |
 
 All product reads reuse stored data. HTTP submissions enqueue durable work;
