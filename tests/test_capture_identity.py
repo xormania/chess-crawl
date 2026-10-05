@@ -1,5 +1,7 @@
 """Capture identity, reconciliation and private timestamps retain their evidence."""
 
+from helpers.players import _record
+
 import json
 
 import httpx
@@ -14,8 +16,6 @@ from chess_crawl.ingest import (
 from chess_crawl.api.compat import _export_chunks
 from chess_crawl.normalize.resources import normalize_resource_payload
 from chess_crawl.normalize.users import normalize_user_payload
-from chess_crawl.providers.base import RawRecord
-from chess_crawl.providers.resources import resource_source_key
 from chess_crawl.storage.player_profiles import (
     player_profile,
     profile_history,
@@ -25,7 +25,7 @@ from chess_crawl.storage.raw import insert_fetch_log, store_raw_payload
 from chess_crawl.storage.queries import iter_users, query_user, summary_report, user_page
 from chess_crawl.storage.player_profiles import resolve_capture_account
 from support import seed_game
-from test_player_resources import _config, _profile, _resource
+from helpers.players import _config, _profile, _resource
 
 
 def _history(conn, user_id, kind):
@@ -36,36 +36,6 @@ def _history(conn, user_id, kind):
         for row in profile_history(conn, user_id)
         if row["endpoint_type"] == "user_stats"
     ]
-
-
-def _record(username, kind, at):
-    if kind == "resource":
-        key = resource_source_key("chess.com", username, "clubs")
-        endpoint = "user_resource"
-        params = {
-            "resource_key": "clubs",
-            "parameters": {},
-            "authenticated": False,
-            "owner_scope": "public",
-        }
-        body = b'{"clubs":[]}'
-        url = f"https://api.chess.com/pub/player/{username.lower()}/clubs"
-    else:
-        key = f"chess.com/player/{username.lower()}/stats"
-        endpoint = "user_stats"
-        params = {}
-        body = b'{"chess_blitz":{"last":{"rating":1500}}}'
-        url = f"https://api.chess.com/pub/player/{username.lower()}/stats"
-    return RawRecord(
-        provider="chess.com",
-        endpoint_type=endpoint,
-        canonical_source_key=key,
-        request_url=url,
-        target_username=username,
-        request_params=params,
-        body=body,
-        fetched_at=at,
-    )
 
 
 def _assert_public_users(conn, provider, expected_names, database_url):

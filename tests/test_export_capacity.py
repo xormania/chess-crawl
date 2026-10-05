@@ -13,7 +13,7 @@ from starlette.requests import ClientDisconnect
 from chess_crawl.api import compat
 from chess_crawl.api.compat import ArchiveExportResponse, _prepare_export
 from chess_crawl.api.exports import ExportCapacity, ExportLimits, ExportSpool
-from test_working_sets import client
+from helpers.api import client
 
 
 def test_capacity_counts_slow_downloads_across_workspaces(database_url, monkeypatch):

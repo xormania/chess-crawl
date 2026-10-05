@@ -12,7 +12,7 @@ from chess_crawl.api import compat
 from chess_crawl.api.compat import _export_chunks
 from chess_crawl.application import list_opponents
 from chess_crawl.storage.api_views import months_page
-from test_working_sets import client
+from helpers.api import client
 from chess_crawl.storage.queries import (
     archive_freshness,
     summary_report,
