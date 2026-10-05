@@ -122,7 +122,9 @@ def register_archive_routes(router: APIRouter, archive: str, limits: application
     @router.post("/working-sets/{working_set_id}/results", status_code=201, tags=["analysis"])
     def put_result(working_set_id: int, request: Request, body: ResultBody, response: Response) -> dict[str, Any]:
         with connection(archive, mode="rw") as conn:
-            result = working_sets.save_result(conn, working_set_id, request.state.workspace_id, **body.model_dump())
+            result = working_sets.save_result(
+                conn, working_set_id, request.state.workspace_id, limits=limits, **body.model_dump(),
+            )
         response.headers["Location"] = f"/v1/results/{result['id']}"
         return result
 

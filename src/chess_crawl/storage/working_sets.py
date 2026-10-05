@@ -7,8 +7,10 @@ import time
 from typing import Any
 
 from chess_crawl.application.errors import Conflict, NotFound, ValidationError
+from chess_crawl.application.models import Limits
+from chess_crawl.jobs.budget import QuotaExceeded
 from chess_crawl.storage.db import Connection, atomic, operation_lock, require_row
-from chess_crawl.storage.workspaces import submission_context
+from chess_crawl.storage.workspaces import submission_context, validate_workspace
 
 
 def canonical(value: Any) -> str:
@@ -147,24 +149,70 @@ def result_signature(working_set: dict[str, Any], implementation: str, version: 
 def save_result(
     conn: Connection, working_set_id: int, workspace_id: str, *, implementation: str,
     implementation_version: str, settings: dict[str, Any], output: dict[str, Any],
+    limits: Limits | None = None,
 ) -> dict[str, Any]:
+    policy = limits if limits is not None else Limits.from_env()
     working_set = get_working_set(conn, working_set_id, workspace_id)
     signature = result_signature(working_set, implementation, implementation_version, settings)
-    row = conn.execute(
+    # All result writers and retention operations share this transaction-scoped
+    # workspace lock, including independent API processes and working sets.
+    operation_lock(conn, "analysis-results", workspace_id)
+    existing = conn.execute(
+        "SELECT * FROM analysis_results WHERE workspace_id=%s AND result_signature=%s", (workspace_id, signature),
+    ).fetchone()
+    if existing is not None:
+        if canonical(existing["output"]) != canonical(output):
+            raise Conflict("Calculation signature already has a different output", code="result_conflict")
+        return {**dict(existing), "replayed": True}
+    settings_json = canonical({"working_set": working_set["settings"], "calculation": settings})
+    output_json = canonical(output)
+    incoming_bytes = int(require_row(conn.execute(
+        "SELECT analysis_result_bytes(%s::jsonb,%s::jsonb,%s,%s,%s)",
+        (settings_json, output_json, implementation, implementation_version, workspace_id),
+    ))[0])
+    usage = require_row(conn.execute(
+        """SELECT COUNT(*), COALESCE(SUM(stored_bytes),0) FROM (
+             SELECT stored_bytes FROM analysis_results WHERE workspace_id=%s
+             ORDER BY created_at,id LIMIT %s
+           ) retained""",
+        # Reaching the count ceiling already denies admission, so legacy
+        # over-quota workspaces need no unbounded scan or JSONB decompression.
+        (workspace_id, policy.max_analysis_results),
+    ))
+    for dimension, used, requested, ceiling in (
+        ("analysis_results", int(usage[0]), 1, policy.max_analysis_results),
+        ("analysis_result_bytes", int(usage[1]), incoming_bytes, policy.max_analysis_result_bytes),
+    ):
+        if used + requested > ceiling:
+            raise QuotaExceeded(dimension, remaining=max(0, ceiling-used))
+    row = require_row(conn.execute(
         """INSERT INTO analysis_results(workspace_id,input_signature,implementation,implementation_version,
            settings,result_signature,output,created_at) VALUES(%s,%s,%s,%s,%s::jsonb,%s,%s::jsonb,%s)
-           ON CONFLICT(workspace_id,result_signature) DO NOTHING RETURNING *""",
+           RETURNING *""",
         (workspace_id, working_set["input_signature"], implementation, implementation_version,
-         canonical({"working_set": working_set["settings"], "calculation": settings}), signature, canonical(output), int(time.time())),
-    ).fetchone()
-    if row is not None:
-        return {**dict(row), "replayed": False}
-    existing = require_row(conn.execute(
-        "SELECT * FROM analysis_results WHERE workspace_id=%s AND result_signature=%s", (workspace_id, signature),
+         settings_json, signature, output_json, int(time.time())),
     ))
-    if canonical(existing["output"]) != canonical(output):
-        raise Conflict("Calculation signature already has a different output", code="result_conflict")
-    return {**dict(existing), "replayed": True}
+    return {**dict(row), "replayed": False}
+
+
+@atomic
+def prune_results(conn: Connection, workspace_id: str, *, before: int, limit: int = 256) -> dict[str, int]:
+    """Explicit operator retention: remove one bounded batch for exactly one owner."""
+    validate_workspace(workspace_id)
+    if type(before) is not int or not 0 <= before <= 253402300799:
+        raise ValueError("Result retention cutoff must be a nonnegative Unix timestamp through year 9999")
+    if type(limit) is not int or not 1 <= limit <= 10000:
+        raise ValueError("Result retention batch size must be between 1 and 10000")
+    operation_lock(conn, "analysis-results", workspace_id)
+    rows = conn.execute(
+        """WITH obsolete AS (
+             SELECT id FROM analysis_results WHERE workspace_id=%s AND created_at<%s
+             ORDER BY created_at,id LIMIT %s FOR UPDATE
+           ) DELETE FROM analysis_results r USING obsolete WHERE r.id=obsolete.id
+             RETURNING r.stored_bytes""",
+        (workspace_id, before, limit),
+    ).fetchall()
+    return {"deleted": len(rows), "released_bytes": sum(int(row[0]) for row in rows)}
 
 
 def read_result(conn: Connection, result_id: int, workspace_id: str) -> dict[str, Any]:

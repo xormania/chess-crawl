@@ -5,6 +5,16 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ## Unreleased
 
+### Security
+
+- Bound cumulative stored analysis results by workspace count and logical payload
+  bytes, with atomic admission across working sets and API replicas. Exact-result
+  replay remains available at capacity; new excess results return 429. Migration
+  `0016` accounts for retained results, and the operator-only `prune-results`
+  command releases capacity in bounded workspace-scoped batches without deleting
+  source evidence or working sets. See [result limits](docs/backend.md#reproducible-working-sets)
+  and [retention](docs/cli.md#retain-analysis-results).
+
 ### Added
 
 - A bounded, cursor-based operational transfer for referenced local/S3 archive

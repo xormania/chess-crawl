@@ -287,6 +287,8 @@ Default server ceilings are configurable:
 | `CHESS_CRAWL_MAX_DATE_SPAN_DAYS` | 366 |
 | `CHESS_CRAWL_PAGE_SIZE` | 100 |
 | `CHESS_CRAWL_MAX_WORKING_SET_MEMBERS` | 10000 |
+| `CHESS_CRAWL_MAX_ANALYSIS_RESULTS` | 1000 |
+| `CHESS_CRAWL_MAX_ANALYSIS_RESULT_BYTES` | 67108864 (64 MiB) |
 
 The caller still supplies explicit positive acquisition limits; crawl depth
 may be zero. Page size defaults to 50, or the configured ceiling if lower.
@@ -623,6 +625,30 @@ result before computation, or returns 404. `GET /v1/results/<id>` reads a visibl
 record. Settings are limited to 64 KiB and inline outputs to 1 MiB; large output
 artifacts belong in compressed object storage. Model/engine execution is provided
 by later registered analysis workers, not by these result-storage routes.
+
+Stored results also have cumulative per-workspace limits: 1000 records and
+64 MiB by default, configured by the two `CHESS_CRAWL_MAX_ANALYSIS_*` settings
+above. Admission and insertion share a PostgreSQL transaction and workspace
+lock across API processes and working sets. Exceeding either limit returns 429
+with `workspace_quota_exceeded` and quota dimension `analysis_results` or
+`analysis_result_bytes`. Changing versions, settings, or working sets cannot
+reset usage. Replaying an existing result still works at the ceiling; conflicting
+output still returns 409. Limits are trusted server configuration, not body fields;
+configure the same values on every API replica. Collection budgets are separate.
+
+Migration `0016` accounts for existing records without deleting them. Byte usage
+counts UTF-8 PostgreSQL JSONB text for combined settings/output, implementation
+and version strings, workspace ID, and both signatures, independently of TOAST
+compression. `stored_bytes` exposes each result's charge. This is a logical
+payload quota; PostgreSQL indexes, tuple overhead, WAL, and backups consume
+additional storage. Workspace quotas add together across configured workspaces.
+New results are rejected when existing usage exceeds a lowered limit; retained
+records remain readable. Apply the migration before serving the updated API.
+
+Results have no automatic expiry. Operators can retain selected history and
+release capacity with the scoped, bounded [`prune-results` command](cli.md#retain-analysis-results).
+Pruning leaves source evidence and immutable working sets intact; a removed
+result must be recomputed before exact-signature reuse is available again.
 
 Private PGN uploads require a separate namespace and access-aware normalization;
 this API does not publish private imports into the shared provider archive.
