@@ -19,7 +19,8 @@ from chess_crawl.config import Config
 from chess_crawl.ingest import fetch_chesscom_month
 from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.providers.base import RawRecord
-from chess_crawl.storage.queries import games_by_month, opponent_report, user_game_summary
+from chess_crawl.storage.api_views import months_page
+from chess_crawl.storage.queries import user_game_summary
 from chess_crawl.storage.raw import read_raw_payload, store_raw_payload, update_raw_payload_status
 
 
@@ -72,13 +73,12 @@ def test_report_outcome_and_activity_are_independent(
     assert tuple(stored.values()) == (status, in_progress)
 
     user = user_game_summary(conn, "lichess", "alice")
-    opponents = opponent_report(conn, "lichess", "alice")
-    assert user is not None and opponents is not None
+    assert user is not None
     page = list_opponents(conn, "lichess", "alice")
-    months = games_by_month(conn, provider="lichess")
-    assert len(opponents) == page["total"] == len(months) == 1
+    months = months_page(conn, provider="lichess", after="", limit=100)["items"]
+    assert page["total"] == len(months) == 1
     surfaces = (
-        (user, "wins", "losses"), (opponents[0], "my_wins", "my_losses"),
+        (user, "wins", "losses"),
         (page["items"][0], "my_wins", "my_losses"), (months[0], "white_wins", "black_wins"),
     )
     for row, win_key, loss_key in surfaces:
@@ -145,11 +145,10 @@ def test_archived_chesscom_game_without_result_is_not_known_in_progress(
     if result == "none":
         assert [row[0] for row in conn.execute("SELECT result_raw FROM game_participants")] == ["none", "none"]
     user = user_game_summary(conn, "chess.com", "alice")
-    opponents = opponent_report(conn, "chess.com", "alice")
-    assert user is not None and opponents is not None
+    assert user is not None
     for row in (
-        user, opponents[0], list_opponents(conn, "chess.com", "alice")["items"][0],
-        games_by_month(conn, provider="chess.com")[0],
+        user, list_opponents(conn, "chess.com", "alice")["items"][0],
+        months_page(conn, provider="chess.com", after="", limit=100)["items"][0],
     ):
         assert row["no_result"] == row["unfinished"] == 1
         assert row["in_progress"] == 0

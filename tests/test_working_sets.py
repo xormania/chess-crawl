@@ -202,17 +202,17 @@ def test_unattributed_successful_fetch_logs_do_not_leak_freshness(initialized_co
     assert archive_freshness(initialized_conn,owner_scope="alpha")["last_checked_at"] is None
 
 
-def test_raw_catalog_defaults_public_and_only_exposes_requested_owner(initialized_conn:Connection) -> None:
+def test_raw_catalog_only_exposes_public_and_requested_owner(initialized_conn:Connection) -> None:
     from chess_crawl.providers.base import RawRecord
     from chess_crawl.storage.raw import store_raw_payload
-    from chess_crawl.storage.queries import query_raw
+    from chess_crawl.storage.api_views import raw_page
     ids={}
     for owner in ("public","alpha","beta","unassigned:legacy-profile"):
         ids[owner]=store_raw_payload(initialized_conn,RawRecord(provider="lichess",endpoint_type="user_profile",
             request_url="https://lichess.org/api/user/alice",canonical_source_key=f"raw/{owner}",
             fetched_at=1,body=b'{}',owner_scope=owner))
-    assert {row["id"] for row in query_raw(initialized_conn,"lichess",100)}=={ids["public"]}
-    assert {row["id"] for row in query_raw(initialized_conn,"lichess",100,owner_scope="alpha")}=={ids["public"],ids["alpha"]}
+    assert {row["id"] for row in raw_page(initialized_conn,provider="lichess",limit=100,after=0,owner_scope="public")["items"]}=={ids["public"]}
+    assert {row["id"] for row in raw_page(initialized_conn,provider="lichess",limit=100,after=0,owner_scope="alpha")["items"]}=={ids["public"],ids["alpha"]}
 
 
 def test_worker_pool_status_masks_each_cross_workspace_job(database_url:str,monkeypatch:pytest.MonkeyPatch) -> None:

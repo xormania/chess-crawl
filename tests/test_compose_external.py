@@ -72,6 +72,28 @@ def test_default_compose_retains_private_bundled_database_and_migration_gate(
 
 
 @pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("custom", [False, True])
+def test_compose_passes_export_limits_only_to_api(
+    render_compose: Callable[..., subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch,
+    external: bool, custom: bool,
+) -> None:
+    defaults = {
+        "MAX_ROWS": "100000", "MAX_BYTES": "67108864", "PREPARE_SECONDS": "60",
+        "DOWNLOAD_SECONDS": "300", "WORKSPACE_SLOTS": "2", "OUTSTANDING_SPOOLS": "4",
+        "OUTSTANDING_BYTES": "268435456",
+    }
+    expected = {f"CHESS_CRAWL_EXPORT_{name}": "7" if custom else value for name, value in defaults.items()}
+    if custom:
+        for name, value in expected.items():
+            monkeypatch.setenv(name, value)
+    services = parsed(render_compose(external=external))["services"]
+    for name, value in expected.items():
+        assert services["api"]["environment"][name] == value
+        for service in ("worker", "init", "events"):
+            assert name not in services[service]["environment"]
+
+
+@pytest.mark.parametrize("external", [False, True])
 def test_compose_scratch_is_private_and_owned_by_the_runtime_user(
     render_compose: Callable[..., subprocess.CompletedProcess[str]], external: bool,
 ) -> None:

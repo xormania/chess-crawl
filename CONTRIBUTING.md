@@ -86,9 +86,10 @@ automatically load `.env`; export settings as described in the guides.
 
 Database connections and transactions are consolidated in
 `src/chess_crawl/storage/db.py`; durable job and crawl-run state is managed in
-`src/chess_crawl/jobs/state.py`. Report and export reads use
-`src/chess_crawl/storage/queries.py`. Extend these shared implementations when
-working in those areas.
+`src/chess_crawl/jobs/state.py`. Shared public archive reads use
+`src/chess_crawl/storage/queries.py`; paginated reports, owned export reads, and
+export preparation admission use `src/chess_crawl/storage/api_views.py`. Extend
+these shared implementations when working in those areas.
 
 Use the shared transaction helper for mutations. Outermost writes explicitly
 use READ COMMITTED before acquiring the shared migration gate; an externally owned
