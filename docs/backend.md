@@ -16,16 +16,55 @@ before response headers are sent. The database connection and transaction close
 before the client receives bytes. Downloads that fail, disconnect or exceed the
 delivery deadline close the file explicitly; no snapshot waits on client speed.
 
-Operator configuration sets `CHESS_CRAWL_EXPORT_MAX_ROWS` (100,000),
-`CHESS_CRAWL_EXPORT_MAX_BYTES` (64 MiB), `CHESS_CRAWL_EXPORT_PREPARE_SECONDS`
-(60), `CHESS_CRAWL_EXPORT_DOWNLOAD_SECONDS` (300), and
-`CHESS_CRAWL_EXPORT_WORKSPACE_SLOTS` (2). Preparation slots are enforced in
-PostgreSQL across API replicas and are isolated by the authenticated workspace.
+Operator configuration sets these finite positive integer limits. Callers cannot
+increase them; Compose forwards the settings from `.env` to the API service.
+
+| Variable (prefix `CHESS_CRAWL_EXPORT_`) | Default | Bound |
+| --- | --- | --- |
+| `MAX_ROWS` | 100,000 | Records per export |
+| `MAX_BYTES` | 67,108,864 (64 MiB) | UTF-8 bytes per export |
+| `PREPARE_SECONDS` | 60 | Total snapshot preparation time |
+| `DOWNLOAD_SECONDS` | 300 | Prepared file lifetime and HTTP delivery deadline |
+| `WORKSPACE_SLOTS` | 2 | Concurrent preparations per workspace across API replicas |
+| `OUTSTANDING_SPOOLS` | 4 | Retained files per API process, across all workspaces |
+| `OUTSTANDING_BYTES` | 268,435,456 (256 MiB) | Reserved temporary bytes per API process |
+| `WORKSPACE_OUTSTANDING_SPOOLS` | 2 | Retained files per workspace in each API process |
+| `WORKSPACE_OUTSTANDING_BYTES` | 134,217,728 (128 MiB) | Reserved bytes per workspace in each API process |
+
+Storage capacity is reserved at `MAX_BYTES` per request before opening a file,
+and remains reserved through preparation and delivery until the file closes.
+Each reservation counts against both process-wide and authenticated workspace
+limits, including slow or unread downloads. A workspace must leave at least one
+file slot and one full `MAX_BYTES` reservation available to other workspaces:
+`WORKSPACE_OUTSTANDING_SPOOLS < OUTSTANDING_SPOOLS`,
+`MAX_BYTES <= WORKSPACE_OUTSTANDING_BYTES`, and
+`WORKSPACE_OUTSTANDING_BYTES + MAX_BYTES <= OUTSTANDING_BYTES`.
+Incoherent operator settings fail at startup. These quotas prevent a single
+workspace from monopolizing process storage; several busy workspaces can still
+fill the shared budget; rejected requests can retry after capacity is released.
+Reservations are deliberately
+conservative even for small exports. Complete reads, explicit close, preparation
+errors, failed sends, cancellation, and timeouts release the file and its
+reservation. Prepared files have an independent expiry timer, so a response
+that is never consumed cannot retain storage indefinitely. Reads and expiry
+are synchronized; expiration cannot close a file underneath an active read.
+Temporary files are unlinked by the operating system and reclaimed when a
+process exits, including a crash; there is no persistent lease to clean up.
+
+Preparation fairness remains enforced in PostgreSQL across replicas. Storage
+limits apply **per API process**, without retaining a database session during
+client delivery: budget the deployment total as `OUTSTANDING_BYTES × API worker
+processes × API replicas` (and similarly for file count). The supplied Compose
+API uses one process, so its default export reservation ceiling is 256 MiB.
+Its `/tmp` is memory-backed: provision that memory plus application overhead,
+or configure disk-backed temporary storage and size these limits accordingly.
+Custom multi-worker containers must budget their combined process limits.
+
 An oversized export fails with `422 export_limit_exceeded` before delivery;
-a busy workspace receives `429` and can retry. Narrow the provider filter or
-adjust trusted operator limits for larger local exports. All settings must be
-finite positive integers; callers cannot override them. Provision temporary
-storage for the configured maximum export size and concurrent preparation count.
+a workspace at its preparation or retained-storage quota, or a full process
+temporary-storage budget, receives `429` with
+`Retry-After`. Narrow the provider filter or adjust trusted operator limits for
+larger local exports. An interrupted or expired download must be retried.
 
 ## Start the development backend
 

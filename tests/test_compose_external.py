@@ -121,9 +121,15 @@ def test_compose_passes_export_limits_only_to_api(
     defaults = {
         "MAX_ROWS": "100000", "MAX_BYTES": "67108864", "PREPARE_SECONDS": "60",
         "DOWNLOAD_SECONDS": "300", "WORKSPACE_SLOTS": "2", "OUTSTANDING_SPOOLS": "4",
-        "OUTSTANDING_BYTES": "268435456",
+        "OUTSTANDING_BYTES": "268435456", "WORKSPACE_OUTSTANDING_SPOOLS": "2",
+        "WORKSPACE_OUTSTANDING_BYTES": "134217728",
     }
-    expected = {f"CHESS_CRAWL_EXPORT_{name}": "7" if custom else value for name, value in defaults.items()}
+    custom_values = {
+        "MAX_ROWS": "7", "MAX_BYTES": "1024", "PREPARE_SECONDS": "7", "DOWNLOAD_SECONDS": "7",
+        "WORKSPACE_SLOTS": "7", "OUTSTANDING_SPOOLS": "6", "OUTSTANDING_BYTES": "8192",
+        "WORKSPACE_OUTSTANDING_SPOOLS": "3", "WORKSPACE_OUTSTANDING_BYTES": "3072",
+    }
+    expected = {f"CHESS_CRAWL_EXPORT_{name}": value for name, value in (custom_values if custom else defaults).items()}
     if custom:
         for name, value in expected.items():
             monkeypatch.setenv(name, value)
@@ -132,6 +138,11 @@ def test_compose_passes_export_limits_only_to_api(
         assert services["api"]["environment"][name] == value
         for service in ("worker", "init", "events"):
             assert name not in services[service]["environment"]
+    from chess_crawl.api.exports import ExportLimits
+    for name in expected:
+        monkeypatch.setenv(name, services["api"]["environment"][name])
+    limits = ExportLimits.from_env()
+    assert limits.workspace_outstanding_bytes + limits.max_bytes <= limits.outstanding_bytes
 
 
 @pytest.mark.parametrize("external", [False, True])

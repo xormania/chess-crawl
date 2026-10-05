@@ -2,19 +2,19 @@ from __future__ import annotations
 
 from chess_crawl.storage.db import open_database, require_row
 
-import csv
 import json
-from pathlib import Path
 
 import pytest
 
 from support import seed_game
 from chess_crawl.providers.base import RawRecord
-from chess_crawl.export.writers import export_games_jsonl, export_graph_csv, export_users_jsonl
+from chess_crawl.api import compat
+from chess_crawl.api.compat import _export_chunks
+from chess_crawl.application import list_opponents
+from chess_crawl.storage.api_views import months_page
+from helpers.api import client
 from chess_crawl.storage.queries import (
     archive_freshness,
-    games_by_month,
-    opponent_report,
     summary_report,
     user_game_summary,
 )
@@ -38,13 +38,13 @@ def test_reports_are_null_outcome_aware_and_provider_scoped(initialized_conn) ->
     assert lichess_user["provider"] == "lichess"
     assert lichess_user["wins"] == 1
 
-    opponents = opponent_report(conn, "chess.com", "SameName")
+    opponents = list_opponents(conn, "chess.com", "SameName")["items"]
     assert opponents is not None
     assert [(row["provider"], row["opponent_username"], row["unfinished"]) for row in opponents] == [
         ("chess.com", "opponent", 1)
     ]
 
-    months = games_by_month(conn, provider="chess.com")
+    months = months_page(conn, provider="chess.com", after="", limit=100)["items"]
     assert [(row["month"], row["games"], row["unfinished"]) for row in months] == [("2024-01", 1, 1)]
     assert summary_report(conn)["raw_payloads"] == 0
 
@@ -84,66 +84,55 @@ def test_public_archive_metrics_exclude_workspace_scoped_payloads(initialized_co
     }
 
 
-def test_exports_preserve_provider_and_omit_raw_payloads(tmp_path: Path, seeded_database_url: str) -> None:
-    games_path = tmp_path / "games.jsonl"
-    users_path = tmp_path / "users.jsonl"
-    graph_path = tmp_path / "graph.csv"
-
-    with open_database(seeded_database_url) as conn:
-        assert export_games_jsonl(conn, output=games_path) == 2
-        assert export_users_jsonl(conn, output=users_path) == 4
-        assert export_graph_csv(conn, output=graph_path) == 1
-
-    game_rows = [json.loads(line) for line in games_path.read_text().splitlines()]
+def test_exports_preserve_provider_and_omit_raw_payloads(seeded_database_url: str) -> None:
+    with client(seeded_database_url) as api:
+        games = api.get("/v1/exports/games.jsonl")
+        users = api.get("/v1/exports/users.jsonl")
+    assert games.status_code == users.status_code == 200
+    game_rows = [json.loads(line) for line in games.text.splitlines()]
+    assert len(game_rows) == 2
     assert {row["provider"] for row in game_rows} == {"chess.com", "lichess"}
-    assert all("raw_body" not in row for row in game_rows)
-    assert all("ply_count" not in row for row in game_rows)
-
-    user_rows = [json.loads(line) for line in users_path.read_text().splitlines()]
+    assert all("raw_body" not in row and "ply_count" not in row for row in game_rows)
+    user_rows = [json.loads(line) for line in users.text.splitlines()]
     assert sorted((row["provider"], row["username_normalized"]) for row in user_rows) == [
-        ("chess.com", "opponent"),
-        ("chess.com", "samename"),
-        ("lichess", "opponent"),
-        ("lichess", "samename"),
+        ("chess.com", "opponent"), ("chess.com", "samename"),
+        ("lichess", "opponent"), ("lichess", "samename"),
     ]
-
-    with graph_path.open(newline="", encoding="utf-8") as handle:
-        graph_rows = list(csv.DictReader(handle))
-    assert graph_rows[0]["provider"] == "chess.com"
-    assert graph_rows[0]["from_username"] == "samename"
-    assert graph_rows[0]["to_username"] == "opponent"
+    # Graph membership and CSV correctness are exercised against owned run
+    # memberships in test_archive_api_parity, not legacy global edge exports.
 
 
-@pytest.mark.parametrize("exporter", [export_games_jsonl, export_users_jsonl, export_graph_csv])
-def test_export_output_failure_preserves_database(seeded_database_url: str, tmp_path: Path, exporter) -> None:
-    # A directory is an invalid output file; failure must not mutate stored data.
-    with open_database(seeded_database_url) as conn:
-        before = require_row(conn.execute("SELECT COUNT(*) FROM games"))[0]
-        with pytest.raises(OSError):
-            exporter(conn, output=tmp_path)
-        assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == before
-    with open_database(seeded_database_url) as conn:
-        assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == before
-
-
-@pytest.mark.parametrize("exporter", [export_games_jsonl, export_users_jsonl, export_graph_csv])
-def test_output_interruption_releases_stream_and_snapshot(seeded_database_url: str, monkeypatch, exporter) -> None:
+@pytest.mark.parametrize("kind", ["games", "users", "graph"])
+def test_export_output_failure_preserves_database(seeded_database_url: str, monkeypatch, kind) -> None:
     import io
-    from chess_crawl.export import writers
 
     class FailingOutput(io.StringIO):
-        writes = 0
         def write(self, text):
-            self.writes += 1
-            # CSV writes the header first; interrupt after a row is fetched.
-            if self.writes >= 2:
-                raise OSError("output interrupted")
-            return super().write(text)
+            raise OSError("output interrupted")
 
     output = FailingOutput()
-    monkeypatch.setattr(writers.sys, "stdout", output)
+    monkeypatch.setattr(compat.tempfile, "TemporaryFile", lambda **kwargs: output)
+    with pytest.raises(OSError, match="interrupted"):
+        list(_export_chunks(seeded_database_url, kind, None, "alpha"))
+    assert output.closed
     with open_database(seeded_database_url) as conn:
-        with pytest.raises(OSError, match="interrupted"):
-            exporter(conn)
-        assert not conn.in_transaction
+        assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 2
+
+
+@pytest.mark.parametrize("kind", ["games", "users", "graph"])
+def test_output_interruption_releases_spool(seeded_database_url: str, monkeypatch, kind) -> None:
+    files = []
+    original = compat.tempfile.TemporaryFile
+
+    def tracked(**kwargs):
+        file = original(**kwargs)
+        files.append(file)
+        return file
+
+    monkeypatch.setattr(compat.tempfile, "TemporaryFile", tracked)
+    chunks = _export_chunks(seeded_database_url, kind, None, "alpha")
+    next(chunks)
+    chunks.close()
+    assert len(files) == 1 and files[0].closed
+    with open_database(seeded_database_url) as conn:
         assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 2

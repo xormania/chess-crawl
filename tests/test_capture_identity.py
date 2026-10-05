@@ -3,7 +3,6 @@
 from helpers.players import _record
 
 import json
-from pathlib import Path
 
 import httpx
 import pytest
@@ -14,7 +13,7 @@ from chess_crawl.ingest import (
     fetch_user_resource,
     replay_raw_payload,
 )
-from chess_crawl.export.writers import export_users_jsonl
+from chess_crawl.api.compat import _export_chunks
 from chess_crawl.normalize.resources import normalize_resource_payload
 from chess_crawl.normalize.users import normalize_user_payload
 from chess_crawl.storage.player_profiles import (
@@ -39,12 +38,13 @@ def _history(conn, user_id, kind):
     ]
 
 
-def _assert_public_users(conn, provider, expected_names, output: Path):
+def _assert_public_users(conn, provider, expected_names, database_url):
     for selected_provider in (None, provider):
         streamed = list(iter_users(conn, provider=selected_provider))
         rows, total = user_page(conn, provider=selected_provider, after=0, limit=100)
-        exported = export_users_jsonl(conn, provider=selected_provider, output=output)
-        jsonl = [json.loads(line) for line in output.read_text().splitlines()]
+        text = "".join(_export_chunks(database_url, "users", selected_provider, "alpha"))
+        jsonl = [json.loads(line) for line in text.splitlines()]
+        exported = len(jsonl)
         actual = {
             "iterator": {row["username_normalized"] for row in streamed},
             "page": {row["username_normalized"] for row in rows},
@@ -116,7 +116,7 @@ def test_failed_stats_request_cannot_create_or_refresh_account(initialized_conn,
     ]
 
 
-def test_private_only_identity_does_not_expose_collection_times(initialized_conn, tmp_path):
+def test_private_only_identity_does_not_expose_collection_times(initialized_conn, database_url):
     conn = initialized_conn
     fetch_user_resource(
         conn,
@@ -136,7 +136,7 @@ def test_private_only_identity_does_not_expose_collection_times(initialized_conn
         assert public is None or (
             public["first_seen_at"] is None and public["updated_at"] is None
         )
-    _assert_public_users(conn, "lichess", set(), tmp_path / "users.jsonl")
+    _assert_public_users(conn, "lichess", set(), database_url)
     assert query_user(conn, "lichess", "PrivateOnly") is None
 
 
@@ -285,7 +285,7 @@ def test_conditional_response_binds_current_username_holder(initialized_conn):
 
 
 @pytest.mark.parametrize("kind", ["profile", "resource", "game", "stats"])
-def test_public_observations_populate_private_placeholder_dates(initialized_conn, kind, tmp_path):
+def test_public_observations_populate_private_placeholder_dates(initialized_conn, kind, database_url):
     conn = initialized_conn
     provider = "chess.com" if kind == "stats" else "lichess"
     user_id = resolve_capture_account(
@@ -300,7 +300,7 @@ def test_public_observations_populate_private_placeholder_dates(initialized_conn
         "SELECT first_seen_at,updated_at FROM provider_users WHERE id=%s", (user_id,)
     ).fetchone()
     assert before["first_seen_at"] is None and before["updated_at"] is None
-    _assert_public_users(conn, provider, set(), tmp_path / "users.jsonl")
+    _assert_public_users(conn, provider, set(), database_url)
     assert query_user(conn, provider, "PrivateOnly") is None
     if kind == "profile":
         _profile(conn, {"id": "privateonly", "username": "PrivateOnly"}, at=200)
@@ -329,11 +329,11 @@ def test_public_observations_populate_private_placeholder_dates(initialized_conn
         else public["first_seen_at"] > 100
     )
     expected_names = {"privateonly", "opponent"} if kind == "game" else {"privateonly"}
-    _assert_public_users(conn, provider, expected_names, tmp_path / "users.jsonl")
+    _assert_public_users(conn, provider, expected_names, database_url)
     assert query_user(conn, provider, "PrivateOnly").id == user_id
 
 
-def test_zero_public_identity_date_survives_private_capture(initialized_conn, tmp_path):
+def test_zero_public_identity_date_survives_private_capture(initialized_conn, database_url):
     conn = initialized_conn
     user_id = resolve_capture_account(
         conn, provider="lichess", username="Alice", observed_at=0
@@ -351,7 +351,7 @@ def test_zero_public_identity_date_survives_private_capture(initialized_conn, tm
     )
     assert player_profile(conn, "lichess", "Alice") == before
     assert len(resource_history(conn, user_id, owner_scope="alpha")) == 1
-    _assert_public_users(conn, "lichess", {"alice"}, tmp_path / "users.jsonl")
+    _assert_public_users(conn, "lichess", {"alice"}, database_url)
     assert query_user(conn, "lichess", "Alice").id == user_id
 
 

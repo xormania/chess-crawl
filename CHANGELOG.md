@@ -268,6 +268,12 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   and deferred processing across continuations, retries, and new submission keys.
   API admission rejects excess workspace backlog/quota atomically with scoped
   HTTP 429 diagnostics; stored budget reads preserve lifetime policy and usage.
+- Bound retained export files and reserved bytes across all requests in each API
+  process through download close or expiry, including slow and unconsumed
+  responses. Retained files and bytes also have per-workspace quotas that leave
+  room for another workspace's full-sized export. Completion, failure, and
+  cancellation release storage without retaining a database connection. Remove retired CLI writers and duplicate report queries;
+  preserve their provider, outcome, and privacy coverage on supported API reads.
 - HTTP exports prepare a finite temporary spool before sending response bytes,
   releasing database snapshots before slow client delivery. Operator row, byte,
   preparation and download limits bound each export, and per-workspace database

@@ -20,7 +20,7 @@ from starlette.types import Receive, Scope, Send
 
 from chess_crawl import application
 from chess_crawl.jobs.budget import BudgetPolicy
-from chess_crawl.api.exports import ExportLimits, ExportSpool, check_export_bounds
+from chess_crawl.api.exports import ExportLimits, ExportSpool, check_export_bounds, export_capacity
 from chess_crawl.application.services import submit_game_collection, submit_player_refresh
 from chess_crawl.application.validation import (
     validate_game_collection, validate_idempotency_key, validate_page,
@@ -43,7 +43,7 @@ class GameCollectionBody(BaseModel):
 
 
 class ArchiveExportResponse(StreamingResponse):
-    """Close the database iterator even when ASGI send/cancellation interrupts it."""
+    """Close export storage even when ASGI send/cancellation interrupts it."""
 
     def __init__(self,chunks:Generator[str,None,None]|ExportSpool,*,media_type:str,headers:dict[str,str],
                  download_seconds:int = 300) -> None:
@@ -57,7 +57,7 @@ class ArchiveExportResponse(StreamingResponse):
                 await super().__call__(scope,receive,send)
         finally:
             # Wait for any in-flight next() before closing, including disconnect
-            # cancellation. Never leave an archive snapshot waiting on GC.
+            # cancellation. Never leave an export file waiting on GC.
             with anyio.CancelScope(shield=True):
                 await run_in_threadpool(self.chunks.close)
 
@@ -183,14 +183,20 @@ def _export_chunks(archive: str, kind: str, provider: str|None, workspace_id: st
 def _prepare_export(archive: str, kind: str, provider: str|None, workspace_id: str,
                     *, limits: ExportLimits) -> ExportSpool:
     deadline = time.monotonic()+limits.prepare_seconds
-    spool = tempfile.TemporaryFile(mode="w+t",encoding="utf-8",newline="")
+    release = export_capacity.reserve(limits, workspace_id=workspace_id)
+    spool = None
     try:
+        spool = tempfile.TemporaryFile(mode="w+t",encoding="utf-8",newline="")
         _write_export(archive,kind,provider,workspace_id,spool=spool,limits=limits,deadline=deadline)
         check_export_bounds(limits=limits,rows=0,bytes_written=0,deadline=deadline)
         spool.seek(0)
-        return ExportSpool(spool)
+        return ExportSpool(spool, on_close=release, lifetime_seconds=limits.download_seconds)
     except BaseException:
-        spool.close()
+        try:
+            if spool is not None:
+                spool.close()
+        finally:
+            release()
         raise
 
 
