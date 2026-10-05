@@ -7,6 +7,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Immutable gzip source archives with local filesystem and optional S3 adapters,
+  verified original/encoded checksums, import evidence references, and resumable
+  offline relocation of existing PostgreSQL payload bodies. Inline storage stays
+  compatible by default; object-backed archives require backing up their objects
+  alongside PostgreSQL. See [archive storage](docs/archive-storage.md).
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
   project's `.venv`; Docker Compose continues to own the application services.
@@ -91,6 +96,26 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   and contribution guides describing the current implementation.
 
 ### Fixed
+
+- Archive relocation selects pending payloads through a partial ordered index
+  and checks continuation without counting the entire remaining queue per batch.
+  Its JSON result adds `has_more`; `remaining` is null while work remains unless
+  `--count-remaining` explicitly requests an exact reporting scan.
+
+- Configured local archival requires an explicit absolute directory and rejects
+  missing, blank, or relative locations, preventing source-run processes from
+  silently selecting different archives based on their working directory.
+
+- Object reuse rechecks publication and readback before relocation releases an
+  inline backup, restoring missing objects and retaining inline evidence on
+  corruption. Archive settings currently apply to source-run clients and
+  operational helpers; the existing Compose stack continues inline storage.
+
+
+- Object publication and verification run before database write transactions,
+  keeping API/job mutations responsive during slow archive storage. Raw-response
+  deduplication skips object I/O; callers owning outer transactions must prepare
+  external objects beforehand so source references still roll back atomically.
 
 - Reconcile renamed accounts with username-only placeholders while preserving
   their game, snapshot, source, and discovery history. Conflicting stable
