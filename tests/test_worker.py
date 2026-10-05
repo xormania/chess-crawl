@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -279,6 +279,26 @@ def test_worker_recovers_orphans_once_and_preserves_cancelled_runs(
     assert Worker(database_url).run(once=True) == 0
 
 
+def test_sqs_worker_falls_back_to_durable_pending_work(
+    database_url: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EmptyQueue:
+        def run_once(self, conn, execute) -> int:
+            del conn, execute
+            return 0
+
+    monkeypatch.setattr(JobRunner, "_execute", lambda self, job: ExecutionOutcome("done", "fixture"))
+    with open_database(database_url, writable=True) as conn:
+        job_id = state.enqueue_job(
+            conn, provider="lichess", kind="normalize_payload", target="123",
+        ).job_id
+
+    assert Worker(database_url, queue_consumer=EmptyQueue()).run(once=True) == 1
+    with open_database(database_url) as conn:
+        job = state.get_job(conn, job_id)
+        assert job is not None and job.state == "done" and job.attempts == 1
+
+
 def test_snapshot_reflects_previous_completion_before_next_job(initialized_conn, monkeypatch) -> None:
     run_id, first = state.create_crawl_run_with_root_job(
         initialized_conn, provider="lichess", seed_spec="progress", params={},
@@ -431,54 +451,36 @@ def test_heartbeat_age_is_bounded_and_old_owner_cannot_change_successor(database
         assert state.worker_status(conn, now=109.9)["alive"]
         assert not state.worker_status(conn, now=110)["alive"]
         state.start_worker(conn, "new", lease=lease, max_age=10, now=120)
-        assert not state.heartbeat_worker(conn, "old", max_age=1000, now=130)
-        state.stop_worker(conn, "old", now=140)
+        # Workers have independent liveness rows. Stopping the old identity
+        # cannot change the new worker or permit restarting its stopped row.
+        state.stop_worker(conn, "old", now=122)
+        assert not state.heartbeat_worker(conn, "old", max_age=1000, now=123)
         assert state.worker_status(conn, now=125)["worker_id"] == "new"
         assert state.worker_status(conn, now=125)["alive"]
 
 
-def test_heartbeat_retries_writer_contention_without_stopping_executor(
+def test_independent_archive_write_does_not_block_worker_heartbeat(
     database_url: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     worker = Worker(database_url, clock=lambda: 121.0)
     heartbeats: list[bool] = []
-    waits: list[float] = []
     heartbeat_worker = state.heartbeat_worker
 
-    @contextmanager
-    def impatient_connection(*args, **kwargs):
-        with connection(*args, **kwargs) as conn:
-            conn.execute("SET lock_timeout = '25ms'")
-            yield conn
-
     def heartbeat(*args, **kwargs):
-        heartbeats.append(True)
         owned = heartbeat_worker(*args, **kwargs)
+        heartbeats.append(owned)
         worker._heartbeat_stop.set()
         return owned
 
-    monkeypatch.setattr(worker_module, "connection", impatient_connection)
     monkeypatch.setattr(state, "heartbeat_worker", heartbeat)
     with archive_lock(database_url) as lease:
         conn = lease.connection
         state.start_worker(conn, worker.worker_id, lease=lease, max_age=20, now=100)
-        with ExitStack() as writer:
-            writer.enter_context(transaction(conn))
-
-            def wait(delay: float) -> bool:
-                waits.append(delay)
-                if len(waits) == 1:
-                    # A normalization transaction can expire liveness while
-                    # the database session continues to own execution.
-                    assert not state.worker_status(conn, now=121)["alive"]
-                    writer.close()
-                return worker._heartbeat_stop.is_set()
-
-            monkeypatch.setattr(worker._heartbeat_stop, "wait", wait)
+        with transaction(conn):
+            state.enqueue_job(conn, provider="lichess", kind="fetch_user_profile", target="unrelated")
             worker._heartbeat()
-        assert state.worker_status(conn, now=121)["alive"]
-    assert len(heartbeats) == 2
-    assert waits == [worker.settings.heartbeat_interval] * 2
+            assert state.worker_status(conn, now=121)["alive"]
+    assert heartbeats == [True]
     assert worker._heartbeat_error is None
     assert not worker._stop.is_set()
 

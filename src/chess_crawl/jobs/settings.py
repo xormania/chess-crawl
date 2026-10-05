@@ -1,4 +1,4 @@
-"""Validated settings for the serial executor and its durable retry policy."""
+"""Validated settings for concurrent executors and their durable retry policy."""
 
 from __future__ import annotations
 

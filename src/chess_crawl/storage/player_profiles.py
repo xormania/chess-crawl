@@ -8,7 +8,7 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from chess_crawl.normalize.codes import canonical_hash
-from chess_crawl.storage.db import Connection, atomic, require_row
+from chess_crawl.storage.db import Connection, atomic, require_row, operation_lock, operation_locks
 from chess_crawl.providers.base import RawRecord
 
 
@@ -213,20 +213,21 @@ def resolve_capture_account(
     conn: Connection, *, provider: str, username: str, observed_at: int, owner_scope: str = "public",
 ) -> int:
     """Bind the request target without replacing supplied public identity facts."""
-    from chess_crawl.storage.repository import upsert_provider_user
+    from chess_crawl.storage.repository import upsert_provider_user, user_identity_transaction
 
-    normalized = username.strip().lower()
-    current = conn.execute(
-        "SELECT id FROM provider_users WHERE provider = %s AND username_normalized = %s", (provider, normalized),
-    ).fetchone()
-    if current is not None:
-        return int(current["id"])
-    if owner_scope == "public":
-        return upsert_provider_user(conn, provider=provider, username=username, now=observed_at)
-    return int(require_row(conn.execute(
-        """INSERT INTO provider_users(provider, username_normalized, display_username, first_seen_at, updated_at)
-           VALUES (%s, %s, %s, NULL, NULL) RETURNING id""", (provider, normalized, username),
-    ))["id"])
+    with user_identity_transaction(conn, provider, username, None):
+        normalized = username.strip().lower()
+        current = conn.execute(
+            "SELECT id FROM provider_users WHERE provider = %s AND username_normalized = %s", (provider, normalized),
+        ).fetchone()
+        if current is not None:
+            return int(current["id"])
+        if owner_scope == "public":
+            return upsert_provider_user(conn, provider=provider, username=username, now=observed_at)
+        return int(require_row(conn.execute(
+            """INSERT INTO provider_users(provider, username_normalized, display_username, first_seen_at, updated_at)
+               VALUES (%s, %s, %s, NULL, NULL) RETURNING id""", (provider, normalized, username),
+        ))["id"])
 
 
 @atomic
@@ -253,6 +254,21 @@ def record_resource_attempt(conn: Connection, record: RawRecord, raw_payload_id:
          canonical_hash(values), record.canonical_source_key, record.fetched_at, record.http_status, raw_payload_id),
     )
     return user_id
+
+
+@atomic
+def lock_capture_accounts(conn: Connection, provider: str, user_ids: list[int], requested_username: str) -> None:
+    """Lock a replay's bound identities together while reconciliation is gated."""
+    from chess_crawl.storage.repository import user_identity_resources
+
+    operation_lock(conn, "reconciliation-provider", provider, shared=True)
+    resources = user_identity_resources(provider, requested_username, None)
+    for account in conn.execute(
+        "SELECT username_normalized,provider_user_id FROM provider_users WHERE provider=%s AND id=ANY(%s)",
+        (provider, user_ids),
+    ).fetchall():
+        resources.extend(user_identity_resources(provider, account["username_normalized"], account["provider_user_id"]))
+    operation_locks(conn, resources)
 
 
 def resource_attempts(conn: Connection, provider_user_id: int, *, owner_scope: str = "public") -> list[dict[str, Any]]:

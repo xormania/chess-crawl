@@ -26,7 +26,7 @@ from chess_crawl.storage.raw import (
     read_raw_payload, store_raw_payload, update_raw_payload_status,
     prepare_raw_payload,
 )
-from chess_crawl.storage.repository import insert_error
+from chess_crawl.storage.repository import insert_error, user_identity_transaction
 from chess_crawl.storage.player_profiles import record_resource_attempt, resolve_capture_account
 from chess_crawl.providers.resources import resource_source_key
 
@@ -205,6 +205,24 @@ def fetch_lichess_game(
         )
 
 
+def fetch_lichess_games_page(
+    conn: Connection, username: str, *, since_ms: int | None, until_ms: int,
+    limit: int, config: Config | None = None,
+    transport: httpx.BaseTransport | None = None, sleeper=None,
+    session: ProviderSession | None = None, job_id: int | None = None,
+    crawl_run_id: int | None = None,
+) -> IngestResult:
+    """Fetch a page using the provider's native millisecond boundaries."""
+    with _provider_client("lichess", config=config, transport=transport, sleeper=sleeper, session=session) as client:
+        record = client.get_user_games_page(
+            username, since_ms=since_ms, until_ms=until_ms, limit=limit,
+        )
+        return _store_and_normalize(
+            conn, record, normalizer=normalize_games_payload, max_games=None,
+            job_id=job_id, crawl_run_id=crawl_run_id,
+        )
+
+
 @contextmanager
 def _provider_client(provider: str, *, config, transport, sleeper, session):
     if session is not None:
@@ -247,6 +265,15 @@ def replay_raw_payload(
     )
 
 
+def installed_parser_target(requested: str = "current") -> str:
+    """Pin a mixed-endpoint replay to the complete installed parser manifest."""
+    manifest = "|".join(("chesscom-archives-index-v1", GAMES_PARSER_VERSION,
+                         RESOURCES_PARSER_VERSION, USERS_PARSER_VERSION))
+    if requested not in {"current", manifest}:
+        raise ValueError("Requested parser target is unavailable; use current or the installed parser manifest")
+    return manifest
+
+
 def _requires_normalization(conn: Connection, raw_payload_id: int) -> bool:
     raw = read_raw_payload(conn, raw_payload_id)
     if raw.endpoint_type in {"user_profile", "user_stats"}:
@@ -278,9 +305,18 @@ def _store_and_normalize(
         return _non_body_result(record)
     game_payload = record.endpoint_type in {"monthly_archive", "user_games_stream", "game"}
     current_conditional = record.http_status == 304 and not _requires_normalization(conn, raw_payload_id)
-    if record.http_status == 304 and game_payload and crawl_run_id is None:
-        if current_conditional:
-            return _non_body_result(record)
+    # A new conditional observation can make this cached game source current
+    # again even when its parser is unchanged and there is no crawl run.
+    if conn._defer_normalization:
+        from chess_crawl.jobs.state import enqueue_job
+        enqueue_job(
+            conn, provider=record.provider, kind="normalize_payload", target=str(raw_payload_id),
+            params={"raw_payload_id": raw_payload_id, "max_games": max_games, "fetch_log_id": fetch_log_id},
+            crawl_run_id=crawl_run_id, parent_job_id=job_id, priority=20,
+        )
+        return IngestResult(record.provider, record.endpoint_type, record.http_status,
+                            raw_payload_id, (), f"stored raw #{raw_payload_id}; normalization queued",
+                            retry_after=_retry_after(record))
     if game_payload:
         normalized = normalizer(conn, raw_payload_id, crawl_run_id=crawl_run_id, max_games=max_games)
     elif record.endpoint_type in {"user_profile", "user_stats", "user_resource"}:
@@ -347,7 +383,12 @@ def _persist_response(
     )
     # Commit the response and its attempt/error evidence together, before
     # invoking a normalizer that can fail independently.
-    with transaction(conn):
+    identity = (
+        user_identity_transaction(conn, record.provider, record.target_username, None)
+        if record.endpoint_type in {"user_resource", "user_stats"} and record.target_username
+        else transaction(conn)
+    )
+    with identity:
         raw_payload_id = _store_raw_if_present(conn, record, prepared_object=prepared_object)
         if record.http_status == 304:
             raw_payload_id = latest_raw_payload_id(conn, record.canonical_source_key)

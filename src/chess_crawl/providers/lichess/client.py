@@ -109,7 +109,8 @@ class LichessClient:
             "GET",
             endpoints.user_games(username, **params),
             endpoint_type="user_games_stream",
-            headers=self._headers("application/x-ndjson"),
+            # Public archive inputs must not inherit account-private access.
+            headers={"Accept": "application/x-ndjson"},
         )
         return _raw_record(
             result,
@@ -128,7 +129,7 @@ class LichessClient:
             "GET",
             endpoints.game(game_id, **params),
             endpoint_type="game",
-            headers=self._headers("application/json"),
+            headers={"Accept": "application/json"},
         )
         return _raw_record(
             result,
@@ -136,6 +137,37 @@ class LichessClient:
             canonical_source_key=source_key,
             target_game_id=game_id,
             request_params=params,
+        )
+
+    def get_user_games_page(
+        self, username: str, *, since_ms: int | None, until_ms: int,
+        limit: int,
+    ) -> RawRecord:
+        """Acquire a bounded page without rounding millisecond cursor boundaries."""
+        for name, value in (("since_ms", since_ms), ("until_ms", until_ms)):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{name} must be a nonnegative integer")
+        if since_ms is not None and since_ms > until_ms:
+            raise ValueError("since_ms must not be greater than until_ms")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        normalized = _username(username)
+        unit = f"millis-{since_ms if since_ms is not None else 'open'}..{until_ms}-limit-{limit}"
+        params = {
+            "since": since_ms, "until": until_ms, "max": limit,
+            "sort": "dateDesc", "ongoing": "true", "finished": "true",
+            "pgnInJson": "true", "opening": "true", "division": "true",
+            **self._evidence_params(),
+        }
+        result = self.http.request(
+            "GET", endpoints.user_games(username, **params), endpoint_type="user_games_stream",
+            headers={"Accept": "application/x-ndjson"},
+        )
+        return _raw_record(
+            result, endpoint_type="user_games_stream",
+            canonical_source_key=f"lichess/games/user/{normalized}/{unit}",
+            target_username=normalized, archive_unit=unit,
+            request_params={key: value for key, value in params.items() if value is not None},
         )
 
     def close(self) -> None:
@@ -155,7 +187,7 @@ class LichessClient:
         authenticated = resource.authentication != "none" and bool(self.settings.oauth_token)
         result = self.http.request(
             "GET", resource.url(username, values), endpoint_type="user_resource",
-            headers=self._headers("application/json") if authenticated else {"Accept": "application/json"},
+            headers=self._authenticated_headers("application/json") if authenticated else {"Accept": "application/json"},
         )
         return _raw_record(
             result, endpoint_type="user_resource",
@@ -176,7 +208,7 @@ class LichessClient:
             "accuracy": str(self.settings.include_accuracy).lower(),
         }
 
-    def _headers(self, accept: str) -> Mapping[str, str]:
+    def _authenticated_headers(self, accept: str) -> Mapping[str, str]:
         headers = {"Accept": accept}
         if self.settings.oauth_token:
             headers["Authorization"] = f"Bearer {self.settings.oauth_token}"

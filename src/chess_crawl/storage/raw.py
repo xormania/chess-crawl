@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from chess_crawl.storage.db import Connection, atomic
+from chess_crawl.storage.db import Connection, atomic, operation_lock
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage.archives import (
     PreparedArchiveObject, prepare_or_reuse_archive_object, read_archive_object, register_archive_object,
@@ -113,6 +113,7 @@ def _store_raw_payload(
     normalization_status: str, prepared_object: PreparedArchiveObject | None,
     external_expected: bool,
 ) -> int:
+    operation_lock(conn, "raw-source", record.canonical_source_key)
     body_hash = _body_hash(record)
     existing = _existing_payload(conn, record, body_hash)
     if existing is not None:

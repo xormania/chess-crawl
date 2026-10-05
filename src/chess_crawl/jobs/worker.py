@@ -8,15 +8,18 @@ import sys
 import threading
 import time
 import uuid
+import os
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import httpx
 
 from chess_crawl.config import Config
 from chess_crawl.jobs import state
-from chess_crawl.jobs.locking import ExecutorBusy, archive_lock
+from chess_crawl.jobs.locking import ExecutorBusy, parallel_executor_lock
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.jobs.settings import WorkerSettings
+from chess_crawl.jobs.worker_identity import write_worker_identity
 from chess_crawl.providers.registry import ProviderSession
 from chess_crawl.storage.db import DatabaseError, connection, database_url
 from chess_crawl.storage.migrations import initialize
@@ -36,6 +39,9 @@ class Worker:
         clock: Callable[[], float] = time.time,
         sleeper: Callable[[float], None] | None = None,
         runner_factory: Callable[..., JobRunner] = JobRunner,
+        stage: str = "all",
+        queue_consumer=None,
+        identity_path: str | Path | None = None,
     ) -> None:
         self.db_path = database_url(db_path)
         self.settings = settings or WorkerSettings()
@@ -45,6 +51,9 @@ class Worker:
         self.sleeper = sleeper
         self.runner_factory = runner_factory
         self.worker_id = uuid.uuid4().hex
+        self.stage = stage
+        self.queue_consumer = queue_consumer
+        self.identity_path = identity_path
         self._stop = threading.Event()
         self._heartbeat_stop = threading.Event()
         self._activity_lock = threading.Lock()
@@ -96,8 +105,7 @@ class Worker:
         claimed = 0
         # Lock precedes migration, recovery, and heartbeat mutations. A losing
         # contender cannot disturb the live owner's durable state.
-        with archive_lock(self.db_path) as lease:
-            conn = lease.connection
+        with connection(self.db_path, mode="rw") as conn, parallel_executor_lock(conn) as lease:
             initialize(conn)
             state.resume_stale_in_progress(conn, now=int(self.clock()), lease=lease)
             state.refresh_crawl_runs(conn)
@@ -109,6 +117,8 @@ class Worker:
             heartbeat.start()
             failed = False
             try:
+                if self.identity_path is not None:
+                    write_worker_identity(self.identity_path, self.worker_id)
                 provider_sleeper = self.sleeper if self.sleeper is not None else self._stop.wait
                 with ProviderSession(
                     self.config, transport=self.transport, sleeper=provider_sleeper, clock=self.clock,
@@ -118,13 +128,30 @@ class Worker:
                         conn, config=self.config, transport=self.transport, sleeper=provider_sleeper,
                         settings=self.settings, clock=self.clock, session=session, lease=lease,
                         stop_requested=self._stop.is_set, on_job=self._on_job,
+                        worker_id=self.worker_id, stage=self.stage,
                     )
                     while not self._stop.is_set():
-                        result = runner.run(max_jobs=1)
-                        claimed += result.claimed
+                        # Recovery never steals a live session. Poll it even
+                        # with an empty queue so an interrupted/acked duplicate
+                        # cannot strand the durable original job indefinitely.
+                        state.resume_stale_in_progress(conn, lease=lease)
+                        if self.queue_consumer is None:
+                            count = runner.run(max_jobs=1).claimed
+                        else:
+                            count = self.queue_consumer.run_once(
+                                conn, lambda job_id: runner.run(max_jobs=1, job_id=job_id, resume_stale=True).claimed,
+                            )
+                            # SQS is only a delivery hint. The durable row may
+                            # outlive an expired/DLQ'd message, or a delivery
+                            # may arrive while its scoped lock is unavailable.
+                            # Poll PostgreSQL after an empty/unclaimable hint so
+                            # eligible work cannot remain pending forever.
+                            if not count:
+                                count = runner.run(max_jobs=1).claimed
+                        claimed += count
                         if once:
                             break
-                        if not result.claimed:
+                        if not count:
                             if self.sleeper is None:
                                 self._stop.wait(self.settings.poll_interval)
                             else:
@@ -148,13 +175,16 @@ def _is_database_contention(exc: DatabaseError) -> bool:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the exclusive serial chess archive worker")
+    parser = argparse.ArgumentParser(description="Run a concurrent durable chess archive worker")
     parser.add_argument("--database-url", help="PostgreSQL URL; defaults to CHESS_CRAWL_DATABASE_URL")
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--heartbeat-interval", type=float, default=5.0)
     parser.add_argument("--max-retries", type=int, default=3, help="Durable retries after provider-level retries are exhausted")
     parser.add_argument("--retry-base", type=float, default=30.0, help="Initial durable retry delay in seconds")
     parser.add_argument("--retry-max", type=float, default=3600.0, help="Maximum exponential delay; provider delays remain floors")
+    parser.add_argument("--stage", choices=("all", "acquisition", "processing"), default="all")
+    parser.add_argument("--queue-url", default=os.getenv("CHESS_CRAWL_SQS_QUEUE_URL"),
+                        help="SQS queue URL; requires the s3 dependency extra")
     parser.add_argument("--once", action="store_true", help="Recover orphaned work, execute at most one due job, then exit")
     args = parser.parse_args(argv)
     try:
@@ -163,7 +193,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             heartbeat_max_age=max(20.0, 4 * args.heartbeat_interval), job_max_retries=args.max_retries,
             job_retry_base_s=args.retry_base, job_retry_max_s=args.retry_max,
         )
-        worker = Worker(database_url(args.database_url), settings=settings)
+        consumer = None
+        selected_queue = args.queue_url
+        if args.stage != "all":
+            stage_queue = os.getenv(f"CHESS_CRAWL_SQS_{args.stage.upper()}_QUEUE_URL")
+            if args.queue_url and not stage_queue:
+                raise ValueError("Stage-specific SQS workers require the corresponding stage queue URL")
+            selected_queue = stage_queue or selected_queue
+        if selected_queue:
+            from chess_crawl.jobs.dispatch import SqsConsumer, aws_sqs_client
+            consumer = SqsConsumer(aws_sqs_client(), selected_queue)
+        worker = Worker(database_url(args.database_url), settings=settings, stage=args.stage, queue_consumer=consumer,
+                        identity_path=os.getenv("CHESS_CRAWL_WORKER_IDENTITY_FILE"))
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
         for sig in previous:
             signal.signal(sig, lambda signum, frame: worker.request_stop())

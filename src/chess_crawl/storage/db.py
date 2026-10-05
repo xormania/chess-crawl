@@ -1,11 +1,12 @@
 """The single PostgreSQL connection, lifetime, and transaction boundary.
 
-Mutations retain the serial archive write contract through transaction advisory
-locks. Read views use repeatable-read snapshots without reserving that lock.
+Mutations share a schema gate and use scoped conflict locks. Executor writes
+verify job ownership; read views use repeatable-read snapshots.
 """
 from __future__ import annotations
 
 import os
+import hashlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import wraps
@@ -61,6 +62,9 @@ def _row_factory(cursor: psycopg.Cursor[Any]) -> Callable[[Sequence[Any]], Row]:
 
 class Connection(psycopg.Connection[Row]):
     _ownership_purposes: tuple[str, ...] = ()
+    _ownership_keys: tuple[int, ...] = ()
+    _job_fence: tuple[int, str] | None = None
+    _defer_normalization: bool = False
 
     @property
     def in_transaction(self) -> bool:
@@ -229,12 +233,90 @@ def transaction(conn: Connection, *, write: bool = True) -> Iterator[Connection]
             for purpose in set(conn._ownership_purposes):
                 if not owns_session_lock(conn, purpose):
                     raise ExecutorLeaseLost("Database executor ownership was lost")
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_WRITE_LOCK,))
+            for key in conn._ownership_keys:
+                if not owns_lock_key(conn, key):
+                    raise ExecutorLeaseLost("Database job ownership was lost")
+            # Ordinary writes share the schema gate. Only migrations take its
+            # exclusive form; independent jobs no longer serialize all writes.
+            conn.execute("SELECT pg_advisory_xact_lock_shared(%s)", (_WRITE_LOCK,))
+            if conn._job_fence is not None and not nested:
+                job_id, token = conn._job_fence
+                owner = conn.execute(
+                    """SELECT id FROM discovery_jobs WHERE id=%s AND state='in_progress'
+                         AND ownership_token=%s AND owner_backend_pid=pg_backend_pid() FOR SHARE""",
+                    (job_id, token),
+                ).fetchone()
+                if owner is None:
+                    raise ExecutorLeaseLost("Database job fencing token was lost")
         yield conn
 
 
 def atomic(operation: Callable[Concatenate[Connection, _P], _T]) -> Callable[Concatenate[Connection, _P], _T]:
     return _transactional(operation, write=True)
+
+
+def operation_lock(conn: Connection, namespace: str, identity: str | int, *, shared: bool = False) -> None:
+    """Serialize a conflicting logical resource, inside a write transaction."""
+    if not conn.in_transaction:
+        raise ValueError("operation_lock requires an active transaction")
+    query = "SELECT pg_advisory_xact_lock_shared(%s)" if shared else "SELECT pg_advisory_xact_lock(%s)"
+    conn.execute(query, (lock_key(namespace, identity),))
+
+
+def operation_locks(conn: Connection, resources: Sequence[tuple[str, str | int]]) -> None:
+    """Acquire known logical resources in one deterministic deadlock order."""
+    if not conn.in_transaction:
+        raise ValueError("operation_locks requires an active transaction")
+    for key in sorted({lock_key(namespace, identity) for namespace, identity in resources}):
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
+
+
+def operation_lock_held(conn: Connection, namespace: str, identity: str | int, *, exclusive: bool) -> bool:
+    """Inspect this backend's already-held reconciliation gate without upgrading it."""
+    unsigned = lock_key(namespace, identity) & ((1 << 64) - 1)
+    return bool(require_row(conn.execute(
+        """SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
+             AND pid=pg_backend_pid() AND granted AND classid=%s AND objid=%s
+             AND objsubid=1 AND mode=%s)""",
+        (unsigned >> 32, unsigned & 0xFFFFFFFF, "ExclusiveLock" if exclusive else "ShareLock"),
+    ))[0])
+
+
+def lock_key(namespace: str, identity: str | int) -> int:
+    body = f"{namespace}\0{identity}".encode()
+    return int.from_bytes(hashlib.sha256(body).digest()[:8], "big", signed=True)
+
+
+def acquire_lock_key(conn: Connection, key: int, *, shared: bool = False) -> bool:
+    query = "SELECT pg_try_advisory_lock_shared(%s)" if shared else "SELECT pg_try_advisory_lock(%s)"
+    return bool(require_row(conn.execute(query, (key,)))[0])
+
+
+def owns_lock_key(conn: Connection, key: int) -> bool:
+    unsigned = key & ((1 << 64) - 1)
+    return bool(require_row(conn.execute(
+        """SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
+             AND pid=pg_backend_pid() AND granted AND classid=%s AND objid=%s AND objsubid=1)""",
+        (unsigned >> 32, unsigned & 0xFFFFFFFF),
+    ))[0])
+
+
+def release_lock_key(conn: Connection, key: int, *, shared: bool = False) -> None:
+    query = "SELECT pg_advisory_unlock_shared(%s)" if shared else "SELECT pg_advisory_unlock(%s)"
+    conn.execute(query, (key,))
+
+
+def migration_atomic(operation: Callable[Concatenate[Connection, _P], _T]) -> Callable[Concatenate[Connection, _P], _T]:
+    """DDL owns the exclusive schema gate before inspecting migration history."""
+    @wraps(operation)
+    def wrapped(conn: Connection, /, *args: _P.args, **kwargs: _P.kwargs) -> _T:
+        nested = conn.in_transaction
+        with conn.transaction():
+            if not nested:
+                conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_WRITE_LOCK,))
+            return operation(conn, *args, **kwargs)
+    return wrapped
 
 
 def consistent_read(operation: Callable[Concatenate[Connection, _P], _T]) -> Callable[Concatenate[Connection, _P], _T]:
@@ -258,8 +340,8 @@ def _session_key(purpose: str) -> int:
         raise ValueError("Unknown database ownership purpose") from None
 
 
-def acquire_session_lock(conn: Connection, purpose: str) -> bool:
-    return bool(require_row(conn.execute("SELECT pg_try_advisory_lock(%s)", (_session_key(purpose),)))[0])
+def acquire_session_lock(conn: Connection, purpose: str, *, shared: bool = False) -> bool:
+    return acquire_lock_key(conn, _session_key(purpose), shared=shared)
 
 
 def owns_session_lock(conn: Connection, purpose: str) -> bool:
@@ -272,5 +354,5 @@ def owns_session_lock(conn: Connection, purpose: str) -> bool:
     ))[0])
 
 
-def release_session_lock(conn: Connection, purpose: str) -> None:
-    conn.execute("SELECT pg_advisory_unlock(%s)", (_session_key(purpose),))
+def release_session_lock(conn: Connection, purpose: str, *, shared: bool = False) -> None:
+    release_lock_key(conn, _session_key(purpose), shared=shared)

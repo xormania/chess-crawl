@@ -10,12 +10,13 @@ from chess_crawl.normalize.codes import canonical_hash
 from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
 from chess_crawl.providers.base import NormalizedUser
-from chess_crawl.storage.db import Connection, transaction
+from chess_crawl.storage.db import Connection, operation_lock, transaction
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
-from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
+from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot, user_identity_transaction
 from chess_crawl.storage.player_profiles import (
     publish_verified_legacy_profile, quarantine_unowned_profile, record_alias, record_profile_observations,
     account_observation_times, captured_fetch_account, stats_account, stats_accounts, store_profile_facts, store_rating_records,
+    lock_capture_accounts,
 )
 
 
@@ -47,7 +48,13 @@ def normalize_user_payload(
     else:
         return None
 
-    with transaction(conn):
+    identity = (
+        transaction(conn) if raw.endpoint_type == "user_stats"
+        else user_identity_transaction(conn, raw.provider, user.display_username, user.provider_user_id)
+    )
+    with identity:
+        if raw.endpoint_type == "user_stats":
+            operation_lock(conn, "reconciliation-provider", raw.provider, shared=True)
         native_data = json.loads(raw.body)
         if not isinstance(native_data, dict):
             raise ValueError("user profiles and statistics must be JSON objects")
@@ -70,6 +77,10 @@ def normalize_user_payload(
                     conn, user.provider, user.display_username, raw_payload_id,
                     prefer_observed_identity=prefer_observed_identity,
                 ))
+            lock_capture_accounts(
+                conn, raw.provider, [int(account["id"]) for account in accounts if account is not None],
+                user.display_username,
+            )
         provider_user_ids = []
         for account in accounts:
             first_at, account_at = ((captured_at, captured_at) if captured_at is not None else (

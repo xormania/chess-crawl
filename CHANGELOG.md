@@ -7,12 +7,33 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Container health probes bind to the worker's own UUID and live local process,
+  so another healthy executor cannot hide an expired container heartbeat.
+- Concurrent durable workers with per-job session ownership and fencing,
+  independent provider acquisition and local processing stages, persistent
+  request/retry pacing, and aggregate worker liveness. Migration `0009` must
+  precede starting the new workers; stop old serial executors before upgrading.
+- Durable job dispatch outbox with optional SQS publication and consumption.
+  Duplicate deliveries reuse database job state; local polling remains available.
+- Checkpointed offline normalization upgrades with fixed source high-water marks
+  and workspace-scoped source selection; upgrades do not fetch provider data.
+- Resumable full-history, incremental, and explicit backfill acquisition with
+  durable resource coverage. Closed Chess.com monthly sources are reused and
+  parser upgrades replay their archived bodies locally. Lichess pagination
+  preserves millisecond boundaries and timestamp ties, with individual
+  follow-ups for unfinished games that complete after an incremental watermark.
+  Completed history watermarks remain monotonic; later full jobs reuse stored
+  history locally and request only newer ranges. Sealed monthly collection
+  adopts newer archived sources without downloading them again.
+  Proven finite and partially acquired Lichess intervals are subtracted from
+  later collection requests; missing gaps and oldest timestamp ties remain
+  explicit. Reused broad pages respect exact creation-time run selection.
+
 - Immutable gzip source archives with local filesystem and optional S3 adapters,
   verified original/encoded checksums, import evidence references, and resumable
   offline relocation of existing PostgreSQL payload bodies. Inline storage stays
   compatible by default; object-backed archives require backing up their objects
   alongside PostgreSQL. See [archive storage](docs/archive-storage.md).
-
 - Immutable game evidence revisions, queryable PGN move/variation trees,
   headers, comments, NAGs, provider metadata and lexical tokens. Precise clock
   and reported elapsed observations retain conflicting sources, malformed
@@ -22,7 +43,6 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   board interpretation. PGN exports can be reconstructed from the database.
   Recurring source bodies refresh the current revision and game metadata even
   when the same run already acquired the game and has exhausted its allowance.
-
 - Complete queryable provider profile/statistics facts, typed rating records,
   alias evidence, and observation history retaining recurring values and
   conditional refreshes. Migration `0008_player_resources` recovers retained
@@ -47,6 +67,7 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   attached to stable account identity across renames and username reuse.
 - Public resource requests omit configured OAuth credentials; private resource
   collection does not publish its timestamps in shared alias history.
+
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
   project's `.venv`; Docker Compose continues to own the application services.
@@ -78,6 +99,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   See [PostgreSQL operations](docs/postgresql-operations.md).
 
 ### Changed
+
+- Game normalization prepares PGN evidence outside write transactions, commits
+  each game's evidence and run attribution with its source checkpoint, and
+  resumes remaining items after interruption. Account reconciliation takes
+  exclusive provider ownership only for confirmed renames or placeholder merges.
 
 - Full CI and Devbox smoke now run after pushes to `master` and support manual
   runs. Push/manual checks validate the selected commit without PR merge-history
@@ -132,6 +158,17 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Public archive freshness uses successful fetches linked to public source
+  evidence, excluding private payloads and fetches with no captured source.
+
+- Standalone Chess.com conditional game observations refresh the current
+  revision, clocks, outcome, and participant facts when a previously retained
+  source becomes latest again, while preserving immutable evidence history.
+
+- Public Lichess game exports and history collection omit account OAuth tokens,
+  preventing token-only private game evidence from entering the public archive.
+  Explicit owned resources retain workspace-scoped OAuth access.
+
 - Archive relocation selects pending payloads through a partial ordered index
   and checks continuation without counting the entire remaining queue per batch.
   Its JSON result adds `has_more`; `remaining` is null while work remains unless
@@ -151,7 +188,6 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   keeping API/job mutations responsive during slow archive storage. Raw-response
   deduplication skips object I/O; callers owning outer transactions must prepare
   external objects beforehand so source references still roll back atomically.
-
 - Preserve unused native move data alongside PGN-derived tokens, including
   conflicting notation and nontext native values. Evidence parser v2 repairs
   previous omissions through local replay into a new immutable revision.
@@ -164,7 +200,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   results when a previously observed body becomes current again. Sparse omitted
   facts remain preserved; known live observations cannot retain a stale completed
   end time. The v5 game normalizer can repair existing facts by offline replay.
+- SQS workers poll durable database jobs after missing or unclaimable delivery
+  hints, preventing expired or dead-lettered messages from stranding runnable work.
 
+- Rejected offline upgrade identities preserve another job's progress; failure
+  reporting updates only the requesting job's provider and ownership scope.
 - Player resource/statistics parsing preserves the account and time bound to
   its acquisition across intervening renames, conditional responses, and local
   replay of bytes reused by multiple holders. Stable identity reconciliation
@@ -178,6 +218,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   public user lookups, listings, exports, and user totals also exclude those
   identities until public evidence exists, while authorized scoped reads retain them.
   Public identities with supplied zero dates or game observations remain visible.
+- Deferred normalization queues preserve the captured fetch identity through
+  worker resumes. New observations schedule a successor when older processing
+  is still running, so a source rejected as out of date cannot remain pending
+  without work. Private placeholder creation and multi-account replay retain
+  scoped identity locks while unrelated account writes proceed concurrently.
 
 - Failed Chess.com statistics requests retain request evidence without creating
   or refreshing a player account. Local Lichess profile replay also populates

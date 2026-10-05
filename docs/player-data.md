@@ -65,11 +65,12 @@ rather than guessing a reassignment from today's username.
 Failed statistics requests preserve their fetch/error evidence without creating
 an account, advancing its public dates, or attaching an observation without a body.
 
-The internal replay service accepts an optional successful fetch ID to interpret
-only that captured account occurrence after a delay. Without a fetch ID,
-explicit replay keeps its existing behavior of updating all retained bound
-accounts. The existing synchronous worker uses the fetch ID committed with its
-response when it invokes the profile or statistics parser.
+Deferred jobs retain the captured fetch ID in their durable parameters. A newer
+fetch of identical bytes queues a successor even while an older worker is
+running. Stored game collection uses the latest retained successful fetch ID
+for the same scheduling distinction. Worker retries keep the capture's bound
+owner and time; explicit offline replay without a fetch ID updates every
+retained bound account.
 
 Private resource requests resolve existing identities without changing their
 public display names or dates. A private-only target has null public identity

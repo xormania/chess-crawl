@@ -90,10 +90,13 @@ Database connections and transactions are consolidated in
 working in those areas.
 
 Use the shared transaction helper for mutations. Outermost writes explicitly
-use READ COMMITTED before acquiring the archive write lock; an externally owned
+use READ COMMITTED before acquiring the shared migration gate; an externally owned
 writable transaction at stronger isolation is rejected before mutation. Read
 views use REPEATABLE READ and remain read-only. Executor writes also verify
-session ownership at the transaction boundary.
+session locks and job fencing tokens at the transaction boundary. Migrations
+take the gate exclusively. Conflicting logical resources use `operation_lock`;
+independent writes do not take an archive-wide exclusive lock. See
+[execution and upgrades](docs/execution.md) for ownership and recovery.
 
 SQL statements live in `storage/` or `jobs/state.py`; the storage-boundary test
 checks this consolidation.

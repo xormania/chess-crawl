@@ -5,9 +5,14 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
 from psycopg.types.json import Jsonb
 
-from chess_crawl.storage.db import Connection, Row, atomic, require_row
+from chess_crawl.storage.db import (
+    Connection, Row, atomic, require_row, operation_lock, operation_locks, operation_lock_held, transaction,
+)
+from chess_crawl.providers.base import NormalizedGame
 from chess_crawl.storage.migrations import current_version
 from chess_crawl.storage.player_profiles import merge_player_evidence
 
@@ -18,6 +23,89 @@ class DatabaseSummary:
     migration_count: int
     table_count: int
     providers: tuple[str, ...]
+
+
+def user_identity_resources(provider: str, username: str, stable_id: str | None) -> list[tuple[str, str | int]]:
+    resources: list[tuple[str, str | int]] = [("account-name", f"{provider}/{username.strip().lower()}")]
+    if stable_id is not None:
+        resources.append(("account-id", f"{provider}/{stable_id}"))
+    return resources
+
+
+class _IdentityGateRetry(Exception):
+    """Restart before any mutation when a shared identity gate is insufficient."""
+
+
+def _identity_needs_reconciliation(conn: Connection, provider: str, username: str, stable_id: str | None) -> bool:
+    if stable_id is None:
+        return False
+    identified = conn.execute(
+        "SELECT id,username_normalized FROM provider_users WHERE provider=%s AND provider_user_id=%s",
+        (provider, stable_id),
+    ).fetchone()
+    return identified is not None and identified["username_normalized"] != username.strip().lower()
+
+
+@contextmanager
+def _reconciliation_transaction(
+    conn: Connection, provider: str, accounts: list[tuple[str, str | None]],
+    resources: list[tuple[str, str | int]], *, crawl_run_id: int | None = None,
+) -> Iterator[Connection]:
+    """Use an exclusive provider gate only for an actual certified rename/merge.
+
+    A savepoint releases our shared gate and account locks before escalation,
+    avoiding shared-to-exclusive upgrade deadlocks between unrelated profiles.
+    """
+    exclusive = operation_lock_held(conn, "reconciliation-provider", provider, exclusive=True)
+    while True:
+        try:
+            with transaction(conn):
+                operation_lock(conn, "reconciliation-provider", provider, shared=not exclusive)
+                if crawl_run_id is not None:
+                    operation_lock(conn, "run-game-budget", crawl_run_id)
+                operation_locks(conn, resources)
+                if not exclusive and any(_identity_needs_reconciliation(conn, provider, username, stable_id)
+                                         for username, stable_id in accounts):
+                    raise _IdentityGateRetry
+                yield conn
+            return
+        except _IdentityGateRetry:
+            if operation_lock_held(conn, "reconciliation-provider", provider, exclusive=False):
+                raise ValueError("Rename reconciliation requires the identity transaction before other provider locks") from None
+            exclusive = True
+
+
+def user_identity_transaction(
+    conn: Connection, provider: str, username: str, stable_id: str | None,
+):
+    return _reconciliation_transaction(conn, provider, [(username, stable_id)],
+                                       user_identity_resources(provider, username, stable_id))
+
+
+def game_identity_resources(
+    provider: str, game_id: str | None, canonical_url: str | None, content_hash: str,
+) -> list[tuple[str, str | int]]:
+    resources: list[tuple[str, str | int]] = [("game-content", content_hash)]
+    if game_id is not None:
+        resources.append(("game-id", f"{provider}/{game_id}"))
+    if canonical_url is not None:
+        resources.append(("game-url", canonical_url))
+    return resources
+
+
+def normalization_transaction(
+    conn: Connection, provider: str, games: list[NormalizedGame], *, crawl_run_id: int | None = None,
+):
+    """Lock only affected accounts/games, allowing disjoint same-provider work."""
+    resources: list[tuple[str, str | int]] = []
+    accounts: list[tuple[str, str | None]] = []
+    for game in games:
+        resources.extend(game_identity_resources(provider, game.provider_game_id, game.canonical_url, game.content_hash))
+        for participant in (game.white, game.black):
+            if participant.username_normalized:
+                accounts.append((participant.username_normalized, participant.provider_user_id))
+                resources.extend(user_identity_resources(provider, participant.username_normalized, participant.provider_user_id))
+    return _reconciliation_transaction(conn, provider, accounts, resources, crawl_run_id=crawl_run_id)
 
 
 def list_providers(conn: Connection) -> tuple[str, ...]:
@@ -54,6 +142,19 @@ def upsert_provider_user(
     profile_raw_payload_id: int | None = None,
 ) -> int:
     """Merge sparse observations; full profiles replace metadata in observation order."""
+    with user_identity_transaction(conn, provider, username, provider_user_id):
+        return _upsert_provider_user_locked(
+            conn, provider=provider, username=username, provider_user_id=provider_user_id,
+            display_username=display_username, account_status=account_status, title=title, now=now,
+            profile_raw_payload_id=profile_raw_payload_id,
+        )
+
+
+def _upsert_provider_user_locked(
+    conn: Connection, *, provider: str, username: str, provider_user_id: str | None,
+    display_username: str | None, account_status: str | None, title: str | None,
+    now: int | None, profile_raw_payload_id: int | None,
+) -> int:
     timestamp = int(time.time()) if now is None else now
     username_normalized = username.strip().lower()
     display = display_username or username
@@ -422,6 +523,8 @@ def upsert_game(
     replace_nullable_fields: frozenset[str] = frozenset(),
 ) -> int:
     """Merge sparse facts; explicitly supplied nullable facts replace older values."""
+    operation_lock(conn, "reconciliation-provider", provider, shared=True)
+    operation_locks(conn, game_identity_resources(provider, provider_game_id, canonical_url, content_hash))
     timestamp = now or int(time.time())
     existing = find_existing_game(conn, provider, provider_game_id, canonical_url, content_hash)
     if existing is None:

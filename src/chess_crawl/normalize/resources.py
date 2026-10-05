@@ -7,10 +7,10 @@ import time
 from datetime import date
 
 from chess_crawl.providers.resources import get_resource, resource_owner_scope
-from chess_crawl.storage.db import Connection, transaction
+from chess_crawl.storage.db import Connection, transaction, operation_lock
 from chess_crawl.storage.player_profiles import (
     account_observation_times, captured_fetch_account, record_alias, resolve_capture_account,
-    resource_account, resource_accounts, store_resource_snapshot,
+    resource_account, resource_accounts, store_resource_snapshot, lock_capture_accounts,
 )
 from chess_crawl.storage.raw import insert_source_record, payload_observed_at, read_raw_payload, update_raw_payload_status
 
@@ -46,6 +46,7 @@ def normalize_resource_payload(
             status = "partial"
             note = f"{len(issues)} uninterpreted rating history element(s): " + "; ".join(issues[:5])
     with transaction(conn):
+        operation_lock(conn, "reconciliation-provider", raw.provider, shared=True)
         observed_at = payload_observed_at(conn, raw_payload_id)
         captured_at = None
         if fetch_log_id is not None:
@@ -65,6 +66,7 @@ def normalize_resource_payload(
                     conn, provider=raw.provider, username=username, observed_at=observed_at, owner_scope=owner_scope,
                 )
             user_ids = [user_id]
+        lock_capture_accounts(conn, raw.provider, user_ids, username)
         snapshot_ids = []
         for user_id in user_ids:
             first_at, last_at = ((captured_at, captured_at) if captured_at is not None
