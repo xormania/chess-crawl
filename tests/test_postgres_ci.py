@@ -273,13 +273,14 @@ def _step(name: str) -> dict[str, str]:
     return properties
 
 
-def _selected(condition: str, offline: str, previous_success: bool) -> bool:
+def _selected(condition: str, offline: str, database: str, previous_success: bool) -> bool:
     # Evaluate the small GitHub expression subset used by these steps. Unknown
     # predicates are rejected rather than silently interpreted as a scoped skip.
     predicates = {predicate.strip() for predicate in condition.split("&&")}
-    assert predicates <= {"always()", "steps.scope.outputs.offline == 'true'"}
-    assert "steps.scope.outputs.offline == 'true'" in predicates
-    return offline == "true" and (previous_success or "always()" in predicates)
+    scope_predicates = {"steps.scope.outputs.offline == 'true'", "steps.scope.outputs.database == 'true'"}
+    assert scope_predicates <= predicates <= scope_predicates | {"always()"}
+    assert offline in {"true", "false"} and database in {"true", "false"}
+    return offline == database == "true" and (previous_success or "always()" in predicates)
 
 
 def _docker_executable(tmp_path: Path) -> tuple[Path, Path]:
@@ -303,9 +304,13 @@ def _docker_executable(tmp_path: Path) -> tuple[Path, Path]:
     return directory, tmp_path / "docker-events.jsonl"
 
 
-@pytest.mark.parametrize(("offline", "fail_start"), [("false", False), ("true", False), ("true", True)])
+@pytest.mark.parametrize(("offline", "database", "fail_start"), [
+    ("false", "false", False), ("false", "true", False),
+    ("true", "false", False), ("true", "false", True),
+    ("true", "true", False), ("true", "true", True),
+], ids=["docs", "offline-skip", "deployment", "deployment-no-start", "full", "failed-start-cleanup"])
 def test_workflow_runs_timed_database_lifecycle_only_for_selected_offline_checks(
-    tmp_path: Path, offline: str, fail_start: bool,
+    tmp_path: Path, offline: str, database: str, fail_start: bool,
 ) -> None:
     job = _offline_job()
     assert not re.search(r"^    services:", job, re.MULTILINE)
@@ -327,7 +332,7 @@ def test_workflow_runs_timed_database_lifecycle_only_for_selected_offline_checks
     succeeded = True
     results = []
     for step in (start, stop):
-        if not _selected(step["if"], offline, succeeded):
+        if not _selected(step["if"], offline, database, succeeded):
             continue
         result = subprocess.run(
             ["bash", "--noprofile", "--norc", "-e", "-c", step["run"]],
@@ -337,7 +342,7 @@ def test_workflow_runs_timed_database_lifecycle_only_for_selected_offline_checks
         succeeded = succeeded and result.returncode == 0
         assert PASSWORD not in result.stdout + result.stderr
 
-    if offline == "false":
+    if offline == "false" or database == "false":
         assert not results and not events.exists() and not evidence.exists()
         return
     assert len(results) == 2
@@ -354,3 +359,14 @@ def test_workflow_runs_timed_database_lifecycle_only_for_selected_offline_checks
     assert all(PASSWORD not in path.read_text() for path in evidence.glob("*.json"))
     commands = [json.loads(line) for line in recorded.splitlines()]
     assert commands[0][0] == "run" and commands[-1][0] == "rm"
+
+
+@pytest.mark.parametrize("condition", [
+    "steps.scope.outputs.offline == 'true'",
+    "steps.scope.outputs.database == 'true'",
+    "steps.scope.outputs.offline == 'true' && steps.scope.outputs.database == 'true' && unknown()",
+    "steps.scope.outputs.offline == 'true' || steps.scope.outputs.database == 'true'",
+])
+def test_lifecycle_condition_evaluator_rejects_unknown_or_incomplete_predicates(condition: str) -> None:
+    with pytest.raises(AssertionError):
+        _selected(condition, "true", "true", True)

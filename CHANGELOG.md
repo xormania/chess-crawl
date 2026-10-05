@@ -190,6 +190,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   one acquisition executor and one publisher per archive. Database integration
   tests run against real disposable PostgreSQL instances in both Python CI jobs.
 
+- CI runs Python deployment contracts for container-only changes, selects safe
+  leaf test modules for test-only changes with conservative full-suite fallbacks,
+  and reuses the pinned Devbox Nix toolchain cache while preserving all checks.
 - CI isolates deployment-only checks, overlaps image build/pull and polls
   startup health sooner without weakening readiness. It records stage timings,
   test durations and machine-readable performance evidence, with optional
