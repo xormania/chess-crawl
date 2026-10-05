@@ -279,6 +279,26 @@ def test_worker_recovers_orphans_once_and_preserves_cancelled_runs(
     assert Worker(database_url).run(once=True) == 0
 
 
+def test_sqs_worker_falls_back_to_durable_pending_work(
+    database_url: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EmptyQueue:
+        def run_once(self, conn, execute) -> int:
+            del conn, execute
+            return 0
+
+    monkeypatch.setattr(JobRunner, "_execute", lambda self, job: ExecutionOutcome("done", "fixture"))
+    with open_database(database_url, writable=True) as conn:
+        job_id = state.enqueue_job(
+            conn, provider="lichess", kind="normalize_payload", target="123",
+        ).job_id
+
+    assert Worker(database_url, queue_consumer=EmptyQueue()).run(once=True) == 1
+    with open_database(database_url) as conn:
+        job = state.get_job(conn, job_id)
+        assert job is not None and job.state == "done" and job.attempts == 1
+
+
 def test_snapshot_reflects_previous_completion_before_next_job(initialized_conn, monkeypatch) -> None:
     run_id, first = state.create_crawl_run_with_root_job(
         initialized_conn, provider="lichess", seed_spec="progress", params={},
