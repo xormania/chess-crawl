@@ -82,14 +82,17 @@ uv run python -m chess_crawl.jobs.worker --stage all
 
 Both modules accept `--queue-url` and `--once`. The SDK uses its default
 credential chain, including ECS task roles. Local polling does not require the
-SDK. SQS consumption requests one message with up to twenty seconds of long
-polling. The consumer inherits the configured queue visibility timeout without
-a per-receive override. Queue visibility is not a job lease; duplicate
+SDK. Workers first claim fair, stage-eligible PostgreSQL work. After a claim,
+they poll one hint without waiting to acknowledge completed/owned duplicates
+even during continuous database work. Only an idle worker requests up to twenty
+seconds of SQS long polling. The consumer inherits the configured queue visibility
+timeout without a per-receive override. Queue visibility is not a job lease; duplicate
 deliveries cannot claim an owned or completed job. Failed publication keeps its
 outbox entry for retry.
 A crash after send and before the outbox acknowledgement can deliver twice.
-Workers also poll PostgreSQL when a received hint cannot claim work or the queue
-is empty, so expired or dead-lettered hints do not strand pending jobs.
+Workers check PostgreSQL again after an idle long poll, so work that became due
+during the wait and expired or dead-lettered hints do not strand pending jobs.
+Each worker iteration performs one orphan recovery pass, including idle polls.
 
 The dispatcher sends only `job_id`. Pending continuations and delayed retries
 create new outbox entries in the same transaction as the job transition.
@@ -100,6 +103,38 @@ the deployment. Use all-stage workers on a shared queue. Stage-specific pools
 set both `CHESS_CRAWL_SQS_ACQUISITION_QUEUE_URL` and
 `CHESS_CRAWL_SQS_PROCESSING_QUEUE_URL` for the dispatcher, which routes durable
 jobs by kind. Each stage worker uses its matching queue environment variable.
+
+### Dispatch history retention
+
+Migration `0015` retires the previous undelivered hint in the same transaction as
+its job revision changes, including local execution without SQS. Hints currently
+locked by a publisher are skipped and reconciled by maintenance, so slow SQS
+publication cannot block the job transition. Current pending and delayed-retry
+hints remain eligible; delivered/superseded hints are history,
+not execution state. The migration adds lookup indexes and does not rewrite the
+existing backlog. Workers and dispatchers independently reconcile legacy hints
+and prune expired history during their normal loops, including idle loops.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `CHESS_CRAWL_DISPATCH_RETENTION_SECONDS` | `86400` | Keep delivered/superseded hint history for 24 hours. |
+| `CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS` | `60` | Minimum seconds between maintenance batches in each process. |
+| `CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE` | `256` | Maximum pending hints examined and maximum history rows deleted per batch (1–10,000). |
+
+Durations must be finite and positive. Each batch examines a bounded window of
+pending hints, retaining a cursor that wraps at the end, and skips locked rows.
+This also eventually repairs hints created before migration `0015`. Publication
+uses the same batch limit to inspect a bounded due-hint window before joining job
+state or taking row locks; obsolete members are retired in that transaction.
+A window with no publishable hint advances immediately to the next window,
+including when another publisher locks the entire window. Selection restarts at
+the oldest available hint after a send, and empty windows wrap the cursor.
+Neither publication nor maintenance reconciles the complete backlog per send. Configure the cleanup rate above
+the expected hint-history production rate: shorten the interval or increase the
+batch size for sustained high throughput or a large historical backlog. History
+can remain longer than the retention period while a backlog drains or when no
+worker/dispatcher is running. Cleanup never deletes an undelivered current
+pending/retry hint merely because it is old. Job state and evidence are retained.
 
 ## Offline normalization upgrades
 

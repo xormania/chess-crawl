@@ -277,7 +277,7 @@ def test_sqs_worker_falls_back_to_durable_pending_work(
     database_url: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class EmptyQueue:
-        def run_once(self, conn, execute) -> int:
+        def run_once(self, conn, execute, *, wait_seconds=None) -> int:
             del conn, execute
             return 0
 

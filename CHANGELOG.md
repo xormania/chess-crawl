@@ -51,6 +51,12 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   independent provider acquisition and local processing stages, persistent
   request/retry pacing, and aggregate worker liveness. Migration `0009` must
   precede starting the new workers; stop old serial executors before upgrading.
+- Queue-independent bounded outbox cleanup retains current pending/retry hints,
+  retires obsolete revisions transactionally, and prunes delivered/superseded
+  history after 24 hours by default. Workers drain fair PostgreSQL work before
+  idle SQS long polls and acknowledge duplicate hints without waiting. Apply
+  migration `0015`; see [execution settings](docs/execution.md#dispatch-history-retention)
+  for configurable retention and cleanup throughput.
 - Durable job dispatch outbox with optional SQS publication and consumption.
   Duplicate deliveries reuse database job state; local polling remains available.
 - Checkpointed offline normalization upgrades with fixed source high-water marks

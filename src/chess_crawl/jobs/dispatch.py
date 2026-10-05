@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import argparse
 import importlib
@@ -14,8 +15,42 @@ from typing import Any, Protocol, cast
 from chess_crawl.storage.db import Connection, transaction, connection, database_url
 from chess_crawl.jobs.models import PROCESSING_JOB_KINDS
 from chess_crawl.storage.execution import (
-    delivered_dispatch, failed_dispatch, job_dispatch_state, pending_dispatch,
+    delivered_dispatch, failed_dispatch, job_dispatch_state, pending_dispatch, maintain_dispatch, DispatchCursor,
 )
+
+
+class DispatchMaintenance:
+    """Bounded queue-independent housekeeping for optional delivery hints."""
+
+    def __init__(
+        self, *, retention_seconds: float = 86400, interval_seconds: float = 60,
+        batch_size: int = 256, clock: Callable[[], float] = time.time,
+    ) -> None:
+        if any(not math.isfinite(value) or value <= 0 for value in (retention_seconds, interval_seconds)):
+            raise ValueError("Dispatch retention and cleanup interval must be finite and positive")
+        if type(batch_size) is not int or not 1 <= batch_size <= 10000:
+            raise ValueError("Dispatch cleanup batch size must be between 1 and 10000")
+        self.retention_seconds, self.interval_seconds = retention_seconds, interval_seconds
+        self.batch_size, self.clock = batch_size, clock
+        self._next_cleanup = float("-inf")
+        self._after_id = 0
+
+    @classmethod
+    def from_env(cls, *, clock: Callable[[], float] = time.time) -> DispatchMaintenance:
+        return cls(
+            retention_seconds=float(os.getenv("CHESS_CRAWL_DISPATCH_RETENTION_SECONDS", "86400")),
+            interval_seconds=float(os.getenv("CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS", "60")),
+            batch_size=int(os.getenv("CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE", "256")), clock=clock,
+        )
+
+    def run_due(self, conn: Connection) -> None:
+        now = self.clock()
+        if now >= self._next_cleanup:
+            self._after_id = maintain_dispatch(
+                conn, now=now, retention_seconds=self.retention_seconds,
+                limit=self.batch_size, after_id=self._after_id,
+            )
+            self._next_cleanup = now + self.interval_seconds
 
 
 class SqsClient(Protocol):
@@ -41,12 +76,21 @@ class SqsDispatcher:
         self.client, self.queue_url, self.clock = client, queue_url, clock
         self.acquisition_queue_url = acquisition_queue_url
         self.processing_queue_url = processing_queue_url
+        self.maintenance = DispatchMaintenance.from_env(clock=lambda: self.clock())
+        self._dispatch_after: DispatchCursor | None = None
+        self.has_more = False
 
     def publish_one(self, conn: Connection) -> bool:
-        # Hold only this outbox row. A crash after send and before commit may
-        # redeliver; database job ownership makes that duplicate harmless.
+        self.maintenance.run_due(conn)
+        # A bounded window limits legacy-backlog work and skips publisher locks.
+        # A crash after send and before commit may redeliver; job ownership makes
+        # that duplicate harmless.
         with transaction(conn):
-            row = pending_dispatch(conn, now=self.clock())
+            row, cursor = pending_dispatch(
+                conn, now=self.clock(), limit=self.maintenance.batch_size, after=self._dispatch_after,
+            )
+            self._dispatch_after = cursor if row is None else None
+            self.has_more = row is None and cursor is not None
             if row is None:
                 return False
             try:
@@ -68,10 +112,15 @@ class SqsConsumer:
             raise ValueError("SQS wait_seconds must be between zero and twenty")
         self.client, self.queue_url, self.wait_seconds = client, queue_url, wait_seconds
 
-    def run_once(self, conn: Connection, execute: Callable[[int], int]) -> int:
+    def run_once(
+        self, conn: Connection, execute: Callable[[int], int], *, wait_seconds: int | None = None,
+    ) -> int:
+        wait = self.wait_seconds if wait_seconds is None else wait_seconds
+        if not 0 <= wait <= 20:
+            raise ValueError("SQS wait_seconds must be between zero and twenty")
         response = self.client.receive_message(
             QueueUrl=self.queue_url, MaxNumberOfMessages=1,
-            WaitTimeSeconds=self.wait_seconds,
+            WaitTimeSeconds=wait,
         )
         messages = response.get("Messages", [])
         if not messages:
@@ -115,9 +164,9 @@ def main() -> int:
         with connection(database_url(args.database_url), mode="rw") as conn:
             while not stop.is_set():
                 published = dispatcher.publish_one(conn)
-                if args.once:
+                if args.once and (published or not dispatcher.has_more):
                     break
-                if not published:
+                if not published and not dispatcher.has_more:
                     stop.wait(1)
     finally:
         for sig, handler in previous.items():

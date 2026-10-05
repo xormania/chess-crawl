@@ -759,21 +759,6 @@ def job_state_counts(conn: Connection, *, crawl_run_id: int | None = None) -> li
     )
 
 
-def job_kind_state_counts(conn: Connection, *, crawl_run_id: int | None = None) -> list[Row]:
-    return list(
-        conn.execute(
-            """
-            SELECT kind, state, depth, COUNT(*) AS count
-              FROM discovery_jobs
-             WHERE (%s::bigint IS NULL OR crawl_run_id = %s)
-             GROUP BY kind, state, depth
-             ORDER BY depth, kind COLLATE "C", state COLLATE "C"
-            """,
-            (crawl_run_id, crawl_run_id),
-        )
-    )
-
-
 def total_jobs_for_run(conn: Connection, crawl_run_id: int) -> int:
     return int(
         require_row(conn.execute(
