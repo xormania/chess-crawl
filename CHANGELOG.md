@@ -7,6 +7,22 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Immutable gzip source archives with local filesystem and optional S3 adapters,
+  verified original/encoded checksums, import evidence references, and resumable
+  offline relocation of existing PostgreSQL payload bodies. Inline storage stays
+  compatible by default; object-backed archives require backing up their objects
+  alongside PostgreSQL. See [archive storage](docs/archive-storage.md).
+
+- Immutable game evidence revisions, queryable PGN move/variation trees,
+  headers, comments, NAGs, provider metadata and lexical tokens. Precise clock
+  and reported elapsed observations retain conflicting sources, malformed
+  values, and decimal resolution. Migration 0006 preserves existing archives;
+  replay fills the new records locally. Standard chess supports legal replay;
+  Chess960/other variants retain notation and clocks with explicit unsupported
+  board interpretation. PGN exports can be reconstructed from the database.
+  Recurring source bodies refresh the current revision and game metadata even
+  when the same run already acquired the game and has exhausted its allowance.
+
 - Complete queryable provider profile/statistics facts, typed rating records,
   alias evidence, and observation history retaining recurring values and
   conditional refreshes. Migration `0008_player_resources` recovers retained
@@ -31,7 +47,6 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   attached to stable account identity across renames and username reuse.
 - Public resource requests omit configured OAuth credentials; private resource
   collection does not publish its timestamps in shared alias history.
-
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
   project's `.venv`; Docker Compose continues to own the application services.
@@ -116,6 +131,39 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   and contribution guides describing the current implementation.
 
 ### Fixed
+
+- Archive relocation selects pending payloads through a partial ordered index
+  and checks continuation without counting the entire remaining queue per batch.
+  Its JSON result adds `has_more`; `remaining` is null while work remains unless
+  `--count-remaining` explicitly requests an exact reporting scan.
+
+- Configured local archival requires an explicit absolute directory and rejects
+  missing, blank, or relative locations, preventing source-run processes from
+  silently selecting different archives based on their working directory.
+
+- Object reuse rechecks publication and readback before relocation releases an
+  inline backup, restoring missing objects and retaining inline evidence on
+  corruption. Archive settings currently apply to source-run clients and
+  operational helpers; the existing Compose stack continues inline storage.
+
+
+- Object publication and verification run before database write transactions,
+  keeping API/job mutations responsive during slow archive storage. Raw-response
+  deduplication skips object I/O; callers owning outer transactions must prepare
+  external objects beforehand so source references still roll back atomically.
+
+- Preserve unused native move data alongside PGN-derived tokens, including
+  conflicting notation and nontext native values. Evidence parser v2 repairs
+  previous omissions through local replay into a new immutable revision.
+
+- Read game revisions and reconstruct PGN from one complete database snapshot,
+  including when a concurrent writer replaces and removes an old unreferenced
+  version. Read/export helpers remain coherent inside READ COMMITTED callers
+  and preserve exact clock and derived-timing decimal strings.
+- Restore explicitly null current game times, opening facts, and participant
+  results when a previously observed body becomes current again. Sparse omitted
+  facts remain preserved; known live observations cannot retain a stale completed
+  end time. The v5 game normalizer can repair existing facts by offline replay.
 
 - Player resource/statistics parsing preserves the account and time bound to
   its acquisition across intervening renames, conditional responses, and local

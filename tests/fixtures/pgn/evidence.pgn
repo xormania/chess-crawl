@@ -1,0 +1,12 @@
+[Event "Evidence fixture"]
+[Site "https://lichess.org/evidence-fixture"]
+[White "Alice"]
+[Black "Bob"]
+[Result "*"]
+[TimeControl "40/7200:3600+30"]
+[UnfamiliarTag "preserved value"]
+
+{Before play} 1. e4 {[%clk 0:04:59.990] [%emt 0:00:00.010] [%eval 0.34,18] [%custom unusual value]} $1
+(1. d4 {Alternative} d5 (1... Nf6)) e5 {[%clk 0:00:00]} 2. Nf3 {[%clk broken]} Nc6
+;Keep this whole comment
+3. Bb5 a6 *

@@ -74,6 +74,7 @@ def parse_game(game: dict[str, Any]) -> NormalizedGame:
         opening_name=None,
         opening_ply=None,
         pgn=_str_or_none(game.get("pgn")),
+        source_data=game,
     )
 
 
