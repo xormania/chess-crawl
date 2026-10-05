@@ -2,15 +2,40 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from collections.abc import Iterable
 from decimal import Decimal
 from typing import Any
 
 from psycopg.types.json import Jsonb
 
 from chess_crawl.normalize.codes import canonical_hash
-from chess_crawl.normalize.game_evidence import EVIDENCE_VERSION, GameEvidence, MoveNode, parse_game_evidence
+from chess_crawl.normalize.game_evidence import EVIDENCE_VERSION, GameEvidence, MoveNode
 from chess_crawl.providers.base import NormalizedGame
 from chess_crawl.storage.db import Connection, atomic, consistent_read, require_row
+
+
+class EvidencePreparationRequired(Exception):
+    """A preflight revision vanished; retry with evidence parsed outside writes."""
+
+
+def _revision_hash(game: NormalizedGame) -> str:
+    return canonical_hash({"source": dict(game.source_data), "pgn": game.pgn,
+                           "game_hash": game.content_hash})
+
+
+def reusable_game_sources(
+    conn: Connection, raw_payload_id: int, games: Iterable[tuple[str, NormalizedGame]],
+) -> set[str]:
+    """Read a payload's reusable revisions once, including large monthly sources."""
+    hashes: dict[str, set[str]] = {}
+    for row in conn.execute(
+        """SELECT s.json_pointer,v.content_hash
+           FROM game_version_sources s JOIN game_versions v ON v.id = s.version_id
+           WHERE s.raw_payload_id = %s AND v.parser_version = %s""",
+        (raw_payload_id, EVIDENCE_VERSION),
+    ):
+        hashes.setdefault(row["json_pointer"], set()).add(row["content_hash"])
+    return {pointer for pointer, game in games if pointer in hashes and _revision_hash(game) in hashes[pointer]}
 
 
 @atomic
@@ -19,14 +44,15 @@ def store_game_evidence(
     json_pointer: str, fetched_at: int, evidence: GameEvidence | None = None,
 ) -> int:
     """Reuse an identical revision and retain every source association."""
-    revision_hash = canonical_hash({"source": dict(game.source_data), "pgn": game.pgn,
-                                    "game_hash": game.content_hash})
+    revision_hash = _revision_hash(game)
     row = conn.execute(
         "SELECT id FROM game_versions WHERE game_id = %s AND content_hash = %s AND parser_version = %s",
         (game_id, revision_hash, EVIDENCE_VERSION),
     ).fetchone()
     if row is None:
-        parsed = evidence or parse_game_evidence(game)
+        if evidence is None:
+            raise EvidencePreparationRequired("Game evidence must be prepared before persistence")
+        parsed = evidence
         row = require_row(conn.execute(
             """INSERT INTO game_versions(game_id,content_hash,parser_version,first_seen_at,
                    headers,header_items,source_metadata,move_text_origin,starting_fen,variant,parse_status,
@@ -127,16 +153,8 @@ def game_source_needs_refresh(conn: Connection, game_id: int, raw_payload_id: in
 @consistent_read
 def read_game_version(conn: Connection, game_id: int, version_id: int | None = None) -> dict[str, Any] | None:
     """Return one coherent revision belonging to this game; decimals stay exact."""
-    result = _read_game_version_snapshot(conn, game_id, version_id)
-    if result is not None:
-        result.pop("_pgn_tokens")
-    return result
-
-
-def _read_game_version_snapshot(
-    conn: Connection, game_id: int, version_id: int | None,
-) -> dict[str, Any] | None:
-    """One statement remains coherent even inside an inherited READ COMMITTED transaction."""
+    # One statement remains coherent in an inherited READ COMMITTED transaction.
+    # PGN lexical tokens are only read by the export path below.
     row = conn.execute(
         """SELECT v.*,
            COALESCE((SELECT jsonb_agg(to_jsonb(n) ORDER BY n.node_index)
@@ -148,9 +166,7 @@ def _read_game_version_snapshot(
                ORDER BY t.node_index,t.method_version)
              FROM game_derived_timings t WHERE t.version_id=v.id),'[]'::jsonb) AS derived_timings,
            COALESCE((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.raw_payload_id,s.json_pointer)
-             FROM game_version_sources s WHERE s.version_id=v.id),'[]'::jsonb) AS sources,
-           COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.token_index)
-             FROM game_pgn_tokens p WHERE p.version_id=v.id),'[]'::jsonb) AS _pgn_tokens
+             FROM game_version_sources s WHERE s.version_id=v.id),'[]'::jsonb) AS sources
            FROM game_versions v JOIN games g ON g.id = v.game_id
            WHERE g.id = %s AND v.id = COALESCE(%s,g.current_version_id)""",
         (game_id, version_id),
@@ -183,12 +199,21 @@ def export_game_version_pgn(
     syntax. Whitespace is normalized. Partial/unsupported exports need explicit
     permission so callers cannot confuse preserved notation with legal replay.
     """
-    revision = _read_game_version_snapshot(conn, game_id, version_id)
+    # Select status and lexical text together so a concurrent current-version
+    # switch/deletion cannot combine the status of one revision with another.
+    revision = conn.execute(
+        """SELECT v.parse_status,
+           COALESCE((SELECT jsonb_agg(jsonb_build_object('kind',p.kind,'token_text',p.token_text)
+               ORDER BY p.token_index) FROM game_pgn_tokens p WHERE p.version_id=v.id),'[]'::jsonb) AS tokens
+           FROM game_versions v JOIN games g ON g.id = v.game_id
+           WHERE g.id = %s AND v.id = COALESCE(%s,g.current_version_id)""",
+        (game_id, version_id),
+    ).fetchone()
     if revision is None:
         raise ValueError("Game evidence version does not exist")
     if revision["parse_status"] != "complete" and not allow_partial:
         raise ValueError("Game evidence is not completely interpreted; explicit partial export is required")
-    tokens = revision["_pgn_tokens"]
+    tokens = revision["tokens"]
     if not tokens:
         raise ValueError("Game move evidence is unavailable")
     output = []

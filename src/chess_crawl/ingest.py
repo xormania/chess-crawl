@@ -20,13 +20,13 @@ from chess_crawl.normalize.resources import normalize_resource_payload
 from chess_crawl.providers.base import FetchAttempt, RawRecord
 from chess_crawl.providers.registry import ProviderSession, get_provider_info
 from chess_crawl.storage.db import Connection, transaction
-from chess_crawl.storage.archives import PreparedArchiveObject
 from chess_crawl.storage.raw import (
     insert_fetch_log, latest_raw_payload_id, latest_validators,
     store_raw_payload, update_raw_payload_status,
     prepare_raw_payload,
     latest_job_payload,
     raw_payload_metadata,
+    PreparedRawPayload,
 )
 from chess_crawl.storage.repository import insert_error, user_identity_transaction
 from chess_crawl.storage.player_profiles import record_resource_attempt, resolve_capture_account
@@ -429,7 +429,7 @@ def _persist_response(
     job_id: int | None,
     crawl_run_id: int | None,
 ) -> tuple[int | None, int | None]:
-    prepared_object = (
+    prepared_payload = (
         prepare_raw_payload(conn, record) if record.body is not None and record.http_status == 200 else None
     )
     # Commit the response and its attempt/error evidence together, before
@@ -440,7 +440,7 @@ def _persist_response(
         else transaction(conn)
     )
     with identity:
-        raw_payload_id = _store_raw_if_present(conn, record, prepared_object=prepared_object)
+        raw_payload_id = _store_raw_if_present(conn, record, prepared_payload=prepared_payload)
         if record.http_status == 304:
             raw_payload_id = latest_raw_payload_id(conn, record.canonical_source_key)
         provider_user_id = None
@@ -473,11 +473,11 @@ def _persist_response(
 
 
 def _store_raw_if_present(
-    conn: Connection, record: RawRecord, *, prepared_object: PreparedArchiveObject | None = None,
+    conn: Connection, record: RawRecord, *, prepared_payload: PreparedRawPayload | None = None,
 ) -> int | None:
     if record.body is None or record.http_status != 200:
         return None
-    return store_raw_payload(conn, record, prepared_object=prepared_object)
+    return store_raw_payload(conn, record, prepared_payload=prepared_payload)
 
 
 def _log_attempts(

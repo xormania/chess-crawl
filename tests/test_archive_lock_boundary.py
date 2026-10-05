@@ -180,7 +180,7 @@ def test_prepared_object_cannot_be_attached_to_different_body(initialized_conn, 
         body=b"other bytes", request_url="https://lichess.org/api/user/other",
     )
     with pytest.raises(ValueError, match="does not match"):
-        store_raw_payload(initialized_conn, different, prepared_object=published)
+        store_raw_payload(initialized_conn, different, prepared_payload=published)
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 0
 
 
