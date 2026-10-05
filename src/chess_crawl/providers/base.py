@@ -111,6 +111,7 @@ class NormalizedGame:
     opening_name: str | None = None
     opening_ply: int | None = None
     pgn: str | None = None
+    source_data: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

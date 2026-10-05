@@ -12,6 +12,16 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   offline relocation of existing PostgreSQL payload bodies. Inline storage stays
   compatible by default; object-backed archives require backing up their objects
   alongside PostgreSQL. See [archive storage](docs/archive-storage.md).
+
+- Immutable game evidence revisions, queryable PGN move/variation trees,
+  headers, comments, NAGs, provider metadata and lexical tokens. Precise clock
+  and reported elapsed observations retain conflicting sources, malformed
+  values, and decimal resolution. Migration 0006 preserves existing archives;
+  replay fills the new records locally. Standard chess supports legal replay;
+  Chess960/other variants retain notation and clocks with explicit unsupported
+  board interpretation. PGN exports can be reconstructed from the database.
+  Recurring source bodies refresh the current revision and game metadata even
+  when the same run already acquired the game and has exhausted its allowance.
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
   project's `.venv`; Docker Compose continues to own the application services.
@@ -116,6 +126,19 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   keeping API/job mutations responsive during slow archive storage. Raw-response
   deduplication skips object I/O; callers owning outer transactions must prepare
   external objects beforehand so source references still roll back atomically.
+
+- Preserve unused native move data alongside PGN-derived tokens, including
+  conflicting notation and nontext native values. Evidence parser v2 repairs
+  previous omissions through local replay into a new immutable revision.
+
+- Read game revisions and reconstruct PGN from one complete database snapshot,
+  including when a concurrent writer replaces and removes an old unreferenced
+  version. Read/export helpers remain coherent inside READ COMMITTED callers
+  and preserve exact clock and derived-timing decimal strings.
+- Restore explicitly null current game times, opening facts, and participant
+  results when a previously observed body becomes current again. Sparse omitted
+  facts remain preserved; known live observations cannot retain a stale completed
+  end time. The v5 game normalizer can repair existing facts by offline replay.
 
 - Reconcile renamed accounts with username-only placeholders while preserving
   their game, snapshot, source, and discovery history. Conflicting stable

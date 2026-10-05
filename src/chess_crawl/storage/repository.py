@@ -403,7 +403,9 @@ def upsert_game(
     opening_ply: int | None = None,
     tournament_ref: str | None = None,
     now: int | None = None,
+    replace_nullable_fields: frozenset[str] = frozenset(),
 ) -> int:
+    """Merge sparse facts; explicitly supplied nullable facts replace older values."""
     timestamp = now or int(time.time())
     existing = find_existing_game(conn, provider, provider_game_id, canonical_url, content_hash)
     if existing is None:
@@ -455,12 +457,12 @@ def upsert_game(
                outcome = %s,
                is_live = %s,
                status_raw = %s,
-               created_at = COALESCE(%s, created_at),
-               ended_at = COALESCE(%s, ended_at),
+               created_at = CASE WHEN %s THEN %s ELSE COALESCE(%s, created_at) END,
+               ended_at = CASE WHEN %s THEN %s ELSE COALESCE(%s, ended_at) END,
                ply_count = COALESCE(%s, ply_count),
-               eco = COALESCE(%s, eco),
-               opening_name = COALESCE(%s, opening_name),
-               opening_ply = COALESCE(%s, opening_ply),
+               eco = CASE WHEN %s THEN %s ELSE COALESCE(%s, eco) END,
+               opening_name = CASE WHEN %s THEN %s ELSE COALESCE(%s, opening_name) END,
+               opening_ply = CASE WHEN %s THEN %s ELSE COALESCE(%s, opening_ply) END,
                tournament_ref = COALESCE(%s, tournament_ref)
          WHERE id = %s
         """,
@@ -474,11 +476,21 @@ def upsert_game(
             outcome,
             int(is_live),
             status_raw,
+            "created_at" in replace_nullable_fields,
             created_at,
+            created_at,
+            "ended_at" in replace_nullable_fields,
+            ended_at,
             ended_at,
             ply_count,
+            "eco" in replace_nullable_fields,
             eco,
+            eco,
+            "opening_name" in replace_nullable_fields,
             opening_name,
+            opening_name,
+            "opening_ply" in replace_nullable_fields,
+            opening_ply,
             opening_ply,
             tournament_ref,
             int(existing["id"]),
@@ -498,6 +510,7 @@ def upsert_game_participant(
     result_raw: str | None = None,
     is_winner: bool | None = None,
     is_ai: bool = False,
+    replace_result_raw: bool = False,
 ) -> int:
     conn.execute(
         """
@@ -509,7 +522,8 @@ def upsert_game_participant(
         ON CONFLICT(game_id, color) DO UPDATE SET
           provider_user_id = COALESCE(excluded.provider_user_id, game_participants.provider_user_id),
           username_normalized = COALESCE(excluded.username_normalized, game_participants.username_normalized),
-          result_raw = COALESCE(excluded.result_raw, game_participants.result_raw),
+          result_raw = CASE WHEN %s THEN excluded.result_raw
+                            ELSE COALESCE(excluded.result_raw, game_participants.result_raw) END,
           is_winner = excluded.is_winner,
           is_ai = excluded.is_ai
         """,
@@ -521,6 +535,7 @@ def upsert_game_participant(
             result_raw,
             None if is_winner is None else int(is_winner),
             int(is_ai),
+            replace_result_raw,
         ),
     )
     row = conn.execute(
