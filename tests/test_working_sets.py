@@ -1,6 +1,8 @@
 """Workspace isolation and immutable analytical inputs against PostgreSQL."""
 from __future__ import annotations
 
+from helpers.api import TOKENS, client
+
 import json
 from typing import Any
 
@@ -11,12 +13,7 @@ from chess_crawl.api import create_app
 from chess_crawl.storage.db import Connection, connection, require_row, transaction
 from support import seed_game
 
-TOKENS = {"alpha": "alpha-secret", "beta": "beta-secret"}
 IMPORT: dict[str,Any] = {"provider":"lichess", "username":"alice", "since":1704067200, "until":1706745600, "max_games":10}
-
-
-def client(database_url: str, workspace: str = "alpha") -> TestClient:
-    return TestClient(create_app(database_url, workspace_tokens=TOKENS), headers={"Authorization":f"Bearer {TOKENS[workspace]}"})
 
 
 def version(conn: Connection, game_id: int, revision: str) -> int:

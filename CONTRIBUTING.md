@@ -136,8 +136,12 @@ PostgreSQL endpoint, and ignore inherited `CHESS_CRAWL_*` application settings.
 The explicit `CHESS_CRAWL_TEST_DATABASE_URL` and separate test password configure
 only the disposable database fixtures. Tests that exercise configuration set their own values
 with `monkeypatch`. Shared database
-fixtures live in `tests/conftest.py`; reusable builders live in
-`tests/support.py`. Organize new cases by behavior, reuse these helpers, and
+fixtures live in `tests/conftest.py`; reusable builders and clients live in
+`tests/support.py` and `tests/helpers/`. Ordinary database cases clone a session-local
+migrated template into a separate database for every test. The template rejects
+connections once prepared; each test database and the template are removed after
+use. Migration and uninitialized-database cases still start from `template0`.
+Organize new cases by behavior, reuse these helpers, and
 use fake clocks for retry and pacing tests. Do not make the default suite
 depend on live providers. Live tests must use `@pytest.mark.live` and are skipped
 unless explicitly enabled with `--run-live`. Only opted-in live tests may use
@@ -273,10 +277,10 @@ using both `--max-regression-percent` and `--min-regression-seconds`; keep gener
 limits and separate cold and warm measurements. Missing or incompatible samples
 must not be treated as proof of a speedup.
 
-A focused integration/workflow run and a coverage run are available when useful:
+A focused API/worker integration run and a coverage run are available when useful:
 
 ```bash
-uv run python -m pytest -q -m "workflow and not live and not slow"
+uv run python -m pytest -q tests/test_api.py tests/test_worker.py
 uv run python -m pytest -q --cov=chess_crawl --cov-report=term-missing
 ```
 

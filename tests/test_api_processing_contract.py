@@ -11,8 +11,8 @@ from chess_crawl.ingest import installed_parser_target
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.providers import registry
 from chess_crawl.storage.db import connection,require_row,transaction
-from test_player_resources import _profile,_resource
-from test_working_sets import client
+from helpers.players import _profile,_resource
+from helpers.api import client
 
 
 def test_explicit_manifest_upgrade_is_offline_and_only_replays_owned_sources(database_url:str,monkeypatch:pytest.MonkeyPatch) -> None:

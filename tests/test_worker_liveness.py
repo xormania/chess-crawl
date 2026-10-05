@@ -1,7 +1,9 @@
 """Finite worker history and current liveness with long-lived archive state."""
 from __future__ import annotations
 
-import time
+from types import SimpleNamespace
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -86,9 +88,10 @@ def test_worker_lifecycle_cleans_terminal_history_without_waiting_for_status_rea
         assert state.worker_status(conn, now=200003)["active_workers"] == 140
 
 
-def test_http_worker_snapshot_exposes_its_limit_and_full_active_count(database_url: str) -> None:
+def test_http_worker_snapshot_exposes_its_limit_and_full_active_count(database_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(state, "time", SimpleNamespace(time=lambda: 200000))
     with connection(database_url, mode='rw') as conn:
-        _seed_history(conn, now=time.time())
+        _seed_history(conn, now=200000)
         indexes = {row[0] for row in conn.execute("SELECT indexname FROM pg_indexes WHERE tablename='executor_heartbeats'")}
         assert {'ix_executor_heartbeat_recent','ix_executor_heartbeat_live','ix_executor_heartbeat_terminal'} <= indexes
     with TestClient(create_app(database_url, 'worker-status-test')) as client:

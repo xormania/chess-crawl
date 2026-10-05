@@ -70,7 +70,7 @@ def test_partial_variant_export_requires_explicit_opt_in(database_url: str) -> N
 def test_profiles_history_ratings_and_scoped_resources_are_queryable_without_fetching(
     database_url:str,monkeypatch:pytest.MonkeyPatch,
 ) -> None:
-    from test_player_resources import _profile,_resource
+    from helpers.players import _profile,_resource
     with connection(database_url,mode="rw") as conn:
         _profile(conn,{"id":"alice","username":"Alice","title":"FM","profile":{"bio":"Chess960 enthusiast"}},at=100)
         _profile(conn,{"id":"alice","username":"Alice","title":"IM","profile":{"bio":"Chess960 enthusiast"}},at=200)
