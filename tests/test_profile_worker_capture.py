@@ -70,7 +70,7 @@ def test_delayed_local_replay_can_target_its_exact_capture(initialized_conn, kin
     assert [row["observed_at"] for row in new] == [400]
 
 
-def test_existing_api_users_accepts_null_public_identity_dates(database_url):
+def test_existing_api_users_hide_private_only_identities_until_public_evidence(database_url):
     with connection(database_url, mode="rw") as conn:
         ingest.fetch_user_resource(
             conn, "lichess", "PrivateOnly", "teams", owner_scope="alpha",
@@ -80,8 +80,22 @@ def test_existing_api_users_accepts_null_public_identity_dates(database_url):
     with TestClient(create_app(database_url, "test-api-token"), headers={"Authorization": "Bearer test-api-token"}) as client:
         response = client.get("/v1/users", params={"provider": "lichess"})
         assert response.status_code == 200
-        users = response.json()["items"]
-        assert len(users) == 1
-        assert users[0]["first_seen_at"] is None and users[0]["updated_at"] is None
+        assert response.json()["items"] == [] and response.json()["total"] == 0
+        assert client.get("/v1/users/lichess/PrivateOnly/opponents").status_code == 404
+        summary = client.get("/v1/summary").json()
+        assert summary["raw_payloads"] == 0
+        assert next(row["users"] for row in summary["providers"] if row["provider"] == "lichess") == 0
+        with connection(database_url, mode="rw") as conn:
+            scoped = player_profile(conn, "lichess", "PrivateOnly", owner_scope="alpha")
+            assert scoped is not None and len(scoped["resources"]) == 1
+            user_id = scoped["id"]
+            _profile(conn, {"id": "privateonly", "username": "PrivateOnly"}, at=200)
+            assert player_profile(conn, "lichess", "PrivateOnly", owner_scope="alpha")["id"] == user_id
+        response = client.get("/v1/users", params={"provider": "lichess"})
+        assert response.status_code == 200 and response.json()["total"] == 1
+        assert [(row["id"], row["username_normalized"], row["first_seen_at"], row["updated_at"])
+                for row in response.json()["items"]] == [(user_id, "privateonly", 200, 200)]
         assert "private-team" not in json.dumps(response.json())
-        assert client.get("/v1/summary").json()["raw_payloads"] == 0
+        summary = client.get("/v1/summary").json()
+        assert next(row["users"] for row in summary["providers"] if row["provider"] == "lichess") == 1
+        assert client.get("/v1/users/lichess/PrivateOnly/opponents").status_code == 200
