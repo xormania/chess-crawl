@@ -76,10 +76,12 @@ Private resource requests resolve existing identities without changing their
 public display names or dates. A private-only target has null public identity
 `first_seen_at` and `updated_at`; its real collection times remain in scoped
 resource observations and acquisition records. A profile lookup outside that
-scope returns no profile until public evidence exists. Public users and exports
-retain null dates if they include the identity placeholder. Later public profile,
-statistics, resource, or game observations populate the public dates. An explicit public
-zero timestamp remains distinct from null.
+scope returns no profile until public evidence exists. Public user lookups,
+listings, exports, and user totals exclude identities whose public dates are
+both null. Later public profile, statistics, resource, or game observations
+populate those dates on the same identity and make it publicly visible. An
+explicit public zero timestamp remains distinct from null. Scoped rich-profile
+reads continue to include the requesting workspace's private evidence.
 
 The public Lichess profile collector explicitly requests profile, trophies,
 performance ranks, and public FIDE ID. It omits OAuth authorization because

@@ -276,7 +276,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   Internal delayed replay can target its exact successful fetch occurrence;
   the existing worker retains the same captured identity through parsing.
   Private-only profile lookups remain invisible outside the owning scope;
-  public identities with supplied zero dates or game observations remain visible.
+  public user lookups, listings, exports, and user totals also exclude those
+  identities until public evidence exists, while authorized scoped reads retain them.
+  Public identities with supplied zero dates or game observations remain visible.
 
 - Failed Chess.com statistics requests retain request evidence without creating
   or refreshing a player account. Local Lichess profile replay also populates

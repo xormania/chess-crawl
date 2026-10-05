@@ -191,8 +191,12 @@ spaces. Provider and username are normalized before comparing requests.
 
 | Route | Required JSON fields |
 | --- | --- |
-| `POST /v1/imports` | `provider`, `username`, `since`, `until`, `max_games` |
-| `POST /v1/crawls` | Import fields plus `max_depth`, `max_users`, `max_jobs` |
+| `POST /v1/imports` | `provider`, `username`, `max_games`; `since` and `until` are also required in default `bounded` mode |
+| `POST /v1/crawls` | `provider`, `username`, `since`, `until`, `max_games`, `max_depth`, `max_users`, `max_jobs` |
+
+For `full`, `incremental`, and `backfill` imports, `since` and `until` are optional;
+durable run and workspace budgets bound their total work. The configured date-span
+limit applies to bounded imports and crawls.
 
 `provider` is `chess.com` or `lichess`. Timestamps are integer **Unix seconds**.
 The interval includes `since` and excludes `until`: `[since, until)`.
