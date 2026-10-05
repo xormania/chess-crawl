@@ -38,6 +38,7 @@ provider APIs and coordinated acquisition with concurrent durable processing.
 | HTTP routes, authentication, event payloads, and recovery behavior | [Backend and integration guide](docs/backend.md) |
 | Database migrations, readiness, and compressed backup relocation | [Operations guide](docs/cli.md) |
 | A pinned toolchain for contributing from Linux, WSL2, or Apple Silicon macOS | [Devbox development setup](CONTRIBUTING.md#development-setup) |
+| Private AWS deployment definitions, source-object storage, and cost evidence | [AWS foundation](docs/aws-deployment.md) |
 
 Both paths start with a source checkout:
 
@@ -73,7 +74,9 @@ directory. API requests use its `api_token`; Mercure subscriptions use a separat
 subscriber JWT. See the [backend guide](docs/backend.md) for authenticated
 examples, provider contact configuration, and application integration.
 
-The archive persists in a Docker named volume. `docker compose stop` and
+The archive persists in PostgreSQL and compressed objects in the `archive_data`
+named volume. Back up both; see [archive storage](docs/archive-storage.md).
+`docker compose stop` and
 `docker compose down` retain it; `docker compose down --volumes` deletes it.
 Use `docker compose exec api chess-crawl-admin info` to inspect the same database. PostgreSQL is available only inside the Compose network by
 default; its port is not published on the host.

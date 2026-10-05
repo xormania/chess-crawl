@@ -71,17 +71,34 @@ def test_default_compose_retains_private_bundled_database_and_migration_gate(
             assert services[name]["depends_on"]["init"] == {"condition": "service_completed_successfully", "required": True}
 
 
+@pytest.mark.parametrize("external", [False, True])
+def test_compose_scratch_is_private_and_owned_by_the_runtime_user(
+    render_compose: Callable[..., subprocess.CompletedProcess[str]], external: bool,
+) -> None:
+    services = parsed(render_compose(external=external))["services"]
+    for name in (*PYTHON_SERVICES, "archive-init"):
+        assert services[name]["tmpfs"] == ["/tmp:uid=10001,gid=10001,mode=0700"]
+        assert services[name]["read_only"] is True
+    for name in PYTHON_SERVICES:
+        assert services[name]["user"] == "10001:10001"
+
+
 def test_external_compose_excludes_unused_database_and_preserves_migration_and_hub_gates(
     render_compose: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
     services = parsed(render_compose(external=True))["services"]
-    assert set(services) == {"init", "api", "worker", "events", "mercure"}
+    assert set(services) == {"archive-init", "init", "api", "worker", "events", "mercure"}
     assert services["init"].get("depends_on", {}) == {}
     for name in ("api", "worker", "events"):
         assert services[name]["depends_on"]["init"] == {"condition": "service_completed_successfully", "required": True}
     assert services["events"]["depends_on"]["mercure"] == {"condition": "service_healthy", "required": True}
     assert "mercure" not in services["api"]["depends_on"]
     assert "mercure" not in services["worker"]["depends_on"]
+    for name in ("api", "worker"):
+        assert services[name]["depends_on"]["archive-init"] == {
+            "condition": "service_completed_successfully", "required": True,
+        }
+    assert services["archive-init"].get("depends_on", {}) == {}
 
 
 def test_external_compose_enforces_verified_transport_and_mounts_ca_on_every_database_client(

@@ -5,8 +5,9 @@ import gzip
 import io
 import time
 from dataclasses import dataclass
+from chess_crawl.costs import UsageCounters, measure_workload
 
-from chess_crawl.storage.db import Connection, atomic, require_row
+from chess_crawl.storage.db import Connection, Row, atomic, require_row
 from chess_crawl.storage.object_store import ObjectStore, digest, object_key, store_for_reference
 
 
@@ -23,17 +24,26 @@ class PreparedArchiveObject:
 
 
 def prepare_archive_object(body: bytes, *, store: ObjectStore) -> PreparedArchiveObject:
+    with measure_workload("archive_write") as usage:
+        prepared = _prepare_archive_object(body, store=store, usage=usage)
+    return prepared
+
+
+def _prepare_archive_object(body: bytes, *, store: ObjectStore, usage: UsageCounters) -> PreparedArchiveObject:
     body_hash = digest(body)
     encoded = gzip.compress(body, mtime=0)
     stored_hash = digest(encoded)
     # Address encoded bytes, so a future compressor upgrade can coexist without
     # replacing the earlier representation of identical original source bytes.
     key = object_key(stored_hash)
+    usage.add(source_bytes=len(body), stored_bytes=len(encoded))
     # Object writes cannot participate in PostgreSQL transactions. Publish and
     # verify first; rollback may leave a reusable orphan, never a dangling FK.
     store.put(key, encoded)
+    usage.add(objects_written=1)
     if digest(store.read(key, expected_size=len(encoded))) != stored_hash:
         raise ValueError("Published archive object checksum mismatch")
+    usage.add(objects_read=1)
     return PreparedArchiveObject(
         store.backend, store.location, key, body_hash, stored_hash, len(body), len(encoded),
     )
@@ -96,7 +106,14 @@ def read_archive_object(conn: Connection, archive_object_id: int, *, store: Obje
     selected = store or store_for_reference(row["backend"], row["location"])
     if selected.backend != row["backend"] or selected.location != row["location"]:
         raise ValueError("Archive adapter does not match the stored reference")
+    with measure_workload("archive_read") as usage:
+        body = _read_archive_body(row, selected, usage)
+    return body
+
+
+def _read_archive_body(row: Row, selected: ObjectStore, usage: UsageCounters) -> bytes:
     encoded = selected.read(row["object_key"], expected_size=int(row["stored_bytes"]))
+    usage.add(objects_read=1, stored_bytes=len(encoded))
     if digest(encoded) != row["stored_hash"]:
         raise ValueError("Archive object checksum mismatch")
     # Bound decompression by the recorded original size, including corrupt gzip.
@@ -104,6 +121,7 @@ def read_archive_object(conn: Connection, archive_object_id: int, *, store: Obje
         body = stream.read(int(row["body_bytes"]) + 1)
     if len(body) != row["body_bytes"] or digest(body) != row["body_hash"]:
         raise ValueError("Archive body checksum or size mismatch")
+    usage.add(source_bytes=len(body))
     return body
 
 

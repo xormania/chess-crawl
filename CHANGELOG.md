@@ -7,6 +7,18 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- A bounded, cursor-based operational transfer for referenced local/S3 archive
+  objects. It verifies and copies exact compressed evidence before atomically
+  repointing raw/import references, retains source backups and IDs, resumes after
+  failures, and supports the local-to-AWS data lift without provider refetches.
+  See [archive storage](docs/archive-storage.md#transferring-existing-external-objects).
+- A private AWS CloudFormation foundation for encrypted PostgreSQL 18, retained
+  versioned S3 archives, SQS/DLQ, and zero-task ECS startup with separate migration
+  credentials. Includes verified RDS trust roots, restricted runtime-role
+  bootstrap, anonymous workload telemetry, and explicit-price cost estimates.
+  AWS provisioning and production release verification remain operator steps.
+  See [AWS deployment](docs/aws-deployment.md).
+
 - Trusted `chess-crawl-admin budgets show` and `budgets resume` aliases preserve
   spent work, retained checkpoints, and completed jobs while extending ceilings.
 
@@ -131,6 +143,18 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Changed
 
+- Fargate tasks use supported task-scoped ephemeral scratch volumes instead of
+  unsupported tmpfs settings, with image-defined UID 10001 write permissions.
+  Local Compose sets the same private application ownership explicitly on its
+  tmpfs so worker process identity files and API export spools remain writable.
+  Worker task health verifies its own process incarnation and database heartbeat.
+  The ALB idle timeout leaves headroom for bounded API export preparation.
+- Local Compose stores compressed source objects in a persistent archive volume,
+  initialized for UID 10001 before workers start and mounted read-only in the API.
+  Runtime images include the optional AWS SDK and pinned RDS CA bundle. Back up
+  the object volume alongside PostgreSQL; historical inline bodies remain readable
+  and move only through the offline archive relocation helper.
+
 - Game normalization prepares PGN evidence outside write transactions, commits
   each game's evidence and run attribution with its source checkpoint, and
   resumes remaining items after interruption. Account reconciliation takes
@@ -239,8 +263,8 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 - Object reuse rechecks publication and readback before relocation releases an
   inline backup, restoring missing objects and retaining inline evidence on
-  corruption. Archive settings currently apply to source-run clients and
-  operational helpers; the existing Compose stack continues inline storage.
+  corruption. Compose uses a persistent shared local object volume; source-run
+  clients and operational helpers require an explicit archive location.
 
 
 - Object publication and verification run before database write transactions,

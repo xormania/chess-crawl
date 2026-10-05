@@ -8,7 +8,8 @@ x-python: &python
   user: "10001:10001"
   read_only: true
   tmpfs:
-    - /tmp
+    # A tmpfs hides the image directory's owner; set it for the runtime user.
+    - /tmp:uid=10001,gid=10001,mode=0700
   cap_drop:
     - ALL
   security_opt:
@@ -20,6 +21,8 @@ x-database-env: &database-env
   # This explicit policy trusts only the bundled Compose service hostname.
   CHESS_CRAWL_DATABASE_TRANSPORT: local
   CHESS_CRAWL_DATABASE_TRUSTED_HOST: postgres
+  CHESS_CRAWL_ARCHIVE_BACKEND: local
+  CHESS_CRAWL_ARCHIVE_DIRECTORY: /var/lib/chess-crawl/archive
 
 x-budget-env: &budget-env
   CHESS_CRAWL_JOB_MAX_GAMES: ${CHESS_CRAWL_JOB_MAX_GAMES:-100000}
@@ -35,6 +38,15 @@ x-budget-env: &budget-env
   CHESS_CRAWL_WORKSPACE_MAX_QUEUED_JOBS: ${CHESS_CRAWL_WORKSPACE_MAX_QUEUED_JOBS:-32}
 
 services:
+  archive-init:
+    <<: *python
+    user: "0:0"
+    cap_add: [CHOWN, FOWNER]
+    command: ["python", "/app/docker/archive_init.py"]
+    volumes:
+      - archive_data:/var/lib/chess-crawl/archive
+    restart: "no"
+
   postgres:
     image: postgres:18
     restart: unless-stopped
@@ -72,6 +84,10 @@ services:
     depends_on:
       init:
         condition: service_completed_successfully
+      archive-init:
+        condition: service_completed_successfully
+    volumes:
+      - archive_data:/var/lib/chess-crawl/archive:ro
     environment:
       <<: [*database-env, *budget-env]
       CHESS_CRAWL_API_TOKEN_FILE: /run/secrets/api_token
@@ -100,6 +116,10 @@ services:
     depends_on:
       init:
         condition: service_completed_successfully
+      archive-init:
+        condition: service_completed_successfully
+    volumes:
+      - archive_data:/var/lib/chess-crawl/archive
     command:
       - python
       - -m
@@ -179,6 +199,7 @@ services:
       start_period: 10s
 
 volumes:
+  archive_data:
   postgres_data:
   mercure_data:
   mercure_config:

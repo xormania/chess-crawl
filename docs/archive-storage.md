@@ -11,13 +11,11 @@ to send new bodies to object storage. The schema migration adds references witho
 moving any bytes or contacting AWS. Reads use the location saved with each object,
 independently of the backend configured for new writes.
 
-These settings currently configure source-run clients and operational helpers.
-The checked-in standalone Compose stack continues using inline database storage:
-it does not forward `CHESS_CRAWL_ARCHIVE_*` settings, provide a shared local
-archive mount, or install the optional S3 SDK. Setting these variables in its
-`.env` alone has no effect. An external backend in containers requires deployment
-configuration that forwards the settings and provides either a durable archive
-mount at the same path in every service or the S3 extra and AWS credentials.
+The standalone Compose stack uses local object storage on a persistent named
+volume, initialized for the application UID before API and workers start. The API
+mount is read-only; workers publish objects. Source-run clients must configure an
+explicit absolute directory themselves. See [AWS and local deployment](aws-deployment.md)
+for the shared mount and private S3 deployment definitions.
 
 ## Local storage
 
@@ -119,10 +117,43 @@ scoped import reader when exposing imports.
 Back up and restore PostgreSQL and its referenced object archive together.
 Restoring PostgreSQL alone is insufficient after relocation. Restored local
 objects must remain at the recorded absolute directory; moving directories or
-changing buckets requires a separate verified relocation implementation. This
-helper currently moves inline bodies only and intentionally performs no garbage
-collection. Inspect missing/corrupt objects against the last independent backup.
+changing buckets uses the separate verified external transfer helper below.
+The inline relocation helper intentionally performs no garbage collection. Inspect missing/corrupt objects against the last independent backup.
 When another source or import reuses the same object bytes, publication and
 readback are verified again outside the database transaction. A registered row
 alone cannot justify discarding an inline backup. Missing objects can be restored
 from that backup; conflicting or corrupt objects fail without releasing it.
+
+
+## Transferring existing external objects
+
+Select the new local directory or S3 bucket with the normal archive configuration,
+then run an operator process that can read the locations recorded in PostgreSQL:
+
+```bash
+python -m chess_crawl.storage.archive_transfer --batch-size 100 --after-object-id 0
+```
+
+The result reports `objects_moved`, `raw_payloads_moved`, `imports_moved`,
+`has_more`, and `next_after_object_id`. Continue using the returned cursor.
+Each source object is checksum-verified outside database transactions; its exact
+encoded bytes are published immutably and read back at the destination. A short
+transaction locks/rechecks the source metadata and repoints all current matching
+raw/import references together. Source objects and metadata are retained;
+normalization state, payload IDs, import ownership and game provenance do not
+change. This is an archive-wide administrator operation, not a tenant endpoint.
+
+Failures preserve references for the incomplete object. Earlier objects remain
+committed. A database rollback may leave a reusable target object, which is never
+automatically deleted. Missing/corrupt source evidence fails before publication;
+restore it from independent backups before retrying. Destination corruption fails
+without replacing it or discarding source evidence.
+
+Pause acquisition/import writers for a definitive transfer. References created
+during upload join the cutover, and references concurrently moved elsewhere are
+not overwritten. A cursor can miss new references behind it, so make a final
+zero-cursor sweep while writers are paused. Batches bound object count, not total
+bytes or the number of shared references. The raw/import object indexes support
+reference rechecks; counts returned describe completed work without an exact
+remaining-count scan. See [AWS deployment](aws-deployment.md) for local-to-S3
+credentials, container mounts, backup/restore and restart steps.

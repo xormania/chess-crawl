@@ -16,6 +16,7 @@ from chess_crawl.storage.archives import (
     PreparedArchiveObject, prepare_or_reuse_archive_object, read_archive_object, register_archive_object,
 )
 from chess_crawl.storage.object_store import ObjectStore, configured_store
+from chess_crawl.costs import UsageSample, emit_sample
 
 
 COMPRESSION_THRESHOLD_BYTES = 4096
@@ -95,6 +96,7 @@ def prepare_raw_payload(
     """Avoid duplicate object I/O and publish new bodies before taking write locks."""
     body_hash = _body_hash(record)
     if _existing_payload(conn, record, body_hash) is not None:
+        emit_sample(UsageSample("source_dedupe", 0, 0, deduplicated=1))
         return None
     external_expected = store is not None or os.getenv("CHESS_CRAWL_ARCHIVE_BACKEND", "database") != "database"
     if external_expected and conn.in_transaction:

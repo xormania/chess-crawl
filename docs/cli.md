@@ -72,6 +72,26 @@ when publication and integrity verification succeed. Keep the external objects
 alongside PostgreSQL when backing up and restoring. The
 [archive storage guide](archive-storage.md) covers integrity and failure behavior.
 
+## Transfer existing external objects
+
+Relocation handles bodies still stored inline in PostgreSQL. To move already
+referenced local/S3 objects to a different configured backend or location, use
+the dedicated operator helper from an environment that can read both stores:
+
+```bash
+uv run python -m chess_crawl.storage.archive_transfer --batch-size 100 --after-object-id 0
+```
+
+Save the returned `next_after_object_id` for the next batch and repeat while
+`has_more` is true. The helper verifies original and compressed bytes, then
+atomically replaces raw/import references without changing their IDs, owners,
+or metadata. It retains old objects and makes no chess-provider requests.
+Pause acquisition/import writers and finish with a sweep starting at cursor zero
+before taking the destination backup. This maintenance helper crosses workspace
+boundaries and is not a tenant API. See [archive transfer](archive-storage.md#transferring-existing-external-objects)
+and [moving a local dataset to AWS](aws-deployment.md#moving-a-local-dataset-to-aws)
+for configuration, verification, and backup steps.
+
 ## Product and process responsibilities
 
 | Responsibility | Entry point |
@@ -86,6 +106,7 @@ alongside PostgreSQL when backing up and restoring. The
 | Private event publication | `python -m chess_crawl.events.publisher` |
 | Schema migration, readiness, backup relocation | `chess-crawl-admin migrate`, `info`, `relocate` |
 | Trusted budget inspection and checkpoint resume | `chess-crawl-admin budgets show`, `budgets resume` |
+| Verified transfer of existing external objects | `python -m chess_crawl.storage.archive_transfer` |
 
 All product reads reuse stored data. HTTP submissions enqueue durable work;
 workers perform acquisition separately. API tokens determine workspace access.
