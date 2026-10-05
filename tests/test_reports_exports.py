@@ -68,6 +68,10 @@ def test_public_archive_metrics_exclude_workspace_scoped_payloads(initialized_co
         conn, provider="lichess", url="https://example/private", endpoint_type="user_resource",
         attempted_at=210, status_code=200, raw_payload_id=private_raw_id,
     )
+    insert_fetch_log(
+        conn, provider="lichess", url="https://example/unassigned", endpoint_type="user_profile",
+        attempted_at=310, status_code=200, raw_payload_id=None,
+    )
 
     assert summary_report(conn)["raw_payloads"] == 1
     assert archive_freshness(conn) == {

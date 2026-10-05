@@ -193,6 +193,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Public archive freshness uses successful fetches linked to public source
+  evidence, excluding private payloads and fetches with no captured source.
+
 - Standalone Chess.com conditional game observations refresh the current
   revision, clocks, outcome, and participant facts when a previously retained
   source becomes latest again, while preserving immutable evidence history.
