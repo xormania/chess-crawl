@@ -13,8 +13,8 @@ from chess_crawl.jobs import state
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.storage.db import connection
 from chess_crawl.storage.player_profiles import player_profile, profile_history, resource_history
-from test_capture_identity import _record
-from test_player_resources import _config, _profile
+from helpers.players import _record
+from helpers.players import _config, _profile
 
 
 @pytest.mark.parametrize("status", [200, 304])

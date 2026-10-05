@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from uuid import uuid4
+from typing import cast
 
 import psycopg
 import pytest
 from psycopg import sql
 
 from chess_crawl.storage.cloud_bootstrap import bootstrap_runtime_role, main
-from chess_crawl.storage.db import connection, require_row
+from chess_crawl.storage.db import Connection, connection, require_row
 
 
 def test_runtime_role_is_idempotent_and_has_data_privileges_only(database_url) -> None:
@@ -49,9 +50,13 @@ def test_runtime_role_is_idempotent_and_has_data_privileges_only(database_url) -
 
 
 @pytest.mark.parametrize("username", ["postgres", "public", "pg_runtime", "bad;role", "A", ""])
-def test_bootstrap_rejects_unsafe_or_reserved_role_names(initialized_conn, username) -> None:
+def test_bootstrap_rejects_unsafe_or_reserved_role_names(username) -> None:
+    class NoDatabase:
+        def __getattr__(self, name):
+            pytest.fail(f"Invalid role names must be rejected before database access: {name}")
+
     with pytest.raises(ValueError):
-        bootstrap_runtime_role(initialized_conn, username=username, password="x" * 32)
+        bootstrap_runtime_role(cast(Connection, NoDatabase()), username=username, password="x" * 32)
 
 
 def test_bootstrap_rejects_short_password_and_migration_role(initialized_conn) -> None:

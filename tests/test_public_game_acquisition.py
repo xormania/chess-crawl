@@ -11,7 +11,7 @@ from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.providers.lichess.client import LichessClient
 from chess_crawl.storage.db import connection, require_row
 from chess_crawl.storage.raw import read_raw_payload
-from test_working_sets import client
+from helpers.api import client
 
 
 TOKEN = "account-private-token"

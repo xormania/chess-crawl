@@ -121,19 +121,6 @@ def record_profile_observations(
 
 
 @atomic
-def refresh_profile_observations(conn: Connection, raw_payload_id: int) -> None:
-    """Record a conditional refresh without reparsing or inventing a new body."""
-    snapshot = conn.execute(
-        """SELECT us.id, us.provider_user_id FROM user_snapshots us
-           LEFT JOIN source_records s ON s.entity_type = 'user_snapshot' AND s.entity_id = us.id
-           WHERE s.raw_payload_id = %s OR us.raw_payload_id = %s ORDER BY us.id DESC LIMIT 1""",
-        (raw_payload_id, raw_payload_id),
-    ).fetchone()
-    if snapshot is not None:
-        record_profile_observations(conn, int(snapshot["provider_user_id"]), int(snapshot["id"]), raw_payload_id)
-
-
-@atomic
 def store_resource_snapshot(
     conn: Connection, *, user_id: int, resource_key: str, parameters: dict[str, Any],
     native_data: object, coverage_status: str, coverage_note: str | None, parser_version: str,
@@ -196,16 +183,6 @@ def record_resource_observations(
                  (SELECT provider_user_id FROM user_resource_snapshots WHERE id = excluded.snapshot_id)""",
         (snapshot_id, raw_payload_id, fetch_log_id),
     )
-
-
-@atomic
-def refresh_resource_observations(conn: Connection, raw_payload_id: int) -> None:
-    snapshot = conn.execute(
-        "SELECT snapshot_id FROM user_resource_observations WHERE raw_payload_id = %s ORDER BY id DESC LIMIT 1",
-        (raw_payload_id,),
-    ).fetchone()
-    if snapshot is not None:
-        record_resource_observations(conn, int(snapshot["snapshot_id"]), raw_payload_id)
 
 
 @atomic

@@ -12,7 +12,10 @@ from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
 from chess_crawl.storage.acquisition import associate_run_game, run_game_bounds, run_has_game
 from chess_crawl.storage.db import Connection, transaction
-from chess_crawl.storage.game_evidence import game_source_needs_refresh, is_latest_game_source, store_game_evidence
+from chess_crawl.storage.game_evidence import (
+    EvidencePreparationRequired, game_source_needs_refresh, reusable_game_sources,
+    is_latest_game_source, store_game_evidence,
+)
 from chess_crawl.storage.normalization import begin_normalization, processed_items, mark_item, finish_normalization
 from chess_crawl.storage.raw import insert_source_record, read_raw_payload, update_raw_payload_status
 from chess_crawl.storage.repository import (
@@ -70,6 +73,7 @@ def normalize_games_payload(
     pointers = [f"/games/{index}" if raw.endpoint_type == "monthly_archive"
                 else "" if raw.endpoint_type == "game" else f"/{index}"
                 for index in range(len(games))]
+    retained_evidence = reusable_game_sources(conn, raw_payload_id, zip(pointers, games))
     for pointer, game in zip(pointers, games):
         # A conservative read avoids interpreting games the persisted window
         # or exhausted selection cannot admit. The write rechecks these bounds.
@@ -83,8 +87,9 @@ def normalize_games_payload(
             if (crawl_run_id is None or existing is None
                     or not run_has_game(conn, crawl_run_id, int(existing["id"]))):
                 continue
-        # Parsing occurs outside writes. Checkpointed background/run replay can
-        # reuse its immutable evidence; explicit standalone replay repairs data.
+        # Checkpoints may skip completed writes. Independently, fresh observations
+        # can reuse immutable evidence while still refreshing mutable game facts.
+        # Explicit standalone replay continues to perform those repair writes.
         reusable = pointer in checkpoints and (crawl_run_id is not None or conn._job_fence is not None)
         if conn._work_budget_id is not None:
             from chess_crawl.storage.work_budgets import reserve_normalization
@@ -92,38 +97,46 @@ def normalize_games_payload(
                 conn, conn._work_budget_id,
                 game_key=game.provider + "/" + (game.provider_game_id or game.canonical_url or game.content_hash),
             )
-        prepared = None if reusable else parse_game_evidence(game)
-        with normalization_transaction(conn, raw.provider, [game], crawl_run_id=crawl_run_id):
-            bounds = (run_game_bounds(conn, crawl_run_id, provider=raw.provider, requested=remaining_request)
-                      if crawl_run_id is not None else None)
-            existing = find_existing_game(conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash)
-            existing_id = int(existing["id"]) if existing is not None else None
-            already_acquired = (crawl_run_id is not None and existing_id is not None
-                                and run_has_game(conn, crawl_run_id, existing_id))
-            if bounds is not None and not bounds.includes(game.end_time, created_ms=game.source_data.get("createdAt")):
-                continue
-            allowance = bounds.remaining if bounds is not None else remaining_request
-            if not already_acquired and allowance == 0:
-                continue
-            refresh_current = (reusable and existing_id is not None
-                               and game_source_needs_refresh(conn, existing_id, raw_payload_id))
-            if reusable and not refresh_current:
-                game_id = checkpoints[pointer]
-            else:
-                game_id = _normalize_game(
-                    conn, game, raw_payload_id=raw_payload_id, endpoint_type=raw.endpoint_type,
-                    source_key=raw.canonical_source_key, json_pointer=pointer,
-                    fetched_at=raw.fetched_at, evidence=prepared,
-                )
-            mark_item(conn, raw_payload_id, PARSER_VERSION, pointer, observed, game_id)
-            checkpoints[pointer] = game_id
-            if already_acquired:
-                continue
-            if crawl_run_id is not None:
-                associate_run_game(conn, crawl_run_id, game_id)
-            game_ids.append(game_id)
-            if remaining_request is not None:
-                remaining_request -= 1
+        evidence_exists = reusable or pointer in retained_evidence
+        prepared = None if evidence_exists else parse_game_evidence(game)
+        while True:
+            try:
+                with normalization_transaction(conn, raw.provider, [game], crawl_run_id=crawl_run_id):
+                    bounds = (run_game_bounds(conn, crawl_run_id, provider=raw.provider, requested=remaining_request)
+                              if crawl_run_id is not None else None)
+                    existing = find_existing_game(conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash)
+                    existing_id = int(existing["id"]) if existing is not None else None
+                    already_acquired = (crawl_run_id is not None and existing_id is not None
+                                        and run_has_game(conn, crawl_run_id, existing_id))
+                    if bounds is not None and not bounds.includes(game.end_time, created_ms=game.source_data.get("createdAt")):
+                        break
+                    allowance = bounds.remaining if bounds is not None else remaining_request
+                    if not already_acquired and allowance == 0:
+                        break
+                    refresh_current = (reusable and existing_id is not None
+                                       and game_source_needs_refresh(conn, existing_id, raw_payload_id))
+                    if reusable and not refresh_current:
+                        game_id = checkpoints[pointer]
+                    else:
+                        game_id = _normalize_game(
+                            conn, game, raw_payload_id=raw_payload_id, endpoint_type=raw.endpoint_type,
+                            source_key=raw.canonical_source_key, json_pointer=pointer,
+                            fetched_at=raw.fetched_at, evidence=prepared,
+                        )
+                    mark_item(conn, raw_payload_id, PARSER_VERSION, pointer, observed, game_id)
+                    checkpoints[pointer] = game_id
+                    if already_acquired:
+                        break
+                    if crawl_run_id is not None:
+                        associate_run_game(conn, crawl_run_id, game_id)
+                    game_ids.append(game_id)
+                    if remaining_request is not None:
+                        remaining_request -= 1
+                break
+            except EvidencePreparationRequired:
+                # The immutable revision disappeared after the preflight read.
+                # Its failed writes rolled back; parse before reacquiring locks.
+                prepared = parse_game_evidence(game)
     with transaction(conn):
         if finish_normalization(conn, raw_payload_id, PARSER_VERSION, observed, pointers):
             update_raw_payload_status(conn, raw_payload_id, status="parsed" if games else "skipped",

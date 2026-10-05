@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from helpers.api import FULL, budget_client as client
+
 import threading
 import json
 import time
 from typing import Any
 
-from fastapi.testclient import TestClient
 import httpx
 import pytest
 
@@ -18,15 +19,7 @@ from chess_crawl.jobs.budget import BudgetPolicy
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.providers import registry
 from chess_crawl.storage.db import connection, require_row, transaction
-from test_working_sets import TOKENS
-
-
-FULL = {"provider":"lichess", "username":"alice", "max_games":2, "collection_mode":"full"}
-
-
-def client(archive: str, policy: BudgetPolicy, owner: str = "alpha") -> TestClient:
-    return TestClient(create_app(archive, workspace_tokens=TOKENS, budget_policy=policy),
-                      headers={"Authorization":f"Bearer {TOKENS[owner]}"})
+from helpers.api import TOKENS
 
 
 def test_policy_is_server_only_and_pinned_for_run_children(database_url: str) -> None:

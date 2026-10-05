@@ -23,6 +23,15 @@ COMPRESSION_THRESHOLD_BYTES = 4096
 
 
 @dataclass(frozen=True)
+class PreparedRawPayload:
+    """Validated source and optional publication, including inline/deduplicated sources."""
+    record: RawRecord
+    body_hash: str
+    archive_object: PreparedArchiveObject | None
+    external_expected: bool
+
+
+@dataclass(frozen=True)
 class StoredRawPayload:
     id: int
     provider: str
@@ -53,17 +62,25 @@ def store_raw_payload(
     normalization_status: str = "pending",
     store: ObjectStore | None = None,
     prepared_object: PreparedArchiveObject | None = None,
+    prepared_payload: PreparedRawPayload | None = None,
 ) -> int:
-    external_expected = store is not None or os.getenv("CHESS_CRAWL_ARCHIVE_BACKEND", "database") != "database"
-    if prepared_object is None:
-        prepared_object = prepare_raw_payload(conn, record, store=store)
+    if prepared_payload is not None:
+        if prepared_object is not None or prepared_payload.record is not record:
+            raise ValueError("Prepared raw payload does not match the supplied record")
+    elif prepared_object is not None:
+        prepared_payload = PreparedRawPayload(record, _body_hash(record), prepared_object, True)
+    else:
+        prepared_payload = prepare_raw_payload(conn, record, store=store)
+    prepared_object = prepared_payload.archive_object
+    if store is not None and not prepared_payload.external_expected:
+        raise ValueError("Prepared raw payload does not match the selected store")
     if prepared_object is not None and store is not None and (
         prepared_object.backend, prepared_object.location,
     ) != (store.backend, store.location):
         raise ValueError("Prepared archive object does not match the selected store")
     return _store_raw_payload(
         conn, record, parser_version=parser_version, normalization_status=normalization_status,
-        prepared_object=prepared_object, external_expected=external_expected,
+        prepared=prepared_payload,
     )
 
 
@@ -92,40 +109,44 @@ def _existing_payload(conn: Connection, record: RawRecord, body_hash: str) -> in
 
 def prepare_raw_payload(
     conn: Connection, record: RawRecord, *, store: ObjectStore | None = None,
-) -> PreparedArchiveObject | None:
+) -> PreparedRawPayload:
     """Avoid duplicate object I/O and publish new bodies before taking write locks."""
     body_hash = _body_hash(record)
-    if _existing_payload(conn, record, body_hash) is not None:
-        emit_sample(UsageSample("source_dedupe", 0, 0, deduplicated=1))
-        return None
     external_expected = store is not None or os.getenv("CHESS_CRAWL_ARCHIVE_BACKEND", "database") != "database"
+    if not external_expected:
+        # Inline sources need no speculative lookup: the locked write checks once.
+        return PreparedRawPayload(record, body_hash, None, False)
+    if _existing_payload(conn, record, body_hash) is not None:
+        return PreparedRawPayload(record, body_hash, None, external_expected)
     if external_expected and conn.in_transaction:
         raise ValueError("External archive writes in a transaction require a prepared object")
     selected_store = store or configured_store()
     if selected_store is None:
-        return None
+        return PreparedRawPayload(record, body_hash, None, False)
     if record.body is None:
         raise ValueError("raw payload storage requires body bytes")
-    return prepare_or_reuse_archive_object(conn, record.body, store=selected_store)
+    published = prepare_or_reuse_archive_object(conn, record.body, store=selected_store)
+    return PreparedRawPayload(record, body_hash, published, True)
 
 
 @atomic
 def _store_raw_payload(
     conn: Connection, record: RawRecord, *, parser_version: str | None,
-    normalization_status: str, prepared_object: PreparedArchiveObject | None,
-    external_expected: bool,
+    normalization_status: str, prepared: PreparedRawPayload,
 ) -> int:
     operation_lock(conn, "raw-source", record.canonical_source_key)
-    body_hash = _body_hash(record)
+    body_hash = prepared.body_hash
     existing = _existing_payload(conn, record, body_hash)
     if existing is not None:
+        emit_sample(UsageSample("source_dedupe", 0, 0, deduplicated=1))
         return existing
     if record.body is None:
         raise ValueError("raw payload storage requires body bytes")
 
     archive_id = None
+    prepared_object = prepared.archive_object
     if prepared_object is None:
-        if external_expected:
+        if prepared.external_expected:
             raise ValueError("External archive writes in a transaction require a prepared object")
         compression, inline_body = _encode_body(record.body)
         stored_body: bytes | None = inline_body

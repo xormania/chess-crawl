@@ -29,7 +29,6 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
-    "workflow: CLI workflow tests that exercise multiple commands and PostgreSQL state",
     "integration: offline integration tests that cross package boundaries",
     "slow: slow tests excluded from default CI unless explicitly selected",
     "live: requires explicit --run-live to use provider APIs or network access; skipped by default",

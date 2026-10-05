@@ -137,8 +137,12 @@ PostgreSQL endpoint, and ignore inherited `CHESS_CRAWL_*` application settings.
 The explicit `CHESS_CRAWL_TEST_DATABASE_URL` and separate test password configure
 only the disposable database fixtures. Tests that exercise configuration set their own values
 with `monkeypatch`. Shared database
-fixtures live in `tests/conftest.py`; reusable builders live in
-`tests/support.py`. Organize new cases by behavior, reuse these helpers, and
+fixtures live in `tests/conftest.py`; reusable builders and clients live in
+`tests/support.py` and `tests/helpers/`. Ordinary database cases clone a session-local
+migrated template into a separate database for every test. The template rejects
+connections once prepared; each test database and the template are removed after
+use. Migration and uninitialized-database cases still start from `template0`.
+Organize new cases by behavior, reuse these helpers, and
 use fake clocks for retry and pacing tests. Do not make the default suite
 depend on live providers. Live tests must use `@pytest.mark.live` and are skipped
 unless explicitly enabled with `--run-live`. Only opted-in live tests may use
@@ -154,9 +158,10 @@ sides of renames:
 
 | Changed files | Offline checks | Compose smoke |
 | --- | --- | --- |
-| Only Markdown under `docs/`, `AGENTS.md`, `PROJECT.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, or the PR template | Omitted | Omitted |
-| Only tests, the changelog workflow/checker, and the documentation above | Run | Omitted |
-| Only `Dockerfile`, `compose.yaml`, `.dockerignore`, `.env.example`, `docker/mercure-entrypoint.sh`, or the CI Compose overlay | Omitted | Run |
+| Only Markdown under `docs/` except `postgresql-operations.md`, `AGENTS.md`, `PROJECT.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, or the PR template | Omitted | Omitted |
+| Only independent `tests/test_*.py` modules, plus the documentation above | Changed leaf modules on both Python versions | Omitted |
+| Shared test helpers/fixtures, deleted or renamed tests, changelog workflow/checker, or `docs/postgresql-operations.md` | Full suite | Omitted |
+| Only `Dockerfile`, `compose.yaml`, `.dockerignore`, `.env.example`, `docker/mercure-entrypoint.sh`, or the CI Compose overlay | Deployment contracts on both Python versions | Run |
 | Application, dependencies, Python deployment helpers, shared CI, `README.md`, `LICENSE`, or any unrecognized path | Run | Run |
 | Any promotion to `master`, or an empty merge diff | Run | Run |
 
@@ -180,8 +185,19 @@ cancel a master-push check or a different branch's manual check.
 Mixed changes take the union of the applicable checks. Required checks retain
 their names and report their scope even when no application work is needed. A scope-classification error fails those required
 checks. `README.md` and `LICENSE` are packaging inputs, so they need full checks.
-Tests remain the full offline suite; CI does not guess which individual tests
-are affected by a source edit.
+The PostgreSQL operations runbook embeds an executable restore verifier, so
+edits to it also require offline tests. Application edits always run the full offline suite. A test-only edit selects
+only existing top-level `tests/test_*.py` modules that no other test/helper imports.
+The classifier scans imports and literal module references across all Python
+files under `tests/`; changed hooks/plugins, nonliteral dynamic imports, syntax
+errors, shared fixtures/helpers/data, unusual paths, deletions and renames fall
+back to the full suite. Container-only edits run the cloud deployment and Compose
+contract modules as well as the real Compose smoke. Mixed container/leaf-test
+edits run their union. Pure container-only revisions omit offline PostgreSQL
+startup/cleanup because those maintained contracts need no database. Any changed
+test file, including a deployment contract, retains PostgreSQL; promotions and
+manual/master runs always provision it. Ruff, Bandit and Mypy retain their existing coverage
+whenever offline checks run; zero selected pytest cases or collection errors fail.
 
 CI revalidates PR edits as well as new commits so retargeting cannot reuse an
 obsolete promotion check. Title and description edits also rerun scoped checks;
@@ -192,6 +208,15 @@ within a PR because GitHub isolates PR cache entries. uv's remote dependency
 cache is disabled: its pruned cache retained metadata while the prebuilt wheels
 were downloaded again, with no measured install benefit. The pinned, locked
 install still runs each time.
+
+Devbox enables the pinned installer action's supported Nix-store cache. Its key
+includes runner OS/architecture, Nix version and `devbox.lock`; package setup,
+interpreter replacement, source checks and lock verification still run on hits.
+The previous hosted toolchain installation took about 64 seconds. Compare
+subsequent natural cold/warm runs using the entire installer step (including
+restore/save transfer) and job duration before claiming a gain; disable the cache
+if its total cost outweighs installation. The action logs identify cache hits.
+No extra benchmark workflow or manual rerun is needed.
 
 Docker keeps dependency layers separate from application sources and builds the
 shared Compose image once, while pulling PostgreSQL and Mercure concurrently. CI's Compose
@@ -230,7 +255,10 @@ unparseable, and incomplete fixture trees, checking that failures stay failures.
 
 Each selected job writes stage timings to its job summary and uploads a
 `ci-performance-*` artifact retained for 14 days. JSON samples include the
-revision, run attempt, Python version, runner and check variant. Offline jobs
+revision, run attempt, Python version, runner and check variant. Offline test
+timing labels preserve `offline-tests` for full runs and use distinct
+`offline-tests-leaf` / `offline-tests-deployment` labels for smaller selections,
+so smaller selections cannot be mistaken for faster full-suite runs. Offline jobs
 also retain JUnit results and print the 15 slowest test durations. Failures keep
 the command's exit status and are recorded as failures, never faster successes.
 
@@ -250,10 +278,10 @@ using both `--max-regression-percent` and `--min-regression-seconds`; keep gener
 limits and separate cold and warm measurements. Missing or incompatible samples
 must not be treated as proof of a speedup.
 
-A focused integration/workflow run and a coverage run are available when useful:
+A focused API/worker integration run and a coverage run are available when useful:
 
 ```bash
-uv run python -m pytest -q -m "workflow and not live and not slow"
+uv run python -m pytest -q tests/test_api.py tests/test_worker.py
 uv run python -m pytest -q --cov=chess_crawl --cov-report=term-missing
 ```
 

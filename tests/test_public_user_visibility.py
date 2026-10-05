@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from chess_crawl import ingest
 from chess_crawl.api import create_app
 from chess_crawl.storage.db import connection
-from test_player_resources import _config, _profile
+from helpers.players import _config, _profile
 
 
 def test_shared_api_users_hide_private_identities_until_public_evidence(database_url):

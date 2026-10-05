@@ -51,6 +51,12 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   independent provider acquisition and local processing stages, persistent
   request/retry pacing, and aggregate worker liveness. Migration `0009` must
   precede starting the new workers; stop old serial executors before upgrading.
+- Queue-independent bounded outbox cleanup retains current pending/retry hints,
+  retires obsolete revisions transactionally, and prunes delivered/superseded
+  history after 24 hours by default. Workers drain fair PostgreSQL work before
+  idle SQS long polls and acknowledge duplicate hints without waiting. Apply
+  migration `0015`; see [execution settings](docs/execution.md#dispatch-history-retention)
+  for configurable retention and cleanup throughput.
 - Durable job dispatch outbox with optional SQS publication and consumption.
   Duplicate deliveries reuse database job state; local polling remains available.
 - Checkpointed offline normalization upgrades with fixed source high-water marks
@@ -134,6 +140,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   need and of the result; a changelog update requirement for all PRs beyond
   CI/test-only changes.
 
+- Compose forwards the Lichess token's workspace owner, API export limits, and
+  worker dispatch cleanup settings;
+  PostgreSQL recovery instructions now pair database backups with verified source
+  objects, restore local archives into isolated volumes, and require operator-owned
+  recovery evidence for S3 archives.
 - A PostgreSQL operations guide with full-database custom backups, isolated
   restoration, binary payload and event identity verification, authenticated
   readiness checks, and major-version upgrade and recovery instructions.
@@ -155,6 +166,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   the object volume alongside PostgreSQL; historical inline bodies remain readable
   and move only through the offline archive relocation helper.
 
+- Reuse validated raw-source preparation and immutable game evidence across
+  repeated observations, while retaining locked deduplication and replay repairs.
+  Deduplication telemetry counts each stored duplicate once, and game detail/PGN
+  reads select only the evidence they return in one consistent SQL statement.
 - Game normalization prepares PGN evidence outside write transactions, commits
   each game's evidence and run attribution with its source checkpoint, and
   resumes remaining items after interruption. Account reconciliation takes
@@ -185,6 +200,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   one acquisition executor and one publisher per archive. Database integration
   tests run against real disposable PostgreSQL instances in both Python CI jobs.
 
+- CI runs Python deployment contracts for container-only changes, selects safe
+  leaf test modules for test-only changes with conservative full-suite fallbacks,
+  and reuses the pinned Devbox Nix toolchain cache while preserving all checks.
 - CI isolates deployment-only checks, overlaps image build/pull and polls
   startup health sooner without weakening readiness. It records stage timings,
   test durations and machine-readable performance evidence, with optional
@@ -201,6 +219,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 - Reports expose separate `no_result` and `in_progress` counts. The API retains
   `unfinished` as a compatibility alias for `no_result`; CLI labels now state
   the actual metric.
+- Offline tests clone a sealed migrated PostgreSQL template into independent
+  databases, while migration tests retain pristine databases. Shared test
+  helpers, bounded child-process handshakes, and explicit clocks keep focused
+  validation deterministic; contributor examples now select current API/worker tests.
 - Tests ignore inherited runtime configuration and require `--run-live` for
   marked provider/network tests; unmarked tests stay offline and isolated.
 - Promotion checks require this repository's `dev` branch, and CI reruns on PR

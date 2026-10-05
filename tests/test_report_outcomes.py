@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from chess_crawl.storage.db import Connection, open_database, require_row, transaction
 
+from helpers.games import normalize_game
+
 import json
 import time
 from typing import Any
@@ -22,30 +24,6 @@ from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage.api_views import months_page
 from chess_crawl.storage.queries import user_game_summary
 from chess_crawl.storage.raw import read_raw_payload, store_raw_payload, update_raw_payload_status
-
-
-def normalize_game(conn: Connection, *, status: str, winner: str | None = None) -> int:
-    payload = {
-        "id": status,
-        "status": status,
-        "rated": False,
-        "variant": "standard",
-        "speed": "blitz",
-        "createdAt": 1704067200000,
-        "lastMoveAt": 1704067260000,
-        "clock": {"initial": 300, "increment": 0},
-        "players": {
-            "white": {"user": {"id": "alice", "name": "Alice"}},
-            "black": {"user": {"id": "bob", "name": "Bob"}},
-        },
-    }
-    if winner is not None:
-        payload["winner"] = winner
-    raw_id = store_raw_payload(conn, RawRecord(
-        provider="lichess", endpoint_type="game", request_url=f"https://lichess.org/game/export/{status}",
-        canonical_source_key=f"lichess/game/{status}", body=json.dumps(payload).encode(), fetched_at=1704067300,
-    ))
-    return normalize_games_payload(conn, raw_id)[0]
 
 
 @pytest.mark.parametrize(("status", "winner", "no_result", "in_progress", "wins", "losses", "draws"), [

@@ -15,7 +15,9 @@ no password is passed in command arguments or printed.
 The `postgres_data` volume is mounted at `/var/lib/postgresql`, containing
 PostgreSQL 18's versioned data directory. `docker compose stop` and
 `docker compose down` retain it. `docker compose down --volumes` deletes the
-named database and Mercure volumes.
+named database, archive, and Mercure volumes. The default Compose deployment
+stores response bodies in `archive_data`, mounted at
+`/var/lib/chess-crawl/archive`; PostgreSQL keeps their references, not their bytes.
 
 Keep the generated `postgres_password` file with the database's operational
 configuration. Bootstrap retains this file on reruns. The image initializes the
@@ -26,13 +28,15 @@ or the hub's replay history. Store those credentials securely alongside the
 backup and retain the configured topic prefix.
 
 A full database restore preserves `event_archive_identity`, job/run revisions,
-raw response bytes, and outbox rows, including delivery checkpoints. Do not
+inline raw response bytes, external-object references, and outbox rows, including
+delivery checkpoints. Restoring external responses and imported PGNs also requires
+the matching object archive. Do not
 rebuild an archive from JSONL exports or rewrite its identity to perform a
 restore. Restored pending outbox rows retain their original event IDs. Delivery
 remains at least once, including a possible duplicate when a hub accepted an
 event before its database acknowledgement was backed up.
 
-## Create a full custom-format backup
+## Freeze a recovery point and verify its objects
 
 `pg_dump` provides a consistent database snapshot while services run. For a
 restore drill that compares the backup with current source data, first stop all
@@ -42,15 +46,57 @@ writers and keep them stopped through backup and verification:
 docker compose stop api worker events
 ```
 
-Also stop any separate worker, submission client, or other application
+Also stop any separate worker, submission client, archive relocation/transfer,
+import process, SQS dispatcher, or other application
 instance using this database. Keeping only the worker stopped is insufficient:
 API submissions and the event publisher also mutate database state. Leave
-PostgreSQL and Mercure running. For routine online backups, the maintenance stop
-is optional, but a later live database may differ from the backup snapshot.
+PostgreSQL and Mercure running. Keep writers stopped through the database dump,
+object copy, and comparisons below. Online database dumps are valid snapshots,
+but an independently timed object copy is not automatically a coherent backup.
 
-The following Bash block writes to a unique temporary file and gives it a
-`.dump` name only after the dump succeeds and its table of contents is readable.
-Failures remove the temporary file; they do not leave a completed backup name.
+Create this read-only verifier once. It records every object referenced by either
+raw responses or imports and reads each through the production checksum and bounded
+decompression checks. Retained, unreferenced objects are not required for this
+recovery point. It does not print response bodies or credentials. Keep its manifest
+private: it includes storage locations and content hashes.
+
+```bash
+umask 077
+mkdir -p backups
+chmod 700 backups
+cat > backups/verify-archive.py <<'PY'
+import json
+from chess_crawl.storage.archives import read_archive_object
+from chess_crawl.storage.db import database_url, open_database, transaction
+
+with open_database(database_url()) as conn, transaction(conn, write=False):
+    after = 0
+    while True:
+        rows = conn.execute('''
+            SELECT a.* FROM archive_objects a WHERE a.id > %s AND (
+                EXISTS (SELECT 1 FROM raw_payloads r WHERE r.archive_object_id = a.id)
+                OR EXISTS (SELECT 1 FROM archive_imports i WHERE i.archive_object_id = a.id)
+            ) ORDER BY a.id LIMIT 100
+        ''', (after,)).fetchall()
+        if not rows:
+            break
+        for row in rows:
+            after = int(row['id'])
+            try:
+                read_archive_object(conn, after)
+            except Exception:
+                raise SystemExit(f'Archive object {after} failed verification') from None
+            print(json.dumps(dict(row), sort_keys=True))
+PY
+```
+
+## Back up the database and local archive together
+
+The following Bash block applies to the default local archive path. It refuses
+other referenced locations rather than silently omitting their bytes. For S3 or
+mixed archives, use the operator-managed procedure below. A `.complete` marker is
+written only after the database dump, verified object manifest, and archive copy
+all succeed. An interrupted bundle without that marker is incomplete.
 
 ```bash
 (
@@ -59,24 +105,72 @@ Failures remove the temporary file; they do not leave a completed backup name.
   mkdir -p backups
   chmod 700 backups
   backup_temp=$(mktemp "backups/chess-crawl-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX.part")
-  trap 'rm -f -- "$backup_temp"' EXIT
+  object_temp="$backup_temp.objects"
+  archive_temp="$backup_temp.archive"
+  trap 'rm -f -- "$backup_temp" "$object_temp" "$archive_temp"' EXIT
   trap 'exit 1' HUP INT TERM
   backup_file="${backup_temp%.part}.dump"
   test ! -e "$backup_file"
+  docker compose run --rm --no-deps -T api python - \
+    < backups/verify-archive.py > "$object_temp"
+  python3 - "$object_temp" <<'PY'
+import json
+import sys
+with open(sys.argv[1]) as manifest:
+    for line in manifest:
+        row = json.loads(line)
+        if (row['backend'], row['location']) != ('local', '/var/lib/chess-crawl/archive'):
+            raise SystemExit('Use the operator-managed backup procedure for other archive locations')
+PY
   docker compose exec -T postgres pg_dump --no-password \
     --username=chess_crawl --dbname=chess_crawl --format=custom > "$backup_temp"
   test -s "$backup_temp"
   docker compose exec -T postgres pg_restore --list < "$backup_temp" > /dev/null
+  docker compose run --rm --no-deps -T api \
+    tar --create --gzip --file=- --directory=/var/lib/chess-crawl/archive . > "$archive_temp"
+  test -s "$archive_temp"
+  mv -- "$object_temp" "$backup_file.objects.jsonl"
+  mv -- "$archive_temp" "$backup_file.archive.tar.gz"
   mv -- "$backup_temp" "$backup_file"
-  printf 'Backup ready: %s\n' "$backup_file"
+  touch "$backup_file.complete"
+  printf 'Backup bundle ready: %s\n' "$backup_file"
 )
 ```
 
 Review `pg_dump` warnings on stderr. `pg_restore --list` checks that the archive
 header and contents list are readable; a successful restore is still required
-to verify the table data. Keep another copy outside the database host. This
-logical database backup is separate from a deployment's retention policy or
-point-in-time recovery configuration.
+to verify the table data. Copy the `.dump`, `.objects.jsonl`, `.archive.tar.gz`,
+`.complete`, verifier, and protected operational configuration together outside
+the database host. The restore and full object reads below verify the copied
+bytes; a tar listing alone does not. This bundle is separate from a deployment's
+retention policy or point-in-time recovery configuration.
+
+### S3 and other operator-managed archives
+
+Keep the same writer freeze. Produce the verified manifest and `pg_dump` from
+that frozen database, then inventory every distinct backend/location in the
+manifest. Preserve every listed object key and its exact compressed bytes using
+the storage operator's backup facilities. For S3, record the bucket, key, backed-up
+version ID (when versioning is enabled), and backup recovery point alongside the
+database dump. Versioning in the live bucket alone is not an independent backup;
+retain a protected copy under the deployment's recovery policy. Do not mark the
+bundle complete until every listed object has a recoverable copy.
+
+An S3 restore must make those bytes readable at the bucket/key recorded in the
+restored database, with access granted to its application role. Verify the backup
+by retrieving its copies and comparing compressed SHA-256 and byte length against
+`stored_hash` and `stored_bytes` in the manifest. Check the decompressed SHA-256
+and length against `body_hash` and `body_bytes` as well. Then run the production
+verifier against the recovery deployment. A successful read from the original
+live bucket proves its availability, not recoverability of a separate backup.
+The operator must validate the chosen S3 backup/restore procedure and IAM access;
+the local-volume commands below do not exercise AWS recovery.
+
+For a new location, first recover objects at their recorded location and use the
+[verified transfer helper](archive-storage.md#transferring-existing-external-objects)
+to move the recovered archive. Changing `CHESS_CRAWL_ARCHIVE_BACKEND` only selects
+new-write storage; it does not rewrite old references. Never overwrite an existing
+object that disagrees with its recorded checksum during a drill.
 
 ## Restore to a new database
 
@@ -90,6 +184,8 @@ export CHESS_CRAWL_BACKUP CHESS_CRAWL_RESTORE_DATABASE
 (
   set -eu
   test -r "$CHESS_CRAWL_BACKUP"
+  test -r "$CHESS_CRAWL_BACKUP.complete"
+  test -r "$CHESS_CRAWL_BACKUP.objects.jsonl"
   case "$CHESS_CRAWL_RESTORE_DATABASE" in
     chess_crawl_restore_*) ;;
     *) printf 'Use a dedicated chess_crawl_restore_ database name\n' >&2; exit 1 ;;
@@ -121,6 +217,39 @@ functions, trigger definitions, identity sequence state, and the archive identit
 Loading table data into an already initialized schema could execute event
 triggers and create additional outbox rows instead of preserving the backup.
 
+## Restore the local objects into an isolated volume
+
+For the default local bundle, restore to a newly named volume. It is mounted at
+the same absolute path saved in the database, while the production `archive_data`
+volume remains separate. Use the application's backed-up image revision. The
+initialization container only sets ownership on this new volume; extraction runs
+as the normal application UID. These commands require a trusted backup archive.
+
+```bash
+CHESS_CRAWL_RESTORE_VOLUME="${CHESS_CRAWL_RESTORE_DATABASE}_archive"
+export CHESS_CRAWL_RESTORE_VOLUME
+(
+  set -eu
+  test -r "$CHESS_CRAWL_BACKUP.archive.tar.gz"
+  if docker volume inspect "$CHESS_CRAWL_RESTORE_VOLUME" >/dev/null 2>&1; then
+    printf 'Restore volume already exists; choose a new restore name\n' >&2
+    exit 1
+  fi
+  docker volume create "$CHESS_CRAWL_RESTORE_VOLUME" >/dev/null
+  docker run --rm --network=none --read-only --user=0:0 \
+    --cap-drop=ALL --cap-add=CHOWN --cap-add=FOWNER \
+    --mount "type=volume,source=$CHESS_CRAWL_RESTORE_VOLUME,target=/var/lib/chess-crawl/archive" \
+    chess-crawl:local python /app/docker/archive_init.py
+  docker run --rm --interactive --network=none --read-only --cap-drop=ALL \
+    --mount "type=volume,source=$CHESS_CRAWL_RESTORE_VOLUME,target=/var/lib/chess-crawl/archive" \
+    chess-crawl:local tar --extract --gzip --file=- --no-same-owner \
+    --directory=/var/lib/chess-crawl/archive < "$CHESS_CRAWL_BACKUP.archive.tar.gz"
+)
+```
+
+Retain a failed drill's isolated database and volume for inspection. Do not point
+writers at them or replace the production volume to make a comparison pass.
+
 ## Compare source and restored data
 
 For an exact drill, source writers must still be stopped and neither acquisition
@@ -142,9 +271,15 @@ SELECT 'migration', version, name, applied_at
 FROM schema_migrations ORDER BY version;
 SELECT 'identity', singleton, id
 FROM event_archive_identity ORDER BY singleton;
-SELECT 'raw', id, body_hash, body_bytes, body_compression,
+SELECT 'raw', id, body_hash, body_bytes, body_compression, archive_object_id,
        octet_length(raw_body), encode(sha256(raw_body), 'hex')
 FROM raw_payloads ORDER BY id;
+SELECT 'object', id,
+       encode(sha256(convert_to(row_to_json(archive_objects)::text, 'UTF8')), 'hex')
+FROM archive_objects ORDER BY id;
+SELECT 'import', id,
+       encode(sha256(convert_to(row_to_json(archive_imports)::text, 'UTF8')), 'hex')
+FROM archive_imports ORDER BY id;
 SELECT 'outbox', id,
        encode(sha256(convert_to(row_to_json(event_outbox)::text, 'UTF8')), 'hex')
 FROM event_outbox ORDER BY id;
@@ -169,23 +304,48 @@ SQL
 ```
 
 A zero exit status from `diff` establishes equality for table counts, migration
-history, archive identity, stored raw-body hashes and actual binary bytes,
-complete outbox row hashes, and sequence values. SHA-256 of the stored raw bytes
+history, archive identity, inline raw-body hashes and bytes, external references
+and metadata, import ownership/provenance, complete outbox row hashes, and sequence
+values. It does not read external object bytes. SHA-256 of the stored inline bytes
 is compared separately from the archive's recorded `body_hash`, since a stored
 response may be compressed. Outbox row hashes include its exact payload text,
 revision, retry counters, error and delivery fields. This is a restore check,
 not a proof that every source record was originally correct.
 
+Read the restored external objects and compare their manifest with the verified
+backup manifest. The volume override replaces the service's mount at this target,
+so missing restored objects cannot be masked by the original live archive:
+
+```bash
+CHESS_CRAWL_RESTORE_URL="postgresql://chess_crawl@postgres:5432/$CHESS_CRAWL_RESTORE_DATABASE"
+export CHESS_CRAWL_RESTORE_URL
+(
+  set -eu
+  umask 077
+  docker compose run --rm --no-deps -T \
+    --env CHESS_CRAWL_DATABASE_URL="$CHESS_CRAWL_RESTORE_URL" \
+    --volume "$CHESS_CRAWL_RESTORE_VOLUME:/var/lib/chess-crawl/archive:ro" \
+    api python - < backups/verify-archive.py > backups/restored-objects.jsonl
+  diff -u "$CHESS_CRAWL_BACKUP.objects.jsonl" backups/restored-objects.jsonl
+)
+```
+
+Success requires every referenced response/import object to be present, with
+matching compressed and decompressed checksums and lengths. A missing or corrupt
+object exits unsuccessfully even if all database comparisons match. This checks
+the recorded evidence, not the correctness of a provider's original response.
+
 Check application schema support and the authenticated readiness route without
 starting a worker or publisher on the restored copy:
 
 ```bash
-CHESS_CRAWL_RESTORE_URL="postgresql://chess_crawl@postgres:5432/$CHESS_CRAWL_RESTORE_DATABASE"
 docker compose run --rm --no-deps -T \
   --env CHESS_CRAWL_DATABASE_URL="$CHESS_CRAWL_RESTORE_URL" \
+  --volume "$CHESS_CRAWL_RESTORE_VOLUME:/var/lib/chess-crawl/archive:ro" \
   api chess-crawl-admin info
 docker compose run --rm --no-deps -T \
   --env CHESS_CRAWL_DATABASE_URL="$CHESS_CRAWL_RESTORE_URL" \
+  --volume "$CHESS_CRAWL_RESTORE_VOLUME:/var/lib/chess-crawl/archive:ro" \
   api python - <<'PY'
 import asyncio
 import os
@@ -214,7 +374,8 @@ the original services with `docker compose start api worker events`; leave the
 restored copy isolated or remove its explicitly named database after review.
 
 For actual recovery, stop the original deployment's writers before switching
-its connection URL to the verified target. Keep only one active copy of an
+its connection URL and local archive volume to the verified targets. S3 deployments
+must retain access to every recorded bucket/key. Keep only one active copy of an
 archive identity. Two diverging copies publishing to the same topics can reuse
 event IDs. Recovery to an older backup discards later writes and can replay
 previously published events; coordinate client cache reset and API

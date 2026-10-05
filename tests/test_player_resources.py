@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from helpers.players import _config, _profile, _record, _resource
+
 import gzip
 import json
 from datetime import date
@@ -31,60 +33,6 @@ from chess_crawl.storage.player_profiles import player_profile, profile_history,
 from chess_crawl.storage.raw import insert_fetch_log, read_raw_payload, store_raw_payload
 from chess_crawl.storage.raw import compute_body_hash
 from chess_crawl.storage.repository import upsert_provider_user, upsert_user_snapshot
-
-
-def _config(*, token: str | None = None, owner_scope: str = "local") -> Config:
-    return Config(chesscom_delay_s=0, lichess_delay_s=0, max_retries=0, lichess_token=token,
-                  lichess_token_owner_scope=owner_scope)
-
-
-def _profile(conn: Connection, body: dict, *, provider: str = "lichess", at: int = 100) -> tuple[int, int]:
-    username = body.get("username", "Alice")
-    raw_id = store_raw_payload(conn, RawRecord(
-        provider=provider, endpoint_type="user_profile", request_url="https://example.test/profile",
-        canonical_source_key=f"{provider}/player/{username.lower()}/profile", fetched_at=at,
-        body=json.dumps(body).encode(),
-    ))
-    insert_fetch_log(conn, provider=provider, endpoint_type="user_profile", url="https://example.test/profile",
-                     raw_payload_id=raw_id, status_code=200, attempted_at=at)
-    user_id = normalize_user_payload(conn, raw_id)
-    assert user_id is not None
-    return user_id, raw_id
-
-
-def _resource(
-    conn: Connection, provider: str, key: str, data: object, *, at: int = 100, authenticated: bool = False,
-    owner_scope: str = "public", parameters: dict | None = None, username: str = "Alice",
-) -> tuple[int, int]:
-    raw_id = store_raw_payload(conn, RawRecord(
-        provider=provider, endpoint_type="user_resource", request_url=get_resource(provider, key).url(username, parameters),
-        canonical_source_key=resource_source_key(provider, username, key, parameters,
-                                                 owner_scope=owner_scope, authenticated=authenticated),
-        request_params={"resource_key": key, "parameters": parameters or {}, "authenticated": authenticated,
-                        "owner_scope": owner_scope}, owner_scope=owner_scope, fetched_at=at,
-        body=json.dumps(data).encode(),
-    ))
-    insert_fetch_log(conn, provider=provider, endpoint_type="user_resource", url="https://example.test/resource",
-                     raw_payload_id=raw_id, status_code=200, attempted_at=at)
-    return normalize_resource_payload(conn, raw_id), raw_id
-
-
-def _account_bound_record(username: str, kind: str, *, at: int) -> RawRecord:
-    if kind == "resource":
-        return RawRecord(
-            provider="chess.com", endpoint_type="user_resource",
-            request_url=get_resource("chess.com", "clubs").url(username, None),
-            canonical_source_key=resource_source_key("chess.com", username, "clubs"),
-            request_params={"resource_key": "clubs", "parameters": {}, "authenticated": False,
-                            "owner_scope": "public"},
-            target_username=username, body=b'{"clubs":[]}', fetched_at=at,
-        )
-    return RawRecord(
-        provider="chess.com", endpoint_type="user_stats",
-        request_url=f"https://api.chess.com/pub/player/{username.lower()}/stats",
-        canonical_source_key=f"chess.com/player/{username.lower()}/stats",
-        target_username=username, body=b'{"chess_blitz":{"last":{"rating":1500}}}', fetched_at=at,
-    )
 
 
 def test_complete_public_profile_facts_and_unknown_fields_are_queryable(initialized_conn: Connection) -> None:
@@ -568,7 +516,7 @@ def test_deferred_normalization_honors_acquisition_identity_after_rename(
     conn = initialized_conn
     original, _ = _profile(conn, {"username": "Eve", "player_id": 8}, provider="chess.com", at=100)
     raw_id, fetch_id = _persist_response(
-        conn, _account_bound_record("Eve", kind, at=110), job_id=None, crawl_run_id=None,
+        conn, _record("Eve", kind, at=110), job_id=None, crawl_run_id=None,
     )
     assert raw_id is not None and fetch_id is not None
     _profile(conn, {"username": "FormerEve", "player_id": 8}, provider="chess.com", at=200)

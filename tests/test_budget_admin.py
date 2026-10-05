@@ -9,7 +9,7 @@ import pytest
 from chess_crawl.jobs import state
 from chess_crawl.jobs.budget import BudgetPolicy, main
 from chess_crawl.storage.db import connection, require_row, transaction
-from test_api_budgets import FULL, client
+from helpers.api import FULL, budget_client as client
 
 
 def test_show_is_read_only_and_resume_preserves_lifetime_usage_and_checkpoints(database_url, capsys, monkeypatch) -> None:

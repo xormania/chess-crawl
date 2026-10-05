@@ -43,7 +43,6 @@ def test_queued_offline_upgrade_repairs_previous_native_evidence(
 
     with monkeypatch.context() as legacy:
         legacy.setattr(game_evidence, "EVIDENCE_VERSION", "game-evidence-v1")
-        legacy.setattr(game_evidence, "parse_game_evidence", legacy_evidence)
         legacy.setattr(games, "PARSER_VERSION", "games-normalizer-v5/game-evidence-v1")
         legacy.setattr(games, "parse_game_evidence", legacy_evidence)
         game_id = games.normalize_games_payload(initialized_conn, raw_id)[0]
