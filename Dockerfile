@@ -19,7 +19,8 @@ COPY --from=builder /app/.venv /app/.venv
 COPY docker/healthcheck.py /app/docker/healthcheck.py
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    CHESS_CRAWL_WORKER_IDENTITY_FILE=/tmp/chess-crawl-worker.json
 WORKDIR /app
 USER 10001:10001
 EXPOSE 8000

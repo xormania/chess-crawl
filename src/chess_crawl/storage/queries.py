@@ -136,7 +136,9 @@ def summary_report(conn: Connection) -> dict[str, Any]:
             """
         )
     )
-    raw_payloads = int(require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0])
+    raw_payloads = int(require_row(conn.execute(
+        "SELECT COUNT(*) FROM raw_payloads WHERE owner_scope = 'public'",
+    ))[0])
     runs = list(
         conn.execute(
             """
@@ -372,14 +374,17 @@ def archive_freshness(conn: Connection, *, provider: str | None = None) -> dict[
     """Describe preserved and normalized observations, without implying live data."""
     row = require_row(conn.execute(
         """
-        SELECT (SELECT MAX(attempted_at) FROM fetch_logs
-                 WHERE (%s::text IS NULL OR provider = %s) AND status_code IN (200, 304)) AS last_checked_at,
+        SELECT (SELECT MAX(f.attempted_at) FROM fetch_logs f
+                 JOIN raw_payloads checked_raw ON checked_raw.id = f.raw_payload_id
+                WHERE checked_raw.owner_scope = 'public'
+                  AND (%s::text IS NULL OR f.provider = %s)
+                  AND f.status_code IN (200, 304)) AS last_checked_at,
                MAX(fetched_at) AS last_fetched_at,
                MAX(normalized_at) AS last_normalized_at,
                COUNT(*) FILTER (WHERE normalization_status IN ('pending', 'stale')) AS pending_payloads,
                COUNT(*) FILTER (WHERE normalization_status = 'failed') AS failed_payloads
           FROM raw_payloads
-         WHERE (%s::text IS NULL OR provider = %s)
+         WHERE owner_scope = 'public' AND (%s::text IS NULL OR provider = %s)
         """,
         (provider, provider, provider, provider),
     ))

@@ -13,7 +13,7 @@ from chess_crawl.jobs.models import DiscoveryJob, EnqueueResult, JOB_KINDS, JobK
 from chess_crawl.jobs.locking import ExecutorLease, parallel_executor_lock
 from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.storage.db import (
-    Connection, Row, atomic, require_row, operation_lock, lock_key,
+    Connection, Row, atomic, consistent_read, require_row, operation_lock, lock_key,
     acquire_lock_key, release_lock_key, owns_lock_key,
 )
 from chess_crawl.storage.discovery import discovery_edge_count
@@ -604,6 +604,17 @@ def stop_worker(conn: Connection, worker_id: str, *, failed: bool = False, now: 
              stopped_at=%s,current_job_id=NULL WHERE worker_id=%s""",
         ('failed' if failed else 'stopped',timestamp,timestamp,timestamp,worker_id),
     )
+
+
+@consistent_read
+def worker_alive(conn: Connection, worker_id: str, *, now: float | None = None) -> bool:
+    """Probe one incarnation; another worker cannot supply its liveness."""
+    timestamp = time.time() if now is None else now
+    return bool(require_row(conn.execute(
+        """SELECT EXISTS(SELECT 1 FROM executor_heartbeats WHERE worker_id=%s
+             AND status IN ('running','stopping') AND heartbeat_expires_at>%s)""",
+        (worker_id, timestamp),
+    ))[0])
 
 
 def worker_status(conn: Connection, *, now: float | None = None, max_age: float | None = None) -> dict[str, Any]:

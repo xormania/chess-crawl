@@ -278,6 +278,19 @@ worker remains alive: `/v1/worker` separates heartbeat liveness from activity
 and includes individual workers and their aggregate active count. API readiness
 alone does not prove that acquisition is running. See [execution](execution.md).
 
+Container worker health checks probe their own incarnation instead of aggregate
+worker liveness. The image sets `CHESS_CRAWL_WORKER_IDENTITY_FILE` to
+`/tmp/chess-crawl-worker.json`; the worker CLI writes a mode-0600 atomic binding
+after its database heartbeat starts. The probe requires the bound UUID's live
+heartbeat and a matching local Linux process PID/start time. Missing or malformed
+bindings, stopped processes, PID reuse, and stale own heartbeats fail even when
+another worker remains live. Keep this file on writable, container-local storage
+and use a distinct path for each process when running several workers in one
+container. The small last binding remains after stop, where terminal database
+state makes it unhealthy, and the next incarnation replaces it atomically.
+Host/programmatic workers leave binding disabled unless explicitly configured;
+this Linux container probe does not fall back to aggregate status.
+
 On startup and while idle, the worker recovers orphaned in-progress work only
 after obtaining the orphan's job lock.
 It preserves cancelled runs. Transient failures have durable retry counters
@@ -396,3 +409,8 @@ Keep the Symfony Docker environment separate. Connect it through the backend
 API and Mercure URLs, with application-owned credentials and networking; it does
 not need direct database access or the PostgreSQL volume mounted into its
 containers.
+
+Public Lichess game exports and user-game history requests omit provider OAuth,
+even when an account token is configured. Account-private games are unsupported
+by these public collectors. Explicit owned resources keep their workspace-bound
+OAuth access.

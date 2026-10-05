@@ -281,37 +281,33 @@ def insert_fetch_log(
     attempt: int = 1,
     raw_payload_id: int | None = None,
     error_ref: int | None = None,
+    provider_user_id: int | None = None,
 ) -> int:
-    cursor = conn.execute(
-        """
-        INSERT INTO fetch_logs(
-          provider, job_id, crawl_run_id, url, endpoint_type, method,
-          status_code, from_cache, etag, last_modified, retry_after, bytes,
-          duration_ms, attempt, attempted_at, raw_payload_id, error_ref
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING id
-        """,
-        (
-            provider,
-            job_id,
-            crawl_run_id,
-            url,
-            endpoint_type,
-            method,
-            status_code,
-            int(from_cache),
-            etag,
-            last_modified,
-            retry_after,
-            bytes_count,
-            duration_ms,
-            attempt,
-            attempted_at,
-            raw_payload_id,
-            error_ref,
-        ),
+    values = (
+        provider, job_id, crawl_run_id, url, endpoint_type, method, status_code,
+        int(from_cache), etag, last_modified, retry_after, bytes_count, duration_ms,
+        attempt, attempted_at, raw_payload_id, error_ref,
     )
+    if provider_user_id is None:
+        cursor = conn.execute(
+            """INSERT INTO fetch_logs(
+                 provider, job_id, crawl_run_id, url, endpoint_type, method,
+                 status_code, from_cache, etag, last_modified, retry_after, bytes,
+                 duration_ms, attempt, attempted_at, raw_payload_id, error_ref)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            values,
+        )
+    else:
+        cursor = conn.execute(
+            """INSERT INTO fetch_logs(
+                 provider, job_id, crawl_run_id, url, endpoint_type, method,
+                 status_code, from_cache, etag, last_modified, retry_after, bytes,
+                 duration_ms, attempt, attempted_at, raw_payload_id, error_ref, provider_user_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            (*values, provider_user_id),
+        )
     row = cursor.fetchone()
     if row is None:
         raise RuntimeError("fetch log insert did not return a row id")

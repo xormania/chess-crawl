@@ -198,7 +198,8 @@ class JobRunner:
             if job.kind == "normalize_payload":
                 params = state.load_params(job.params_json)
                 result = replay_raw_payload(self.conn, int(params.get("raw_payload_id", job.target)),
-                                            crawl_run_id=job.crawl_run_id, max_games=params.get("max_games"))
+                                            crawl_run_id=job.crawl_run_id, max_games=params.get("max_games"),
+                                            fetch_log_id=params.get("fetch_log_id"))
                 return _outcome_from_ingest(result)
             if job.kind == "reprocess_archive":
                 return self._reprocess_archive(job)

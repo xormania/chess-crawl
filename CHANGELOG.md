@@ -7,6 +7,8 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Container health probes bind to the worker's own UUID and live local process,
+  so another healthy executor cannot hide an expired container heartbeat.
 - Concurrent durable workers with per-job session ownership and fencing,
   independent provider acquisition and local processing stages, persistent
   request/retry pacing, and aggregate worker liveness. Migration `0009` must
@@ -60,6 +62,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 - Migration-time quarantine of historical Lichess profile captures until safe
   source replay, provider-native verification/streaming flags, and queryable
   highest/lowest tactics and lessons ratings.
+- Fresh statistics/resources follow the account currently holding a username
+  even when raw-body deduplication reuses older bytes; acquisition attempts stay
+  attached to stable account identity across renames and username reuse.
 - Public resource requests omit configured OAuth credentials; private resource
   collection does not publish its timestamps in shared alias history.
 
@@ -153,6 +158,17 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Public archive freshness uses successful fetches linked to public source
+  evidence, excluding private payloads and fetches with no captured source.
+
+- Standalone Chess.com conditional game observations refresh the current
+  revision, clocks, outcome, and participant facts when a previously retained
+  source becomes latest again, while preserving immutable evidence history.
+
+- Public Lichess game exports and history collection omit account OAuth tokens,
+  preventing token-only private game evidence from entering the public archive.
+  Explicit owned resources retain workspace-scoped OAuth access.
+
 - Archive relocation selects pending payloads through a partial ordered index
   and checks continuation without counting the entire remaining queue per batch.
   Its JSON result adds `has_more`; `remaining` is null while work remains unless
@@ -172,6 +188,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   keeping API/job mutations responsive during slow archive storage. Raw-response
   deduplication skips object I/O; callers owning outer transactions must prepare
   external objects beforehand so source references still roll back atomically.
+- Preserve unused native move data alongside PGN-derived tokens, including
+  conflicting notation and nontext native values. Evidence parser v2 repairs
+  previous omissions through local replay into a new immutable revision.
 
 - Read game revisions and reconstruct PGN from one complete database snapshot,
   including when a concurrent writer replaces and removes an old unreferenced
@@ -186,6 +205,26 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 - Rejected offline upgrade identities preserve another job's progress; failure
   reporting updates only the requesting job's provider and ownership scope.
+- Player resource/statistics parsing preserves the account and time bound to
+  its acquisition across intervening renames, conditional responses, and local
+  replay of bytes reused by multiple holders. Stable identity reconciliation
+  moves fetch bindings with the other evidence. Private collection preserves
+  public identity facts; private-only placeholders have null public dates until
+  a public observation supplies them. Replay uses user parser v7 and resource
+  parser v2 without downloading stored sources again.
+  Internal delayed replay can target its exact successful fetch occurrence;
+  the existing worker retains the same captured identity through parsing.
+  Private-only profile lookups remain invisible outside the owning scope;
+  public identities with supplied zero dates or game observations remain visible.
+- Deferred normalization queues preserve the captured fetch identity through
+  worker resumes. New observations schedule a successor when older processing
+  is still running, so a source rejected as out of date cannot remain pending
+  without work. Private placeholder creation and multi-account replay retain
+  scoped identity locks while unrelated account writes proceed concurrently.
+
+- Failed Chess.com statistics requests retain request evidence without creating
+  or refreshing a player account. Local Lichess profile replay also populates
+  legacy first/last names while preserving explicit current names and native JSON.
 
 - Reconcile renamed accounts with username-only placeholders while preserving
   their game, snapshot, source, and discovery history. Conflicting stable

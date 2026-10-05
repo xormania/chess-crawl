@@ -22,6 +22,7 @@ from chess_crawl.ingest import (
 from chess_crawl.jobs.models import DiscoveryJob, JobKind
 from chess_crawl.jobs.state import enqueue_job
 from chess_crawl.normalize.games import PARSER_VERSION
+from chess_crawl.storage.normalization import observation_id
 from chess_crawl.providers.registry import ProviderSession
 from chess_crawl.storage import collection as store
 from chess_crawl.storage.acquisition import payload_game_ids
@@ -353,7 +354,8 @@ def _use_local_payload(conn, job, raw_id, options) -> tuple[int, ...]:
     if getattr(conn, "_defer_normalization", False) and (needs_parser or job.crawl_run_id is not None):
         enqueue_job(
             conn, provider=job.provider, kind=cast(JobKind, "normalize_payload"), target=str(raw.id),
-            params={"raw_payload_id": raw.id}, crawl_run_id=job.crawl_run_id,
+            params={"raw_payload_id": raw.id, "fetch_log_id": observation_id(conn, raw.id) or None},
+            crawl_run_id=job.crawl_run_id,
             parent_job_id=job.id, priority=20,
         )
         return ()
