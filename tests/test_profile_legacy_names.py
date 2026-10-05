@@ -9,7 +9,7 @@ from chess_crawl.normalize.users import PARSER_VERSION
 from chess_crawl.storage.db import transaction
 from chess_crawl.storage.player_profiles import player_profile, profile_history
 from chess_crawl.storage.raw import read_raw_payload, update_raw_payload_status
-from test_player_resources import _profile
+from helpers.players import _profile
 
 
 @pytest.mark.parametrize(("names", "expected"), [

@@ -5,7 +5,7 @@ import json
 import runpy
 import stat
 import os
-import subprocess
+from helpers.processes import child_process, expect_output
 import sys
 import time
 from pathlib import Path
@@ -103,20 +103,14 @@ def test_identity_write_failure_stops_heartbeat_and_marks_worker_failed(
 
 def test_persisted_binding_rejects_a_process_after_it_exits(tmp_path: Path) -> None:
     path = tmp_path/'worker.json'
-    child = subprocess.Popen(
+    with child_process(
         [sys.executable,'-c',
          "import sys; from chess_crawl.jobs.worker_identity import write_worker_identity; "
          "write_worker_identity(sys.argv[1], 'c'*32); print('ready', flush=True); sys.stdin.readline()", str(path)],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         env={**os.environ, 'PYTHONPATH':str(Path(__file__).resolve().parents[1]/'src')},
-    )
-    try:
-        assert child.stdout is not None and child.stdout.readline().strip() == 'ready'
+    ) as child:
+        expect_output(child, "ready")
         assert read_worker_identity(path) is not None
         _, error = child.communicate(input='\n', timeout=5)
         assert child.returncode == 0, error
         assert path.exists() and read_worker_identity(path) is None
-    finally:
-        if child.poll() is None:
-            child.kill()
-            child.communicate(timeout=5)

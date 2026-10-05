@@ -5,7 +5,7 @@ import json
 import signal
 import psycopg
 from psycopg.conninfo import make_conninfo
-import subprocess
+from helpers.processes import child_process, expect_output
 import sys
 import threading
 import time
@@ -30,14 +30,11 @@ def test_advisory_lock_excludes_live_owner_and_releases_after_process_exit(datab
         "import sys\nfrom chess_crawl.jobs.locking import archive_lock\n"
         "with archive_lock(sys.argv[1]):\n print('locked', flush=True)\n sys.stdin.readline()\n"
     )
-    child = subprocess.Popen(
+    with child_process(
         [sys.executable, "-c", script, database_url],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
-    )
-    try:
-        assert child.stdout is not None
-        assert child.stdout.readline().strip() == "locked"
+    ) as child:
+        expect_output(child, "locked")
         with pytest.raises(ExecutorBusy):
             with archive_lock(database_url):
                 pass
@@ -54,9 +51,6 @@ def test_advisory_lock_excludes_live_owner_and_releases_after_process_exit(datab
         # Independent publisher locks do not conflict with execution ownership.
         with archive_lock(database_url, purpose="events"):
             pass
-    finally:
-        child.terminate()
-        child.communicate(timeout=5)
     with archive_lock(database_url):
         pass
 
@@ -331,22 +325,15 @@ def test_sigterm_finishes_active_job_and_releases_process_ownership(database_url
         " return ExecutionOutcome('done', 'fixture')\n"
         "JobRunner._execute = execute\nraise SystemExit(main(['--database-url',sys.argv[1]]))\n"
     )
-    child = subprocess.Popen(
+    with child_process(
         [sys.executable, "-c", script, str(database_url)],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
-    )
-    try:
-        assert child.stdout is not None and child.stdin is not None
-        assert child.stdout.readline().strip() == "fetching"
+    ) as child:
+        expect_output(child, "fetching")
         child.send_signal(signal.SIGTERM)
         output, error = child.communicate(input="\n", timeout=3)
         assert child.returncode == 0, error
         assert "fetching" not in output
-    finally:
-        if child.poll() is None:
-            child.kill()
-            child.communicate(timeout=3)
     with open_database(database_url) as conn:
         completed = state.get_job(conn, first)
         pending = state.get_job(conn, second)

@@ -18,8 +18,8 @@ from chess_crawl.storage.discovery import OpponentEdge, record_discovery_edges
 from chess_crawl.storage.raw import store_raw_payload
 from chess_crawl.storage.workspaces import submission_context
 from support import seed_game
-from test_report_outcomes import normalize_game
-from test_working_sets import client
+from helpers.games import normalize_game
+from helpers.api import client
 
 
 def test_lookup_reports_and_export_are_offline_and_provider_scoped(database_url: str,monkeypatch: pytest.MonkeyPatch) -> None:

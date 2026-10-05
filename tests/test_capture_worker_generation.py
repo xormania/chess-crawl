@@ -23,7 +23,7 @@ from chess_crawl.storage.player_profiles import (
     player_profile, profile_history, resource_history, resolve_capture_account,
 )
 from chess_crawl.storage.repository import user_identity_transaction
-from test_player_resources import _config, _profile
+from helpers.players import _config, _profile
 
 
 def _queue_capture(conn, record: RawRecord, normalizer):

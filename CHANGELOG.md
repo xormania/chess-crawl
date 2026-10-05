@@ -201,6 +201,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 - Reports expose separate `no_result` and `in_progress` counts. The API retains
   `unfinished` as a compatibility alias for `no_result`; CLI labels now state
   the actual metric.
+- Offline tests clone a sealed migrated PostgreSQL template into independent
+  databases, while migration tests retain pristine databases. Shared test
+  helpers, bounded child-process handshakes, and explicit clocks keep focused
+  validation deterministic; contributor examples now select current API/worker tests.
 - Tests ignore inherited runtime configuration and require `--run-live` for
   marked provider/network tests; unmarked tests stay offline and isolated.
 - Promotion checks require this repository's `dev` branch, and CI reruns on PR

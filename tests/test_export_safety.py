@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-import time
+from types import SimpleNamespace
 from contextlib import contextmanager
 from typing import Any
 
@@ -11,14 +11,14 @@ import pytest
 from psycopg.errors import QueryCanceled
 from starlette.requests import ClientDisconnect
 
-from chess_crawl.api import compat
+from chess_crawl.api import compat, exports
 from chess_crawl.api.compat import ArchiveExportResponse, _prepare_export
 from chess_crawl.api.exports import ExportLimits, ExportSpool
 from chess_crawl.application import ValidationError
 from chess_crawl.storage import api_views
 from chess_crawl.storage.db import connection, transaction
-from support import seed_game
-from test_working_sets import client
+from support import Clock, seed_game
+from helpers.api import client
 
 
 def test_row_and_byte_overflow_fail_before_http_headers(database_url: str,monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,19 +108,28 @@ def test_asgi_timeout_or_early_send_failure_closes_spool(headers_fail: bool) -> 
 
 
 def test_total_deadline_cancels_serial_database_delays_even_for_empty_export(database_url: str,monkeypatch: pytest.MonkeyPatch) -> None:
-    original=api_views.check_export_schema
+    clock = Clock(now=100)
+    monkeypatch.setattr(compat, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(exports, "time", SimpleNamespace(monotonic=clock))
+    original = api_views.check_export_schema
+
     def delayed_schema(conn):
         original(conn)
-        conn.execute("SELECT pg_sleep(0.65)")
-    def empty_rows(conn,*,provider):
-        conn.execute("SELECT pg_sleep(0.65)")
+        # Schema admission consumed part of the total preparation budget.
+        # Advance only the application clock; SQL cancellation remains real.
+        clock.now += 0.75
+
+    observed = []
+    def empty_rows(conn, *, provider):
+        observed.append(conn.execute("SHOW statement_timeout").fetchone()[0])
+        conn.execute("SELECT pg_sleep(1)")
         yield from ()
-    monkeypatch.setattr(api_views,"check_export_schema",delayed_schema)
-    monkeypatch.setattr(compat.queries,"iter_games",empty_rows)
-    started=time.monotonic()
-    with pytest.raises((ValidationError,QueryCanceled)):
+
+    monkeypatch.setattr(api_views, "check_export_schema", delayed_schema)
+    monkeypatch.setattr(compat.queries, "iter_games", empty_rows)
+    with pytest.raises(QueryCanceled):
         _prepare_export(database_url,"games",None,"alpha",limits=ExportLimits(prepare_seconds=1))
-    assert time.monotonic()-started < 1.3
+    assert observed == ["250ms"]
 
 
 @pytest.mark.parametrize("value",["0","-1","bad","100000000"])
