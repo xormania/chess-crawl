@@ -9,7 +9,7 @@ import pytest
 from chess_crawl import application
 from chess_crawl.jobs import state
 from chess_crawl.storage import migrations
-from chess_crawl.storage.db import connection, open_database, require_row
+from chess_crawl.storage.db import connection, open_database, require_row, transaction
 from chess_crawl.storage.events import archive_id
 
 
@@ -93,7 +93,24 @@ def test_upgraded_snapshots_start_at_revision_zero_without_fabricated_events(uni
         with monkeypatch.context() as patch:
             patch.setattr(migrations, "migration_resources", lambda: tuple(item for item in packaged if item[0] < 4))
             migrations.initialize(conn)
-            run_id, job_id = create_run(conn)
+            # Build authentic pre-event rows without invoking a scheduler that
+            # now requires later quota and ownership migrations.
+            with transaction(conn):
+                run_id = require_row(conn.execute(
+                    """INSERT INTO crawl_runs(seed_spec, provider, params_json, status,
+                                              counters, started_at, updated_at)
+                       VALUES ('alice', 'lichess', '{}', 'running', '{}', 123, 123)
+                       RETURNING id""",
+                ))[0]
+                job_id = require_row(conn.execute(
+                    """INSERT INTO discovery_jobs(crawl_run_id, provider, kind, target,
+                                                  params_json, state, priority, depth,
+                                                  attempts, dedup_key, enqueued_at)
+                       VALUES (%s, 'lichess', 'fetch_user_profile', 'alice', '{}',
+                               'pending', 100, 0, 0, 'legacy-profile', 123)
+                       RETURNING id""",
+                    (run_id,),
+                ))[0]
             job = state.get_job(conn, job_id)
             assert job is not None
             assert job.revision == 0
