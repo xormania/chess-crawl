@@ -16,6 +16,7 @@ import httpx
 
 from chess_crawl.config import Config
 from chess_crawl.jobs import state
+from chess_crawl.jobs.dispatch import DispatchMaintenance
 from chess_crawl.jobs.locking import ExecutorBusy, parallel_executor_lock
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.jobs.settings import WorkerSettings
@@ -53,6 +54,7 @@ class Worker:
         self.worker_id = uuid.uuid4().hex
         self.stage = stage
         self.queue_consumer = queue_consumer
+        self.dispatch_maintenance = DispatchMaintenance.from_env(clock=clock)
         self.identity_path = identity_path
         self._stop = threading.Event()
         self._heartbeat_stop = threading.Event()
@@ -107,7 +109,6 @@ class Worker:
         # contender cannot disturb the live owner's durable state.
         with connection(self.db_path, mode="rw") as conn, parallel_executor_lock(conn) as lease:
             initialize(conn)
-            state.resume_stale_in_progress(conn, now=int(self.clock()), lease=lease)
             state.refresh_crawl_runs(conn)
             state.start_worker(
                 conn, self.worker_id, lease=lease,
@@ -134,19 +135,25 @@ class Worker:
                         # Recovery never steals a live session. Poll it even
                         # with an empty queue so an interrupted/acked duplicate
                         # cannot strand the durable original job indefinitely.
-                        state.resume_stale_in_progress(conn, lease=lease)
-                        if self.queue_consumer is None:
-                            count = runner.run(max_jobs=1).claimed
-                        else:
-                            count = self.queue_consumer.run_once(
-                                conn, lambda job_id: runner.run(max_jobs=1, job_id=job_id, resume_stale=True,
-                                                               respect_fairness=True).claimed,
-                            )
-                            # Queue delivery is a latency hint. Expired/DLQ'd
-                            # messages and temporarily unclaimable hints must
-                            # not strand durable pending database work.
-                            if not count:
-                                count = runner.run(max_jobs=1).claimed
+                        state.resume_stale_in_progress(conn, now=int(self.clock()), lease=lease)
+                        self.dispatch_maintenance.run_due(conn)
+                        # Fair, stage-eligible durable work takes precedence over
+                        # an empty queue's twenty-second long poll.
+                        count = runner.run(max_jobs=1).claimed
+                        if self.queue_consumer is not None and not self._stop.is_set():
+                            if count:
+                                # Drain duplicate hints even under continuous DB
+                                # load, without executing a second job or waiting.
+                                self.queue_consumer.run_once(conn, lambda job_id: 0, wait_seconds=0)
+                            else:
+                                count = self.queue_consumer.run_once(
+                                    conn, lambda job_id: runner.run(max_jobs=1, job_id=job_id,
+                                                                   respect_fairness=True).claimed,
+                                )
+                                # Work may become due during the long poll;
+                                # missing/unclaimable hints never strand it.
+                                if not count and not self._stop.is_set():
+                                    count = runner.run(max_jobs=1).claimed
                         claimed += count
                         if once:
                             break
