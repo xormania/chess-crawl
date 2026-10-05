@@ -13,6 +13,14 @@ from fastapi import HTTPException
 from chess_crawl.application import ValidationError
 
 
+_LIMIT_MAXIMUMS = {
+    "max_rows": 10_000_000, "max_bytes": 4 * 1024**3,
+    "prepare_seconds": 600, "download_seconds": 3600, "workspace_slots": 16,
+    "outstanding_spools": 128, "outstanding_bytes": 16 * 1024**3,
+    "workspace_outstanding_spools": 128, "workspace_outstanding_bytes": 16 * 1024**3,
+}
+
+
 @dataclass(frozen=True)
 class ExportLimits:
     max_rows: int = 100_000
@@ -22,25 +30,32 @@ class ExportLimits:
     workspace_slots: int = 2
     outstanding_spools: int = 4
     outstanding_bytes: int = 256 * 1024 * 1024
+    workspace_outstanding_spools: int = 2
+    workspace_outstanding_bytes: int = 128 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        for field, maximum in _LIMIT_MAXIMUMS.items():
+            value = getattr(self, field)
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise ValueError(f"CHESS_CRAWL_EXPORT_{field.upper()} must be an integer between 1 and {maximum}")
+        if self.workspace_outstanding_spools >= self.outstanding_spools:
+            raise ValueError("CHESS_CRAWL_EXPORT_WORKSPACE_OUTSTANDING_SPOOLS must be less than CHESS_CRAWL_EXPORT_OUTSTANDING_SPOOLS")
+        if self.max_bytes > self.workspace_outstanding_bytes:
+            raise ValueError("CHESS_CRAWL_EXPORT_MAX_BYTES must not exceed CHESS_CRAWL_EXPORT_WORKSPACE_OUTSTANDING_BYTES")
+        if self.workspace_outstanding_bytes + self.max_bytes > self.outstanding_bytes:
+            raise ValueError("CHESS_CRAWL_EXPORT_OUTSTANDING_BYTES must allow WORKSPACE_OUTSTANDING_BYTES plus one MAX_BYTES export")
 
     @classmethod
     def from_env(cls) -> ExportLimits:
         defaults = cls()
         values = {}
-        for field, maximum in (("max_rows", 10_000_000), ("max_bytes", 4 * 1024**3),
-                               ("prepare_seconds", 600), ("download_seconds", 3600),
-                               ("workspace_slots", 16), ("outstanding_spools", 128),
-                               ("outstanding_bytes", 16 * 1024**3)):
+        for field in _LIMIT_MAXIMUMS:
             name = "CHESS_CRAWL_EXPORT_" + field.upper()
             try:
                 value = int(os.getenv(name, str(getattr(defaults, field))))
             except ValueError:
                 raise ValueError(f"{name} must be a positive integer") from None
-            if not 1 <= value <= maximum:
-                raise ValueError(f"{name} must be between 1 and {maximum}")
             values[field] = value
-        if values["max_bytes"] > values["outstanding_bytes"]:
-            raise ValueError("CHESS_CRAWL_EXPORT_MAX_BYTES must not exceed CHESS_CRAWL_EXPORT_OUTSTANDING_BYTES")
         return cls(**values)
 
 
@@ -56,9 +71,17 @@ class ExportCapacity:
         self._lock = RLock()
         self._count = 0
         self._bytes = 0
+        self._workspaces: dict[str, tuple[int, int]] = {}
 
-    def reserve(self, limits: ExportLimits) -> Callable[[], None]:
+    def reserve(self, limits: ExportLimits, *, workspace_id: str) -> Callable[[], None]:
         with self._lock:
+            count, size = self._workspaces.get(workspace_id, (0, 0))
+            if (count >= limits.workspace_outstanding_spools
+                    or size + limits.max_bytes > limits.workspace_outstanding_bytes):
+                raise HTTPException(
+                    status_code=429, detail="This workspace's export temporary storage is at capacity",
+                    headers={"Retry-After": "5"},
+                )
             if (self._count >= limits.outstanding_spools
                     or self._bytes + limits.max_bytes > limits.outstanding_bytes):
                 raise HTTPException(
@@ -67,6 +90,7 @@ class ExportCapacity:
                 )
             self._count += 1
             self._bytes += limits.max_bytes
+            self._workspaces[workspace_id] = (count + 1, size + limits.max_bytes)
         released = False
 
         def release() -> None:
@@ -75,6 +99,11 @@ class ExportCapacity:
                 if not released:
                     self._count -= 1
                     self._bytes -= limits.max_bytes
+                    count, size = self._workspaces[workspace_id]
+                    if count == 1:
+                        del self._workspaces[workspace_id]
+                    else:
+                        self._workspaces[workspace_id] = (count - 1, size - limits.max_bytes)
                     released = True
         return release
 

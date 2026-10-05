@@ -183,7 +183,7 @@ def _export_chunks(archive: str, kind: str, provider: str|None, workspace_id: st
 def _prepare_export(archive: str, kind: str, provider: str|None, workspace_id: str,
                     *, limits: ExportLimits) -> ExportSpool:
     deadline = time.monotonic()+limits.prepare_seconds
-    release = export_capacity.reserve(limits)
+    release = export_capacity.reserve(limits, workspace_id=workspace_id)
     spool = None
     try:
         spool = tempfile.TemporaryFile(mode="w+t",encoding="utf-8",newline="")

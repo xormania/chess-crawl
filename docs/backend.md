@@ -28,10 +28,21 @@ increase them; Compose forwards the settings from `.env` to the API service.
 | `WORKSPACE_SLOTS` | 2 | Concurrent preparations per workspace across API replicas |
 | `OUTSTANDING_SPOOLS` | 4 | Retained files per API process, across all workspaces |
 | `OUTSTANDING_BYTES` | 268,435,456 (256 MiB) | Reserved temporary bytes per API process |
+| `WORKSPACE_OUTSTANDING_SPOOLS` | 2 | Retained files per workspace in each API process |
+| `WORKSPACE_OUTSTANDING_BYTES` | 134,217,728 (128 MiB) | Reserved bytes per workspace in each API process |
 
 Storage capacity is reserved at `MAX_BYTES` per request before opening a file,
 and remains reserved through preparation and delivery until the file closes.
-`MAX_BYTES` must fit within `OUTSTANDING_BYTES`. Reservations are deliberately
+Each reservation counts against both process-wide and authenticated workspace
+limits, including slow or unread downloads. A workspace must leave at least one
+file slot and one full `MAX_BYTES` reservation available to other workspaces:
+`WORKSPACE_OUTSTANDING_SPOOLS < OUTSTANDING_SPOOLS`,
+`MAX_BYTES <= WORKSPACE_OUTSTANDING_BYTES`, and
+`WORKSPACE_OUTSTANDING_BYTES + MAX_BYTES <= OUTSTANDING_BYTES`.
+Incoherent operator settings fail at startup. These quotas prevent a single
+workspace from monopolizing process storage; several busy workspaces can still
+fill the shared budget; rejected requests can retry after capacity is released.
+Reservations are deliberately
 conservative even for small exports. Complete reads, explicit close, preparation
 errors, failed sends, cancellation, and timeouts release the file and its
 reservation. Prepared files have an independent expiry timer, so a response
@@ -50,7 +61,8 @@ or configure disk-backed temporary storage and size these limits accordingly.
 Custom multi-worker containers must budget their combined process limits.
 
 An oversized export fails with `422 export_limit_exceeded` before delivery;
-a busy workspace or full temporary-storage budget receives `429` with
+a workspace at its preparation or retained-storage quota, or a full process
+temporary-storage budget, receives `429` with
 `Retry-After`. Narrow the provider filter or adjust trusted operator limits for
 larger local exports. An interrupted or expired download must be retried.
 
