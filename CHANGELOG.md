@@ -134,6 +134,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   need and of the result; a changelog update requirement for all PRs beyond
   CI/test-only changes.
 
+- Compose forwards the Lichess token's workspace owner, API export limits, and
+  worker dispatch cleanup settings;
+  PostgreSQL recovery instructions now pair database backups with verified source
+  objects, restore local archives into isolated volumes, and require operator-owned
+  recovery evidence for S3 archives.
 - A PostgreSQL operations guide with full-database custom backups, isolated
   restoration, binary payload and event identity verification, authenticated
   readiness checks, and major-version upgrade and recovery instructions.
