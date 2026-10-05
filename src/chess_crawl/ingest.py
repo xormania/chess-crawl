@@ -17,9 +17,11 @@ from chess_crawl.normalize.users import normalize_user_payload
 from chess_crawl.providers.base import FetchAttempt, RawRecord
 from chess_crawl.providers.registry import ProviderSession, get_provider_info
 from chess_crawl.storage.db import Connection, transaction
+from chess_crawl.storage.archives import PreparedArchiveObject
 from chess_crawl.storage.raw import (
     insert_fetch_log, latest_raw_payload_id, latest_validators,
     read_raw_payload, store_raw_payload, update_raw_payload_status,
+    prepare_raw_payload,
 )
 from chess_crawl.storage.repository import insert_error
 
@@ -303,10 +305,13 @@ def _persist_response(
     job_id: int | None,
     crawl_run_id: int | None,
 ) -> int | None:
+    prepared_object = (
+        prepare_raw_payload(conn, record) if record.body is not None and record.http_status == 200 else None
+    )
     # Commit the response and its attempt/error evidence together, before
     # invoking a normalizer that can fail independently.
     with transaction(conn):
-        raw_payload_id = _store_raw_if_present(conn, record)
+        raw_payload_id = _store_raw_if_present(conn, record, prepared_object=prepared_object)
         if record.http_status == 304:
             raw_payload_id = latest_raw_payload_id(conn, record.canonical_source_key)
         _log_attempts(conn, record, raw_payload_id, job_id=job_id, crawl_run_id=crawl_run_id)
@@ -325,10 +330,12 @@ def _persist_response(
     return raw_payload_id
 
 
-def _store_raw_if_present(conn: Connection, record: RawRecord) -> int | None:
+def _store_raw_if_present(
+    conn: Connection, record: RawRecord, *, prepared_object: PreparedArchiveObject | None = None,
+) -> int | None:
     if record.body is None or record.http_status != 200:
         return None
-    return store_raw_payload(conn, record)
+    return store_raw_payload(conn, record, prepared_object=prepared_object)
 
 
 def _log_attempts(

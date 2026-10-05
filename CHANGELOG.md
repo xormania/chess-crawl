@@ -7,6 +7,12 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Immutable gzip source archives with local filesystem and optional S3 adapters,
+  verified original/encoded checksums, import evidence references, and resumable
+  offline relocation of existing PostgreSQL payload bodies. Inline storage stays
+  compatible by default; object-backed archives require backing up their objects
+  alongside PostgreSQL. See [archive storage](docs/archive-storage.md).
+
 - Immutable game evidence revisions, queryable PGN move/variation trees,
   headers, comments, NAGs, provider metadata and lexical tokens. Precise clock
   and reported elapsed observations retain conflicting sources, malformed
@@ -101,6 +107,26 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Archive relocation selects pending payloads through a partial ordered index
+  and checks continuation without counting the entire remaining queue per batch.
+  Its JSON result adds `has_more`; `remaining` is null while work remains unless
+  `--count-remaining` explicitly requests an exact reporting scan.
+
+- Configured local archival requires an explicit absolute directory and rejects
+  missing, blank, or relative locations, preventing source-run processes from
+  silently selecting different archives based on their working directory.
+
+- Object reuse rechecks publication and readback before relocation releases an
+  inline backup, restoring missing objects and retaining inline evidence on
+  corruption. Archive settings currently apply to source-run clients and
+  operational helpers; the existing Compose stack continues inline storage.
+
+
+- Object publication and verification run before database write transactions,
+  keeping API/job mutations responsive during slow archive storage. Raw-response
+  deduplication skips object I/O; callers owning outer transactions must prepare
+  external objects beforehand so source references still roll back atomically.
+
 - Preserve unused native move data alongside PGN-derived tokens, including
   conflicting notation and nontext native values. Evidence parser v2 repairs
   previous omissions through local replay into a new immutable revision.
@@ -113,6 +139,7 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   results when a previously observed body becomes current again. Sparse omitted
   facts remain preserved; known live observations cannot retain a stale completed
   end time. The v5 game normalizer can repair existing facts by offline replay.
+
 - Reconcile renamed accounts with username-only placeholders while preserving
   their game, snapshot, source, and discovery history. Conflicting stable
   provider account IDs produce an explicit error instead of overwriting identity.
