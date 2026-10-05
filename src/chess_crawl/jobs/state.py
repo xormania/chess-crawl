@@ -12,6 +12,7 @@ from typing import Any
 from chess_crawl.jobs.models import DiscoveryJob, EnqueueResult, JOB_KINDS, JobKind, JobState, PROCESSING_JOB_KINDS
 from chess_crawl.jobs.locking import ExecutorLease, parallel_executor_lock
 from chess_crawl.jobs.settings import WorkerSettings
+from chess_crawl.jobs.budget import BudgetPolicy
 from chess_crawl.storage.db import (
     Connection, Row, atomic, consistent_read, require_row, operation_lock, lock_key,
     acquire_lock_key, release_lock_key, owns_lock_key,
@@ -21,6 +22,9 @@ from chess_crawl.storage.discovery import discovery_edge_count
 
 LIVE_STATES = ("pending", "in_progress", "blocked")
 TERMINAL_STATES = ("done", "error", "skipped")
+WORKER_HISTORY_SECONDS = 86400
+WORKER_SNAPSHOT_LIMIT = 128
+WORKER_PRUNE_LIMIT = 256
 _RUN_ALLOWS_WORK = """
     NOT EXISTS (
         SELECT 1 FROM crawl_runs
@@ -99,6 +103,17 @@ def enqueue_job(
     if existing is not None:
         return EnqueueResult(job_id=int(existing["id"]), inserted=False)
 
+    inherited_budget = conn._work_budget_id
+    if crawl_run_id is not None:
+        budget_owner = conn.execute("SELECT work_budget_id FROM crawl_runs WHERE id=%s", (crawl_run_id,)).fetchone()
+        inherited_budget = budget_owner[0] if budget_owner is not None else None
+    elif parent_job_id is not None:
+        budget_owner = conn.execute("SELECT work_budget_id FROM discovery_jobs WHERE id=%s", (parent_job_id,)).fetchone()
+        inherited_budget = budget_owner[0] if budget_owner is not None else None
+    if inherited_budget is not None:
+        from chess_crawl.storage.work_budgets import require_backlog_room
+        require_backlog_room(conn, int(inherited_budget))
+
     cursor = conn.execute(
         """
         INSERT INTO discovery_jobs(
@@ -141,17 +156,23 @@ def claim_next_job(
     conn: Connection, *, crawl_run_id: int | None = None,
     now: float | None = None, worker_id: str | None = None,
     job_id: int | None = None, stage: str = "all",
+    budget_policy: BudgetPolicy | None = None,
+    respect_fairness: bool = False,
 ) -> DiscoveryJob | None:
     """Claim row and session ownership together; duplicate delivery is harmless."""
     if stage not in {"all", "acquisition", "processing"}:
         raise ValueError("stage must be all, acquisition, or processing")
     timestamp = time.time() if now is None else now
+    policy = budget_policy or BudgetPolicy.from_env()
+    # Only admission is serialized; session ownership still spans each job.
+    # This short gate makes active limits and workspace turns race-safe.
+    operation_lock(conn, "workspace-scheduler", "claim")
     processing = PROCESSING_JOB_KINDS
     excluded_providers: list[str] = []
     while True:
         exclusions_before = len(excluded_providers)
         candidates = conn.execute(
-            f"""SELECT id,provider,kind FROM discovery_jobs
+            f"""SELECT id,provider,kind,workspace_id FROM discovery_jobs
                  WHERE (state='pending' OR (state='blocked' AND next_attempt_at IS NOT NULL))
                    AND (next_attempt_at IS NULL OR next_attempt_at<=%s)
                    AND (%s::bigint IS NULL OR crawl_run_id=%s)
@@ -161,11 +182,18 @@ def claim_next_job(
                    AND (kind=ANY(%s) OR NOT EXISTS(SELECT 1 FROM provider_cooldowns p
                            WHERE p.provider=discovery_jobs.provider AND p.not_before>%s))
                    AND (kind=ANY(%s) OR NOT provider=ANY(%s))
+                   AND (SELECT COUNT(*) FROM discovery_jobs active
+                         WHERE active.workspace_id=discovery_jobs.workspace_id AND active.state='in_progress')
+                       < COALESCE((SELECT (p.policy->>'workspace_max_active_jobs')::bigint
+                           FROM workspace_budget_policies p WHERE p.workspace_id=discovery_jobs.workspace_id),%s)
                    AND {_RUN_ALLOWS_WORK}
-                 ORDER BY priority,depth,enqueued_at NULLS FIRST,id
+                 ORDER BY COALESCE((SELECT t.turn FROM workspace_claim_turns t
+                     WHERE t.workspace_id=discovery_jobs.workspace_id AND t.stage=%s),0),
+                     priority,depth,enqueued_at NULLS FIRST,id
                  LIMIT 100 FOR UPDATE SKIP LOCKED""",  # nosec B608 # Fixed cancellation SQL only.
-            (timestamp, crawl_run_id, crawl_run_id, job_id, job_id,
-             stage, stage, list(processing), stage, list(processing), list(processing), timestamp, list(processing), excluded_providers),
+            (timestamp, crawl_run_id, crawl_run_id, None if respect_fairness else job_id, None if respect_fairness else job_id,
+             stage, stage, list(processing), stage, list(processing), list(processing), timestamp, list(processing), excluded_providers,
+             policy.workspace_max_active_jobs, stage),
         ).fetchall()
         if not candidates:
             return None
@@ -186,6 +214,10 @@ def claim_next_job(
                         release_lock_key(conn, key)
                     continue
                 keys.append(job_key)
+            if respect_fairness and job_id is not None and int(candidate["id"]) != job_id:
+                for key in reversed(keys):
+                    release_lock_key(conn, key)
+                return None
             token = uuid.uuid4().hex if worker_id is not None else None
             try:
                 with conn.transaction():
@@ -197,6 +229,11 @@ def claim_next_job(
                         (int(timestamp), worker_id, worker_id, token, candidate["id"]),
                     )
                     job = get_job(conn, int(candidate["id"]))
+                    conn.execute(
+                        """INSERT INTO workspace_claim_turns(workspace_id,stage,turn) VALUES(%s,%s,nextval('workspace_claim_turn'))
+                             ON CONFLICT(workspace_id,stage) DO UPDATE SET turn=EXCLUDED.turn""",
+                        (candidate["workspace_id"], stage),
+                    )
             except BaseException:
                 for key in keys:
                     release_lock_key(conn, key)
@@ -236,10 +273,13 @@ def mark_job(
            SET state = %s,
                done_at = %s,
                next_attempt_at = NULL,
-               reason = %s
+               reason = %s,
+               enqueued_at = CASE WHEN %s = 'pending'
+                                  THEN GREATEST(enqueued_at, %s)
+                                  ELSE enqueued_at END
          WHERE id = %s
         """,
-        (state, done_at, reason, job_id),
+        (state, done_at, reason, state, timestamp, job_id),
     )
 
 
@@ -580,6 +620,7 @@ def start_worker(
            heartbeat_expires_at=excluded.heartbeat_expires_at,stopped_at=NULL,status='running'""",
         (worker_id,timestamp,timestamp,timestamp+max_age),
     )
+    _prune_worker_heartbeats(conn, timestamp)
 
 
 @atomic
@@ -593,7 +634,9 @@ def heartbeat_worker(
              current_job_id=%s,status=%s WHERE worker_id=%s AND status IN ('running','stopping')""",
         (timestamp,timestamp+max_age,current_job_id,'stopping' if stopping else 'running',worker_id),
     )
-    return cursor.rowcount == 1
+    owned = cursor.rowcount == 1
+    _prune_worker_heartbeats(conn, timestamp)
+    return owned
 
 
 @atomic
@@ -604,6 +647,25 @@ def stop_worker(conn: Connection, worker_id: str, *, failed: bool = False, now: 
              stopped_at=%s,current_job_id=NULL WHERE worker_id=%s""",
         ('failed' if failed else 'stopped',timestamp,timestamp,timestamp,worker_id),
     )
+    _prune_worker_heartbeats(conn, timestamp)
+
+
+def _prune_worker_heartbeats(conn: Connection, timestamp: float) -> int:
+    cursor = conn.execute(
+        """WITH expired AS (
+             SELECT worker_id FROM executor_heartbeats
+              WHERE status IN ('stopped','failed') AND heartbeat_at<%s AND heartbeat_expires_at<=%s
+              ORDER BY heartbeat_at,worker_id LIMIT %s FOR UPDATE SKIP LOCKED
+           ) DELETE FROM executor_heartbeats h USING expired e WHERE h.worker_id=e.worker_id""",
+        (timestamp-WORKER_HISTORY_SECONDS, timestamp, WORKER_PRUNE_LIMIT),
+    )
+    return cursor.rowcount
+
+
+@atomic
+def prune_worker_heartbeats(conn: Connection, *, now: float | None = None) -> int:
+    """Remove a finite batch of expired terminal rows; liveness is not ownership."""
+    return _prune_worker_heartbeats(conn, time.time() if now is None else now)
 
 
 @consistent_read
@@ -617,23 +679,45 @@ def worker_alive(conn: Connection, worker_id: str, *, now: float | None = None) 
     ))[0])
 
 
+@consistent_read
 def worker_status(conn: Connection, *, now: float | None = None, max_age: float | None = None) -> dict[str, Any]:
+    """Count all live workers while returning a finite, live-first history."""
     timestamp = time.time() if now is None else now
-    rows = conn.execute("SELECT * FROM executor_heartbeats ORDER BY heartbeat_at DESC,worker_id").fetchall()
+    result = require_row(conn.execute(
+        """WITH active AS NOT MATERIALIZED (
+             SELECT * FROM executor_heartbeats
+              WHERE status IN ('running','stopping') AND heartbeat_expires_at>%s
+                AND (%s::double precision IS NULL OR heartbeat_at>%s-%s::double precision)
+           ), candidates AS (
+             (SELECT true AS alive_priority,h.* FROM active h
+               ORDER BY heartbeat_at DESC,worker_id LIMIT %s)
+             UNION ALL
+             (SELECT false AS alive_priority,h.* FROM executor_heartbeats h
+               WHERE heartbeat_at>=%s AND NOT (
+                 status IN ('running','stopping') AND heartbeat_expires_at>%s
+                 AND (%s::double precision IS NULL OR heartbeat_at>%s-%s::double precision))
+               ORDER BY heartbeat_at DESC,worker_id LIMIT %s)
+           ), bounded AS (
+             SELECT * FROM candidates ORDER BY alive_priority DESC,heartbeat_at DESC,worker_id LIMIT %s
+           ) SELECT (SELECT COUNT(*) FROM active) AS active_workers,
+             COALESCE((SELECT jsonb_agg(to_jsonb(b)
+               ORDER BY alive_priority DESC,heartbeat_at DESC,worker_id) FROM bounded b),'[]'::jsonb) AS workers""",
+        (timestamp,max_age,timestamp,max_age,WORKER_SNAPSHOT_LIMIT+1,timestamp-WORKER_HISTORY_SECONDS,
+         timestamp,max_age,timestamp,max_age,WORKER_SNAPSHOT_LIMIT+1,WORKER_SNAPSHOT_LIMIT+1),
+    ))
+    rows = result['workers']
+    metadata = {'active_workers':int(result['active_workers']), 'worker_limit':WORKER_SNAPSHOT_LIMIT,
+                'workers_truncated':len(rows)>WORKER_SNAPSHOT_LIMIT}
     if not rows:
         return {"alive":False,"status":"absent","worker_id":None,"heartbeat_at":None,"age_seconds":None,
-                "active_workers":0,"workers":[]}
+                **metadata,"workers":[]}
     workers = []
-    for row in rows:
-        result = dict(row)
-        result['age_seconds'] = max(0.0,timestamp-float(row['heartbeat_at']))
-        expires = float(row['heartbeat_expires_at'])
-        if max_age is not None:
-            expires = min(expires,float(row['heartbeat_at'])+max_age)
-        result['alive'] = row['status'] in {'running','stopping'} and timestamp<expires
-        workers.append(result)
-    representative = next((worker for worker in workers if worker['alive']),workers[0])
-    return {**representative,'active_workers':sum(bool(w['alive']) for w in workers),'workers':workers}
+    for row in rows[:WORKER_SNAPSHOT_LIMIT]:
+        worker = dict(row)
+        worker['age_seconds'] = max(0.0,timestamp-float(row['heartbeat_at']))
+        worker['alive'] = worker.pop('alive_priority')
+        workers.append(worker)
+    return {**workers[0],**metadata,'workers':workers}
 
 
 def get_job(conn: Connection, job_id: int) -> DiscoveryJob | None:

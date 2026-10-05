@@ -23,8 +23,10 @@ from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.archives import PreparedArchiveObject
 from chess_crawl.storage.raw import (
     insert_fetch_log, latest_raw_payload_id, latest_validators,
-    read_raw_payload, store_raw_payload, update_raw_payload_status,
+    store_raw_payload, update_raw_payload_status,
     prepare_raw_payload,
+    latest_job_payload,
+    raw_payload_metadata,
 )
 from chess_crawl.storage.repository import insert_error, user_identity_transaction
 from chess_crawl.storage.player_profiles import record_resource_attempt, resolve_capture_account
@@ -121,8 +123,11 @@ def fetch_chesscom_archives(
     job_id: int | None = None,
     crawl_run_id: int | None = None,
 ) -> IngestResult:
+    key = f"chess.com/player/{username.strip().lower()}/games/archives"
+    stored = latest_job_payload(conn, job_id, endpoint_type="archives_index", source_key=key) if job_id is not None and conn._work_budget_id is not None else None
+    if stored is not None:
+        return IngestResult("chess.com", "archives_index", 200, stored[0], (), "reused original acquisition")
     with _provider_client("chess.com", config=config, transport=transport, sleeper=sleeper, session=session) as client:
-        key = f"chess.com/player/{username.strip().lower()}/games/archives"
         etag, last_modified = latest_validators(conn, key)
         record = client.get_archives_index(username, etag=etag, last_modified=last_modified)
         return _store_and_mark_skipped(conn, record, job_id=job_id, crawl_run_id=crawl_run_id)
@@ -142,8 +147,12 @@ def fetch_chesscom_month(
     job_id: int | None = None,
     crawl_run_id: int | None = None,
 ) -> IngestResult:
+    key = f"chess.com/player/{username.strip().lower()}/games/{year:04d}/{month:02d}"
+    reused = _reuse_game_acquisition(conn, provider="chess.com", endpoint_type="monthly_archive",
+        source_key=key, max_games=max_games, job_id=job_id, crawl_run_id=crawl_run_id)
+    if reused is not None:
+        return reused
     with _provider_client("chess.com", config=config, transport=transport, sleeper=sleeper, session=session) as client:
-        key = f"chess.com/player/{username.strip().lower()}/games/{year:04d}/{month:02d}"
         etag, last_modified = latest_validators(conn, key)
         record = client.get_monthly_archive(username, year, month, etag=etag, last_modified=last_modified)
         return _store_and_normalize(
@@ -170,6 +179,12 @@ def fetch_lichess_games(
     job_id: int | None = None,
     crawl_run_id: int | None = None,
 ) -> IngestResult:
+    # A bounded job owns one source window. Its remaining new-game allowance
+    # can shrink after a partial commit; retain its original acquired body.
+    reused = _reuse_game_acquisition(conn, provider="lichess", endpoint_type="user_games_stream",
+        source_key=None, max_games=limit, job_id=job_id, crawl_run_id=crawl_run_id)
+    if reused is not None:
+        return reused
     with _provider_client("lichess", config=config, transport=transport, sleeper=sleeper, session=session) as client:
         record = client.get_user_games(username, since=since, until=until, limit=limit)
         return _store_and_normalize(
@@ -193,6 +208,10 @@ def fetch_lichess_game(
     job_id: int | None = None,
     crawl_run_id: int | None = None,
 ) -> IngestResult:
+    reused = _reuse_game_acquisition(conn, provider="lichess", endpoint_type="game",
+        source_key=f"lichess/game/{game_id.strip()}", max_games=1, job_id=job_id, crawl_run_id=crawl_run_id)
+    if reused is not None:
+        return reused
     with _provider_client("lichess", config=config, transport=transport, sleeper=sleeper, session=session) as client:
         record = client.get_game(game_id)
         return _store_and_normalize(
@@ -213,6 +232,12 @@ def fetch_lichess_games_page(
     crawl_run_id: int | None = None,
 ) -> IngestResult:
     """Fetch a page using the provider's native millisecond boundaries."""
+    unit = f"millis-{since_ms if since_ms is not None else 'open'}..{until_ms}-limit-{limit}"
+    reused = _reuse_game_acquisition(conn, provider="lichess", endpoint_type="user_games_stream",
+        source_key=f"lichess/games/user/{username.strip().lower()}/{unit}", max_games=None,
+        job_id=job_id, crawl_run_id=crawl_run_id)
+    if reused is not None:
+        return reused
     with _provider_client("lichess", config=config, transport=transport, sleeper=sleeper, session=session) as client:
         record = client.get_user_games_page(
             username, since_ms=since_ms, until_ms=until_ms, limit=limit,
@@ -221,6 +246,28 @@ def fetch_lichess_games_page(
             conn, record, normalizer=normalize_games_payload, max_games=None,
             job_id=job_id, crawl_run_id=crawl_run_id,
         )
+
+
+def _reuse_game_acquisition(
+    conn: Connection, *, provider: str, endpoint_type: str, source_key: str | None,
+    max_games: int | None, job_id: int | None, crawl_run_id: int | None,
+) -> IngestResult | None:
+    """Resume the exact preserved job occurrence without fabricating a fetch."""
+    if job_id is None or conn._work_budget_id is None:
+        return None
+    stored = latest_job_payload(conn, job_id, endpoint_type=endpoint_type, source_key=source_key)
+    if stored is None:
+        return None
+    raw_id, fetch_id = stored
+    if conn._defer_normalization:
+        from chess_crawl.jobs.state import enqueue_job
+        enqueue_job(conn, provider=provider, kind="normalize_payload", target=str(raw_id),
+                    params={"raw_payload_id": raw_id, "max_games": max_games, "fetch_log_id": fetch_id},
+                    crawl_run_id=crawl_run_id, parent_job_id=job_id, priority=20)
+        ids: tuple[int, ...] = ()
+    else:
+        ids = tuple(normalize_games_payload(conn, raw_id, crawl_run_id=crawl_run_id, max_games=max_games))
+    return IngestResult(provider, endpoint_type, 200, raw_id, ids, "reused original acquisition")
 
 
 @contextmanager
@@ -242,24 +289,28 @@ def replay_raw_payload(
     This is safe after a parser failure or interruption: normalization and
     provenance are transactional and existing normalized entities are upserted.
     """
-    raw = read_raw_payload(conn, raw_payload_id)
+    if conn._work_budget_id is not None:
+        from chess_crawl.storage.work_budgets import reserve_normalization
+        reserve_normalization(conn, conn._work_budget_id)
+        conn._work_payload_read_credits += 1
+    raw = raw_payload_metadata(conn, raw_payload_id)
     normalized: list[int] | int | None
-    if raw.endpoint_type in {"user_profile", "user_stats"}:
+    if raw["endpoint_type"] in {"user_profile", "user_stats"}:
         normalized = normalize_user_payload(conn, raw_payload_id, fetch_log_id=fetch_log_id)
-    elif raw.endpoint_type == "user_resource":
+    elif raw["endpoint_type"] == "user_resource":
         normalized = normalize_resource_payload(conn, raw_payload_id, fetch_log_id=fetch_log_id)
-    elif raw.endpoint_type in {"monthly_archive", "user_games_stream", "game"}:
+    elif raw["endpoint_type"] in {"monthly_archive", "user_games_stream", "game"}:
         normalized = normalize_games_payload(
             conn, raw_payload_id, crawl_run_id=crawl_run_id, max_games=max_games,
         )
-    elif raw.endpoint_type == "archives_index":
+    elif raw["endpoint_type"] == "archives_index":
         _mark_archives_skipped(conn, raw_payload_id)
         normalized = None
     else:
-        raise ValueError(f"unsupported raw endpoint: {raw.endpoint_type}")
+        raise ValueError(f"unsupported raw endpoint: {raw['endpoint_type']}")
     ids = _normalized_ids(normalized)
     return IngestResult(
-        provider=raw.provider, endpoint_type=raw.endpoint_type,
+        provider=raw["provider"], endpoint_type=raw["endpoint_type"],
         status_code=200, raw_payload_id=raw_payload_id, normalized_ids=ids,
         message=f"replayed raw #{raw_payload_id}; normalized {len(ids)} row(s)",
     )
@@ -275,16 +326,16 @@ def installed_parser_target(requested: str = "current") -> str:
 
 
 def _requires_normalization(conn: Connection, raw_payload_id: int) -> bool:
-    raw = read_raw_payload(conn, raw_payload_id)
-    if raw.endpoint_type in {"user_profile", "user_stats"}:
+    raw = raw_payload_metadata(conn, raw_payload_id)
+    if raw["endpoint_type"] in {"user_profile", "user_stats"}:
         version = USERS_PARSER_VERSION
-    elif raw.endpoint_type == "user_resource":
+    elif raw["endpoint_type"] == "user_resource":
         version = RESOURCES_PARSER_VERSION
-    elif raw.endpoint_type == "archives_index":
+    elif raw["endpoint_type"] == "archives_index":
         version = "chesscom-archives-index-v1"
     else:
         version = GAMES_PARSER_VERSION
-    return raw.normalization_status not in {"parsed", "skipped"} or raw.parser_version != version
+    return raw["normalization_status"] not in {"parsed", "skipped"} or raw["parser_version"] != version
 
 
 def _normalized_ids(normalized) -> tuple[int, ...]:

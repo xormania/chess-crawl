@@ -5,6 +5,7 @@ from __future__ import annotations
 from chess_crawl.storage.db import Connection, open_database, require_row, transaction
 
 import json
+import time
 from typing import Any
 
 import httpx
@@ -207,3 +208,55 @@ def test_304_repairs_previously_inferred_chesscom_activity(initialized_conn: Con
     assert row is not None
     assert (row["no_result"], row["in_progress"]) == (1, 0)
     assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
+
+
+def test_standalone_game_archive_304_refreshes_the_current_source(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    config = Config(chesscom_delay_s=0, max_retries=0)
+    old_body = chesscom_archive_body("win")
+    first = fetch_chesscom_month(
+        conn, "alice", 2024, 1, config=config,
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, headers={"etag": '"january"'}, content=old_body,
+        )),
+    )
+    assert first.raw_payload_id is not None
+    baseline = int(time.time())
+    with transaction(conn):
+        conn.execute(
+            "UPDATE raw_payloads SET fetched_at=%s WHERE id=%s",
+            (baseline - 2, first.raw_payload_id),
+        )
+        conn.execute(
+            "UPDATE fetch_logs SET attempted_at=%s WHERE raw_payload_id=%s",
+            (baseline - 2, first.raw_payload_id),
+        )
+    newer_raw = store_raw_payload(conn, RawRecord(
+        provider="chess.com", endpoint_type="monthly_archive",
+        request_url="https://api.chess.com/pub/player/alice/games/2024/02",
+        canonical_source_key="chess.com/player/alice/games/2024/02",
+        body=chesscom_archive_body("checkmated"),
+        fetched_at=baseline - 1,
+        media_type="application/json",
+    ))
+    normalize_games_payload(conn, newer_raw)
+    game_id = first.normalized_ids[0]
+    assert require_row(conn.execute(
+        "SELECT result_raw FROM game_participants WHERE game_id=%s AND color='white'", (game_id,),
+    ))[0] == "checkmated"
+
+    def unchanged(request: httpx.Request) -> httpx.Response:
+        assert request.headers["If-None-Match"] == '"january"'
+        return httpx.Response(304)
+
+    refreshed = fetch_chesscom_month(
+        conn, "alice", 2024, 1, config=config, transport=httpx.MockTransport(unchanged),
+    )
+    assert refreshed.status_code == 304
+    # A non-body response may omit result payload IDs; stored evidence is authoritative.
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 2
+    observed = require_row(conn.execute("SELECT status_code,raw_payload_id FROM fetch_logs ORDER BY id DESC LIMIT 1"))
+    assert (observed["status_code"], observed["raw_payload_id"]) == (304, first.raw_payload_id)
+    assert require_row(conn.execute(
+        "SELECT result_raw FROM game_participants WHERE game_id=%s AND color='white'", (game_id,),
+    ))[0] == "win"

@@ -9,6 +9,24 @@ services and its archive. A future Symfony application using Symfony Docker
 can consume the API and events while keeping its own deployment, configuration,
 user authentication, and UI.
 
+## Export resource limits
+
+Authenticated exports prepare a private temporary file from one archive snapshot
+before response headers are sent. The database connection and transaction close
+before the client receives bytes. Downloads that fail, disconnect or exceed the
+delivery deadline close the file explicitly; no snapshot waits on client speed.
+
+Operator configuration sets `CHESS_CRAWL_EXPORT_MAX_ROWS` (100,000),
+`CHESS_CRAWL_EXPORT_MAX_BYTES` (64 MiB), `CHESS_CRAWL_EXPORT_PREPARE_SECONDS`
+(60), `CHESS_CRAWL_EXPORT_DOWNLOAD_SECONDS` (300), and
+`CHESS_CRAWL_EXPORT_WORKSPACE_SLOTS` (2). Preparation slots are enforced in
+PostgreSQL across API replicas and are isolated by the authenticated workspace.
+An oversized export fails with `422 export_limit_exceeded` before delivery;
+a busy workspace receives `429` and can retry. Narrow the provider filter or
+adjust trusted operator limits for larger local exports. All settings must be
+finite positive integers; callers cannot override them. Provision temporary
+storage for the configured maximum export size and concurrent preparation count.
+
 ## Start the development backend
 
 Use a source checkout with Docker, the Compose v2 plugin, Linux container
@@ -31,6 +49,10 @@ are ignored by Git and excluded from image builds. It preserves
 `mercure_publisher_jwt` and `mercure_subscriber_jwt` files. The subscriber token
 stays on the host for integration clients. These development JWTs have no expiry;
 deployment and end-user token issuance belong to the deploying application.
+Development grants are confined to workspace `local`, matching the single API
+token. To replace older topic grants, rerun the bootstrap and recreate `events`
+with `docker compose up -d --force-recreate events`; master credentials remain
+unchanged.
 
 | Service | Responsibility |
 | --- | --- |
@@ -168,12 +190,16 @@ spaces. Provider and username are normalized before comparing requests.
 
 | Route | Required JSON fields |
 | --- | --- |
-| `POST /v1/imports` | `provider`, `username`, `since`, `until`, `max_games` |
-| `POST /v1/crawls` | Import fields plus `max_depth`, `max_users`, `max_jobs` |
+| `POST /v1/imports` | `provider`, `username`, `max_games`; `since` and `until` are also required in default `bounded` mode |
+| `POST /v1/crawls` | `provider`, `username`, `since`, `until`, `max_games`, `max_depth`, `max_users`, `max_jobs` |
+
+For `full`, `incremental`, and `backfill` imports, `since` and `until` are optional;
+durable run and workspace budgets bound their total work. The configured date-span
+limit applies to bounded imports and crawls.
 
 `provider` is `chess.com` or `lichess`. Timestamps are integer **Unix seconds**.
 The interval includes `since` and excludes `until`: `[since, until)`. The game
-selection uses each game's end time. A game whose end time cannot establish
+selection for bounded imports/crawls uses each game's end time. A game whose end time cannot establish
 membership in the interval is not attributed to that run.
 
 For example, enqueue a January 2024 import:
@@ -238,10 +264,12 @@ Compose passes these settings to the API service.
 | `GET /v1/users` | Paginated provider-scoped users; optional `provider`. |
 | `GET /v1/users/{provider}/{username}/opponents` | Paginated opponents from normalized games. |
 
-Collection routes accept `after` and `limit`. Responses contain `items`,
-`next_cursor`, `total`, and `freshness`; pass a non-null `next_cursor` as the
-next request's `after`. Freshness describes recorded observations and pending
-or failed payloads, rather than asserting that a provider was checked now.
+The game, user, and opponent collection routes above accept `after` and `limit`
+and return `items`, `next_cursor`, `total`, and `freshness`. Other lists use
+bounded page envelopes; not every list includes a total or freshness field.
+Pass a non-null `next_cursor` as the next request's `after`. Freshness describes
+recorded observations and pending or failed payloads, rather than asserting that
+a provider was checked now.
 
 Each response's related reads share a database snapshot. Pagination across
 separate requests does not freeze the archive while the worker adds data.
@@ -342,11 +370,11 @@ This is a topic identifier, not the hub's network address:
 
 | Event type | Topic | Authoritative snapshot |
 | --- | --- | --- |
-| `job.updated` | `https://chess-crawl.local/jobs/{id}` | `GET /v1/jobs/{id}` |
-| `run.updated` | `https://chess-crawl.local/runs/{id}` | `GET /v1/runs/{id}` |
+| `job.updated` | `https://chess-crawl.local/workspaces/{workspace}/jobs/{id}` | `GET /v1/jobs/{id}` |
+| `run.updated` | `https://chess-crawl.local/workspaces/{workspace}/runs/{id}` | `GET /v1/runs/{id}` |
 
 The JSON envelope includes `schema_version` (currently `1`), `archive_id`,
-`event_id`, `type`, `revision`, and `occurred_at`. Resource fields include the
+`event_id`, `type`, `revision`, `occurred_at`, and `workspace_id`. Resource fields include the
 job/run IDs, status, provider, and counters. A job event also carries `kind`
 and `next_attempt_at`. Event `status` corresponds to the job snapshot's `state`
 or the run snapshot's `status`.
@@ -410,7 +438,217 @@ API and Mercure URLs, with application-owned credentials and networking; it does
 not need direct database access or the PostgreSQL volume mounted into its
 containers.
 
+## Workspace ownership and player analysis
+
+The public player/game archive is shared. Application submissions, runs, jobs,
+working sets, analysis results, and Mercure resource topics belong to a workspace.
+Chess Dog owns application users and must select backend credentials on the server.
+A request header or JSON field cannot choose a workspace.
+
+For one local installation, `CHESS_CRAWL_API_TOKEN` (or its existing secret file)
+binds every authenticated request to workspace `local`. For multiple workspaces,
+set `CHESS_CRAWL_API_WORKSPACE_TOKENS_FILE` to a mounted JSON secret file containing
+workspace-to-token mappings, for example `{"workspace-a":"unique-secret-a"}`.
+Do not also configure the single token. Tokens must be unique, nonempty, and
+contain no whitespace; workspace identifiers contain 1–100 letters, digits,
+underscores, or hyphens. `public` is reserved for shared source evidence. The
+configuration is trusted service authentication, not end-user account management.
+Rotating the file requires restarting the API. Do not expose it to browsers.
+
+Existing submissions migrate to workspace `local`. Idempotency keys are durable
+and scoped by workspace. Requests for another workspace's job, run, working set,
+or result return the same 404 as missing records. Worker liveness remains visible,
+but its current job ID is hidden when owned by another workspace. Summary job/run
+counts and source freshness exclude other workspace resources. Mercure subscribers
+must now receive grants for `/workspaces/<workspace>/jobs/<id>` and
+`/workspaces/<workspace>/runs/<id>` topics; old topic grants must be replaced.
+
+The following authenticated routes read only the local archive:
+
+| Route | Response |
+| --- | --- |
+| `GET /v1/workspace` | Trusted workspace identifier |
+| `GET /v1/users/{provider}/{username}` | Account, latest profile facts, aliases, visible resources |
+| `GET /v1/users/{provider}/{username}/history` | Observation history, cursor `after`, bounded `limit` |
+| `GET /v1/users/{provider}/{username}/resources` | Current public and workspace resource observations |
+| `GET /v1/users/{provider}/{username}/resources/history` | Resource history; optional `resource_key` |
+| `GET /v1/users/{provider}/{username}/rating-history` | Typed daily ratings; pagination pins returned `snapshot_id` |
+| `GET /v1/users/{provider}/{username}/coverage` | Stored/normalized game counts and observed date bounds |
+| `GET /v1/users/{provider}/{username}/games` | Player game page with current version IDs |
+| `GET /v1/games/{game_id}` | Immutable evidence including tree, clocks, provenance; optional `version_id` |
+| `GET /v1/games/{game_id}/versions` | Bounded version metadata page |
+| `GET /v1/games/{game_id}/moves` | Bounded nodes with clocks/timings; optional `version_id`, `mainline`, `after`, `limit` |
+| `GET /v1/games/{game_id}/pgn` | PGN generated from stored evidence; partial/unsupported requires `allow_partial=true` |
+| `GET /v1/resources` | Resource acquisition catalog; optional provider |
+| `GET /v1/games/lookup?provider=...&key=...` | Cached game by provider game ID, canonical URL, or content hash |
+| `GET /v1/users/{provider}/{username}/summary` | Result/activity counts, rated counts, date bounds and opponent count |
+| `GET /v1/reports/games-by-month?provider=...` | UTC month aggregates; bounded `limit`, string cursor `after` |
+| `GET /v1/raw` | Cached payload metadata; public and current workspace only; no raw bodies or request credentials |
+| `GET /v1/jobs` | Owned queue page; optional owned `run_id`, numeric `after`, bounded `limit` |
+| `GET /v1/runs` | Owned run metadata page; numeric `after`, bounded `limit` |
+| `GET /v1/runs/{id}/budget` | Owned lifetime policy/usage and exhaustion state; also included in run/job snapshots |
+| `GET /v1/jobs/status` | Owned state/kind/depth counts; optional owned `run_id` |
+| `GET /v1/exports/games.jsonl` | Stream shared normalized game metadata; optional provider |
+| `GET /v1/exports/users.jsonl` | Stream shared normalized public account facts; optional provider |
+| `GET /v1/exports/graph.csv` | Stream only current workspace's run-edge memberships; optional provider |
+
+History page sizes must be below 1000 and also within the configured page limit.
+Exact normalized clock/timing decimals are JSON strings, preserving source
+precision. Missing clocks do not become zero. Coverage counts do not establish
+complete provider history. Provider APIs are contacted only by queued collectors,
+not by player lookup or report requests.
+
+`POST /v1/resources` queues a registered resource using `provider`, `username`,
+`resource_key`, and validated `parameters`. Owner scope comes from authentication.
+`POST /v1/upgrades` queues an offline normalization upgrade using `provider`,
+`name`, `parser_version` (default `current`), and `batch_size` (1–100). Its response
+Location is `/v1/upgrades/<job_id>`, which exposes durable execution progress.
+Both use `Idempotency-Key`; SQL schema migrations never contact providers.
+Upgrade targets are `current` or the exact installed parser manifest covering
+archives, games/evidence, resources, and users. Workers reject unavailable targets.
+An upgrade pins that manifest; restarting it with `current` after changing parser
+binaries fails identity validation rather than claiming the original target ran.
+
+`POST /v1/profiles/refresh` and `POST /v1/stats/refresh` accept exactly `provider`
+and `username`, plus `Idempotency-Key`, and create one owned durable job. Separate
+statistics refresh is supported for Chess.com; Lichess performance and daily
+history use the registered resources. These handlers do not acquire data.
+`POST /v1/games/collect` queues one public Lichess game export, using `provider`
+and its eight-character public `game_id` plus `Idempotency-Key`. URLs and player
+secret IDs are rejected; Chess.com direct game acquisition is unsupported.
 Public Lichess game exports and user-game history requests omit provider OAuth,
 even when an account token is configured. Account-private games are unsupported
 by these public collectors. Explicit owned resources keep their workspace-bound
 OAuth access.
+
+JSONL/CSV exports own a read-only repeatable-read snapshot and stream database
+rows with bounded memory. Completion exports all matching rows; an interrupted
+HTTP download must be retried. The graph export emits each owned run membership
+with that run's ID. Its game counts and representative game IDs are reconstructed
+from that run's attributed games, and depth from its discovery jobs. Missing
+historical attribution leaves those metrics zero or unknown; another workspace's
+global edge provenance and merged depth are never substituted. Usernames starting
+with spreadsheet formula characters are escaped in CSV. Raw payload catalog pages
+also exclude unassigned legacy evidence. Worker recovery and execution remain
+dedicated operator functions; HTTP reads and submissions do not run the worker.
+
+Imports retain bounded mode by default. Optional `collection_mode` values
+`full`, `incremental`, and `backfill` use `max_games` as a page budget, not a total
+history cap, and `batch_size` (1–12) controls bounded execution units. These modes
+can cover a window larger than the bounded-import date-span limit. Provider
+timestamps remain inclusive `since` and exclusive `until`. These bounds are optional
+for full/incremental/backfill; omit `since` for an incremental watermark refresh.
+Lichess history modes select using the provider's native creation timestamp,
+while bounded imports/crawls select by normalized game end time. Bounded
+collection still requires both timestamps.
+
+### Reproducible working sets
+
+`POST /v1/working-sets` accepts a name, filters, and settings with an
+`Idempotency-Key`. Filters can include provider, username, time bounds, time class,
+variant, and rated status. A username requires its provider. Selection uses the
+current immutable game version and persists ordered membership in PostgreSQL;
+subsequent imports or parser upgrades do not change existing working sets.
+Players are selected through provider account IDs so retained historical games
+survive username changes. Unnormalized games are excluded until evidence exists.
+
+`GET /v1/working-sets/<id>` reads metadata. The `/members` subresource pages through
+stored game-version references without copying all games into memory. Workers can
+checkpoint a membership cursor and process bounded batches. Creating a newer
+selection is explicit. A completed selection and its membership are immutable.
+Synchronous creation selects at most the configured limit plus one row. The
+default `CHESS_CRAWL_MAX_WORKING_SET_MEMBERS` is 10000; a larger match returns 422
+with `working_set_too_large` and rolls back all selection/submission rows. Nothing
+is silently truncated. Operators can adjust the limit after measuring latency.
+Whole-archive building beyond this limit requires the planned durable async
+builder with an explicit immutable as-of snapshot; it is not yet implemented.
+
+`POST /v1/working-sets/<id>/results` stores a calculation's `implementation`,
+`implementation_version`, `settings`, and `output`. Its signature includes the
+exact input selection, working-set settings, and calculation configuration.
+Repeating the same output reuses the stored record; a different output for the
+same signature returns 409. `POST /v1/working-sets/<id>/results/lookup` accepts
+those calculation fields without output and retrieves an exactly compatible
+result before computation, or returns 404. `GET /v1/results/<id>` reads a visible
+record. Settings are limited to 64 KiB and inline outputs to 1 MiB; large output
+artifacts belong in compressed object storage. Model/engine execution is provided
+by later registered analysis workers, not by these result-storage routes.
+
+Private PGN uploads require a separate namespace and access-aware normalization;
+this API does not publish private imports into the shared provider archive.
+
+
+### Trusted work ceilings and workspace quotas
+
+A page size and provider pacing do not bound an entire history import. Every
+queued API operation receives one server-owned run budget, inherited by its
+acquisition, continuation, and normalization jobs. HTTP JSON cannot choose or
+raise these ceilings. An idempotent replay retains the original budget; changing
+request keys does not clear workspace usage.
+
+| Limit | Per run lifetime | Per workspace UTC month |
+| --- | --- | --- |
+| Distinct games processed | 100,000 | 1,000,000 |
+| Normalization work units | 100,000 | 1,000,000 |
+| Remote response bytes | 256 MiB | 2 GiB |
+| Remote request attempts | 2,000 | 10,000 |
+
+The default response ceiling is 16 MiB. Each workspace may have two active jobs.
+The queued allowance plus active allowance bounds all unfinished jobs (pending,
+blocked, and running): 32 + 2 = 34 by default, including dynamically created
+children. These are operator settings, loaded from the
+`CHESS_CRAWL_JOB_MAX_*`, `CHESS_CRAWL_WORKSPACE_MAX_*`, and
+`CHESS_CRAWL_MAX_RESPONSE_BYTES` environment variables listed in `.env.example`.
+Compose passes the same configuration to the API and worker. Invalid, zero,
+negative, or non-bigint settings fail configuration validation.
+Repeated normalization attempts, including retained-source replay, consume work
+units before parsing. A native game identity consumes its game allowance once
+per run. Requests reserve finite byte and attempt allowances before HTTP; a
+completed read refunds unused reserved bytes, while an uncertain crash retains
+its conservative charge. Workers rotate workspaces and apply the active-job
+limit to database claims and SQS hints.
+
+Admission runs atomically with scoped submission creation. A full backlog or
+exhausted monthly quota returns HTTP `429` with
+`error.code=workspace_quota_exceeded` and owner-only `error.quota` fields:
+`dimension`, `remaining`, `reset_at`, and `budget_id`. Rejection creates no run,
+jobs, submission identity, or events. Retrying an already accepted idempotency
+key returns its original result without reserving a second budget. Other
+workspaces retain their independent quota and queue capacity.
+The trusted workspace policy is installed in a preceding short transaction, so
+a lowered operator limit remains effective even if admission is rejected.
+Later submissions cannot raise that workspace authority. Usage is unchanged by
+policy installation and every accepted run retains its own lifetime policy.
+
+`GET /v1/runs/<id>/budget`, run snapshots, and job snapshots expose the persisted
+policy, counters, and exhaustion reason. Quota months begin at midnight UTC on
+the first day; a new month does not reset any run's lifetime counters or ceilings.
+An exhausted collection remains incomplete with its durable checkpoint, rather
+than reporting a complete history or silently shortening its dates. After an
+operator-approved extension or a renewed quota period, resumption continues that
+checkpoint and reuses retained source bodies. Stored player/game reads remain
+offline and available when acquisition is blocked. Budget extension belongs to
+the operator workflow; there is no HTTP caller-supplied policy extension.
+
+Inspect and resume through a process with operator PostgreSQL access:
+
+```bash
+python -m chess_crawl.jobs.budget show --run-id 42
+python -m chess_crawl.jobs.budget resume --run-id 42
+```
+
+Both commands use `CHESS_CRAWL_DATABASE_URL`; `--database-url` is also supported.
+`show` opens a read-only snapshot and includes the stored budget, current
+workspace month/authority, and configured operator policy. Before extending a
+run, raise the required API and worker environment ceilings, restart those
+services, and run `resume` with that same environment. The command derives the
+workspace from the stored run, extends ceilings monotonically, and requeues only
+budget-blocked checkpoints. It preserves spent counters, job cursors, retained
+source objects, and completed jobs. A new UTC month renews workspace capacity;
+use the same command to resume its paused runs. A lifetime-exhausted run still
+requires a ceiling extension. These commands require an already migrated
+archive and do not run migrations or contact providers.
+
+Migration `0012_work_budgets` follows the tiny `0011_archive_transfer` import
+reference index prerequisite. Including that index does not enable the separate
+external-object transfer helper or cloud deployment package.

@@ -7,8 +7,31 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Server-owned lifetime run budgets, monthly workspace quotas, bounded streamed
+  provider responses, and fair workspace claims. Budget exhaustion retains
+  incomplete checkpoints for explicit operator extension and resume. Descendant
+  backlog admission and original-response replay preserve captured work without
+  historical re-fetch after a quota pause or interrupted coverage commit.
+  Selective lookup indexes keep quota and replay checks independent of terminal
+  shared archive history.
+
+- Bounded worker status with an exact active-worker count and batched 24-hour
+  retention for expired stopped/failed heartbeats. Migration `0013` supports
+  status and cleanup without changing execution ownership.
 - Container health probes bind to the worker's own UUID and live local process,
   so another healthy executor cannot hide an expired container heartbeat.
+- Workspace-owned submissions, jobs, Mercure topics, immutable player working sets,
+  and exact-input analysis result reuse, with server-bound service credentials.
+- Rich archive APIs for profile/resource history, game evidence, clock precision,
+  coverage, offline upgrades, resource collection, and normalized PGN export.
+- Full/incremental/backfill import request contracts with optional date bounds and
+  bounded execution batches. Synchronous working sets enforce a configurable
+  10,000-member default with atomic overflow rejection.
+- Authenticated archive lookup, reports, scoped cached-payload/job/run catalogs,
+  streamed public game/user JSONL and owned graph CSV exports, and one-job
+  profile/statistics refresh submissions. Streamed archive exports close their
+  snapshot and connection when an HTTP download is interrupted.
+
 - Concurrent durable workers with per-job session ownership and fencing,
   independent provider acquisition and local processing stages, persistent
   request/retry pacing, and aggregate worker liveness. Migration `0009` must
@@ -169,6 +192,30 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   preventing token-only private game evidence from entering the public archive.
   Explicit owned resources retain workspace-scoped OAuth access.
 
+- Cloud bootstrap rotates runtime credentials using attributes allowed to a
+  non-superuser RDS master, preserving restrictive creation defaults and unsafe
+  role refusal. Raw response registration retains a per-source transaction lock
+  while unrelated archival writes proceed concurrently.
+
+- CloudFormation rejects the unsupported Fargate combination of 0.5 vCPU and
+  8 GiB before creating runtime task definitions.
+
+- Cloud bootstrap denies temporary-table creation as well as schema/role DDL,
+  and refuses existing runtime roles carrying unexpected explicit grants or
+  ownership. Dedicated-database PUBLIC privilege assumptions are documented.
+- Development Mercure credentials authorize the workspace-scoped local job and
+  run topics, restoring private event delivery in Compose without granting
+  access to other workspaces or rotating existing master credentials.
+- Server-owned run ceilings and monthly workspace quotas bound history acquisition
+  and deferred processing across continuations, retries, and new submission keys.
+  API admission rejects excess workspace backlog/quota atomically with scoped
+  HTTP 429 diagnostics; stored budget reads preserve lifetime policy and usage.
+- HTTP exports prepare a finite temporary spool before sending response bytes,
+  releasing database snapshots before slow client delivery. Operator row, byte,
+  preparation and download limits bound each export, and per-workspace database
+  admission works across API replicas. Failed or interrupted streams close the
+  private temporary file explicitly.
+
 - Archive relocation selects pending payloads through a partial ordered index
   and checks continuation without counting the entire remaining queue per batch.
   Its JSON result adds `has_more`; `remaining` is null while work remains unless
@@ -212,17 +259,17 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   public identity facts; private-only placeholders have null public dates until
   a public observation supplies them. Replay uses user parser v7 and resource
   parser v2 without downloading stored sources again.
+- Deferred normalization queues preserve the captured fetch identity through
+  worker resumes. New observations schedule a successor when older processing
+  is still running, so a source rejected as out of date cannot remain pending
+  without work. Private placeholder creation and multi-account replay retain
+  scoped identity locks while unrelated account writes proceed concurrently.
   Internal delayed replay can target its exact successful fetch occurrence;
   the existing worker retains the same captured identity through parsing.
   Private-only profile lookups remain invisible outside the owning scope;
   public user lookups, listings, exports, and user totals also exclude those
   identities until public evidence exists, while authorized scoped reads retain them.
   Public identities with supplied zero dates or game observations remain visible.
-- Deferred normalization queues preserve the captured fetch identity through
-  worker resumes. New observations schedule a successor when older processing
-  is still running, so a source rejected as out of date cannot remain pending
-  without work. Private placeholder creation and multi-account replay retain
-  scoped identity locks while unrelated account writes proceed concurrently.
 
 - Failed Chess.com statistics requests retain request evidence without creating
   or refreshing a player account. Local Lichess profile replay also populates

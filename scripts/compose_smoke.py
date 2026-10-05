@@ -147,7 +147,7 @@ def main() -> int:
     for collection in ("games", "users"):
         status, page = api.request(f"/v1/{collection}?limit=1")
         assert status == 200 and page["items"] == [] and page["next_cursor"] is None
-    topic = args.topic_prefix.rstrip("/") + f"/jobs/{job_id}"
+    topic = args.topic_prefix.rstrip("/") + f"/workspaces/local/jobs/{job_id}"
     try:
         anonymous = subscribe(args.hub_url, topic, None)
     except HTTPError as response:

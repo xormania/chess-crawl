@@ -22,7 +22,8 @@ class PendingEvent:
     @property
     def resource_path(self) -> str:
         collection = "jobs" if self.event_type == "job.updated" else "runs"
-        return f"/{collection}/{self.resource_id}"
+        workspace = self.payload.get("workspace_id", "local")
+        return f"/workspaces/{workspace}/{collection}/{self.resource_id}"
 
 
 def archive_id(conn: Connection) -> str:

@@ -27,7 +27,7 @@ from chess_crawl.providers.registry import ProviderSession
 from chess_crawl.storage import collection as store
 from chess_crawl.storage.acquisition import payload_game_ids
 from chess_crawl.storage.db import Connection, transaction
-from chess_crawl.storage.raw import payload_observed_at, read_raw_payload
+from chess_crawl.storage.raw import payload_observed_at, read_raw_payload, latest_job_payload
 
 
 @dataclass(frozen=True)
@@ -352,9 +352,12 @@ def _use_local_payload(conn, job, raw_id, options) -> tuple[int, ...]:
     raw = read_raw_payload(conn, raw_id)
     needs_parser = raw.parser_version != PARSER_VERSION or raw.normalization_status not in {"parsed", "skipped"}
     if getattr(conn, "_defer_normalization", False) and (needs_parser or job.crawl_run_id is not None):
+        captured = latest_job_payload(conn, job.id, endpoint_type=raw.endpoint_type,
+                                      source_key=raw.canonical_source_key)
         enqueue_job(
             conn, provider=job.provider, kind=cast(JobKind, "normalize_payload"), target=str(raw.id),
-            params={"raw_payload_id": raw.id, "fetch_log_id": observation_id(conn, raw.id) or None},
+            params={"raw_payload_id": raw.id, "max_games": None,
+                    "fetch_log_id": captured[1] if captured is not None else observation_id(conn, raw.id)},
             crawl_run_id=job.crawl_run_id,
             parent_job_id=job.id, priority=20,
         )

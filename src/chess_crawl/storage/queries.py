@@ -109,23 +109,23 @@ def query_game(conn: Connection, provider: str, game_id: str) -> GameReport | No
     )
 
 
-def query_raw(conn: Connection, provider: str, limit: int) -> list[Row]:
+def query_raw(conn: Connection, provider: str, limit: int, *, owner_scope: str = "public") -> list[Row]:
     return list(
         conn.execute(
             """
             SELECT id, provider, endpoint_type, canonical_source_key, response_status,
                    content_type, body_hash, body_bytes, normalization_status, fetched_at
               FROM raw_payloads
-             WHERE provider = %s
+             WHERE provider = %s AND owner_scope IN ('public',%s)
              ORDER BY fetched_at DESC, id DESC
              LIMIT %s
             """,
-            (provider, limit),
+            (provider, owner_scope, limit),
         )
     )
 
 
-def summary_report(conn: Connection) -> dict[str, Any]:
+def summary_report(conn: Connection, *, workspace_id: str | None = None) -> dict[str, Any]:
     providers = list(
         conn.execute(
             """
@@ -139,16 +139,18 @@ def summary_report(conn: Connection) -> dict[str, Any]:
         )
     )
     raw_payloads = int(require_row(conn.execute(
-        "SELECT COUNT(*) FROM raw_payloads WHERE owner_scope = 'public'",
+        "SELECT COUNT(*) FROM raw_payloads WHERE owner_scope IN ('public',COALESCE(%s,'public'))",
+        (workspace_id,),
     ))[0])
     runs = list(
         conn.execute(
             """
             SELECT status, COUNT(*) AS count
               FROM crawl_runs
+             WHERE (%s::text IS NULL OR workspace_id=%s)
              GROUP BY status
              ORDER BY status COLLATE "C"
-            """
+            """, (workspace_id,workspace_id),
         )
     )
     jobs = list(
@@ -156,9 +158,10 @@ def summary_report(conn: Connection) -> dict[str, Any]:
             """
             SELECT state, COUNT(*) AS count
               FROM discovery_jobs
+             WHERE (%s::text IS NULL OR workspace_id=%s)
              GROUP BY state
              ORDER BY state COLLATE "C"
-            """
+            """, (workspace_id,workspace_id),
         )
     )
     return {
@@ -373,23 +376,24 @@ def iter_graph_edges(
             stream.close()
 
 
-def archive_freshness(conn: Connection, *, provider: str | None = None) -> dict[str, Any]:
+def archive_freshness(conn: Connection, *, provider: str | None = None, owner_scope: str = "public") -> dict[str, Any]:
     """Describe preserved and normalized observations, without implying live data."""
     row = require_row(conn.execute(
         """
-        SELECT (SELECT MAX(f.attempted_at) FROM fetch_logs f
-                 JOIN raw_payloads checked_raw ON checked_raw.id = f.raw_payload_id
-                WHERE checked_raw.owner_scope = 'public'
-                  AND (%s::text IS NULL OR f.provider = %s)
-                  AND f.status_code IN (200, 304)) AS last_checked_at,
+        SELECT (SELECT MAX(attempted_at) FROM fetch_logs
+                 WHERE (%s::text IS NULL OR provider = %s) AND status_code IN (200, 304)
+                   AND EXISTS(SELECT 1 FROM raw_payloads r
+                        WHERE r.id=fetch_logs.raw_payload_id
+                        AND r.owner_scope IN ('public',%s))) AS last_checked_at,
                MAX(fetched_at) AS last_fetched_at,
                MAX(normalized_at) AS last_normalized_at,
                COUNT(*) FILTER (WHERE normalization_status IN ('pending', 'stale')) AS pending_payloads,
                COUNT(*) FILTER (WHERE normalization_status = 'failed') AS failed_payloads
           FROM raw_payloads
-         WHERE owner_scope = 'public' AND (%s::text IS NULL OR provider = %s)
+         WHERE (%s::text IS NULL OR provider = %s)
+           AND owner_scope IN ('public',%s)
         """,
-        (provider, provider, provider, provider),
+        (provider, provider, owner_scope, provider, provider, owner_scope),
     ))
     return {"provider": provider, **dict(row)}
 

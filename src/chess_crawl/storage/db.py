@@ -65,6 +65,8 @@ class Connection(psycopg.Connection[Row]):
     _ownership_keys: tuple[int, ...] = ()
     _job_fence: tuple[int, str] | None = None
     _defer_normalization: bool = False
+    _work_budget_id: int | None = None
+    _work_payload_read_credits: int = 0
 
     @property
     def in_transaction(self) -> bool:

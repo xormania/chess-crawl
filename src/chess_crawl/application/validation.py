@@ -38,8 +38,27 @@ def validate_idempotency_key(key: str) -> str:
     return key
 
 
+def validate_player_refresh(provider: str, username: str, *, statistics: bool) -> tuple[str,str]:
+    provider,username = validate_provider(provider),validate_username(username)
+    if statistics and provider!="chess.com":
+        raise ValidationError("Separate statistics refresh is supported only for chess.com",code="unsupported_resource")
+    return provider,username
+
+
+def validate_game_collection(provider: str, game_id: str) -> tuple[str,str]:
+    provider = validate_provider(provider)
+    if provider!="lichess":
+        raise ValidationError("Direct game collection is supported only for lichess",code="unsupported_resource")
+    if not isinstance(game_id,str) or not re.fullmatch(r"[A-Za-z0-9]{8}",game_id):
+        raise ValidationError("A public Lichess game ID must have eight alphanumeric characters",code="invalid_game_id")
+    return provider,game_id
+
+
 def validate_import(request: ImportRequest, *, limits: Limits = Limits()) -> ImportRequest:
     provider, username = _validate_common(request, limits)
+    if not isinstance(request.collection_mode,str) or request.collection_mode not in {"bounded", "full", "incremental", "backfill"}:
+        raise ValidationError("Unknown collection mode", code="invalid_collection_mode")
+    validate_integer(request.batch_size, "batch_size", minimum=1, maximum=12)
     if limits.max_jobs < 2:
         raise ValidationError("An import requires a profile job and a games job", code="invalid_max_jobs")
     return replace(request, provider=provider, username=username)
@@ -56,12 +75,18 @@ def validate_crawl(request: CrawlRequest, *, limits: Limits = Limits()) -> Crawl
 def _validate_common(request: ImportRequest | CrawlRequest, limits: Limits) -> tuple[str, str]:
     provider = validate_provider(request.provider)
     username = validate_username(request.username)
-    validate_integer(request.since, "since", minimum=0, maximum=_MAX_TIMESTAMP - 1)
-    validate_integer(request.until, "until", minimum=1, maximum=_MAX_TIMESTAMP)
-    if request.since >= request.until:
-        raise ValidationError("since must be earlier than the exclusive until timestamp", code="invalid_date_window")
-    if request.until - request.since > limits.max_date_span_days * 86400:
-        raise ValidationError("Date window exceeds the configured maximum span", code="invalid_date_window")
+    mode = getattr(request,"collection_mode","bounded")
+    if mode == "bounded" and (request.since is None or request.until is None):
+        raise ValidationError("Bounded collection requires since and until",code="invalid_date_window")
+    if request.since is not None:
+        validate_integer(request.since, "since", minimum=0, maximum=_MAX_TIMESTAMP - 1)
+    if request.until is not None:
+        validate_integer(request.until, "until", minimum=1, maximum=_MAX_TIMESTAMP)
+    if request.since is not None and request.until is not None:
+        if request.since >= request.until:
+            raise ValidationError("since must be earlier than the exclusive until timestamp",code="invalid_date_window")
+        if mode == "bounded" and request.until-request.since > limits.max_date_span_days*86400:
+            raise ValidationError("Date window exceeds the configured maximum span",code="invalid_date_window")
     validate_integer(request.max_games, "max_games", minimum=1, maximum=limits.max_games)
     return provider, username
 

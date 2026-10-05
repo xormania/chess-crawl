@@ -177,6 +177,9 @@ def _store_raw_payload(
 
 
 def read_raw_payload(conn: Connection, raw_payload_id: int) -> StoredRawPayload:
+    if conn._work_budget_id is not None:
+        from chess_crawl.storage.work_budgets import reserve_payload_read
+        reserve_payload_read(conn, conn._work_budget_id, raw_payload_id)
     row = conn.execute(
         "SELECT * FROM raw_payloads WHERE id = %s",
         (raw_payload_id,),
@@ -212,6 +215,16 @@ def read_raw_payload(conn: Connection, raw_payload_id: int) -> StoredRawPayload:
         parser_version=row["parser_version"],
         owner_scope=row["owner_scope"],
     )
+
+
+def raw_payload_metadata(conn: Connection, raw_payload_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT provider,endpoint_type,normalization_status,parser_version FROM raw_payloads WHERE id=%s",
+        (raw_payload_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"raw payload not found: {raw_payload_id}")
+    return dict(row)
 
 
 @atomic
@@ -420,3 +433,20 @@ def latest_validators(conn: Connection, canonical_source_key: str) -> tuple[str 
         row["etag"] or headers.get("etag"),
         row["last_modified"] or headers.get("last-modified") or headers.get("last_modified"),
     )
+
+
+def latest_job_payload(
+    conn: Connection, job_id: int, *, endpoint_type: str, source_key: str | None,
+) -> tuple[int, int] | None:
+    """Retain the original successful occurrence across quota/processing pauses."""
+    row = conn.execute(
+        """SELECT f.raw_payload_id,f.id FROM fetch_logs f
+             JOIN raw_payloads r ON r.id=f.raw_payload_id JOIN discovery_jobs j ON j.id=f.job_id
+             WHERE f.job_id=%s AND f.status_code IN (200,304) AND r.endpoint_type=%s
+               AND f.raw_payload_id IS NOT NULL
+               AND r.provider=j.provider AND r.owner_scope IN ('public',j.workspace_id)
+               AND (%s::text IS NULL OR r.canonical_source_key=%s)
+             ORDER BY f.attempted_at DESC,f.id DESC LIMIT 1""",
+        (job_id, endpoint_type, source_key, source_key),
+    ).fetchone()
+    return (int(row[0]), int(row[1])) if row is not None else None
