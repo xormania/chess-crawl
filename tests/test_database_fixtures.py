@@ -31,7 +31,11 @@ def test_template_rejects_connections_and_has_no_open_sessions(
         "SELECT COUNT(*) FROM pg_stat_activity WHERE datname=%s", (postgres_template,),
     ).fetchone() == (0,)
     with pytest.raises(psycopg.OperationalError, match="not currently accepting connections"):
-        with psycopg.connect(make_conninfo(postgres_admin.info.dsn, dbname=postgres_template)):
+        # ConnectionInfo.dsn deliberately excludes the authenticated password.
+        with psycopg.connect(
+            make_conninfo(postgres_admin.info.dsn, dbname=postgres_template),
+            password=postgres_admin.info.password,
+        ):
             pass
 
 
