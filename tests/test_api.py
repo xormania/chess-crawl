@@ -113,37 +113,53 @@ def test_invalid_submissions_never_open_database(tmp_path: Path, monkeypatch, bo
         assert response.json()["error"]["code"]
 
 
-@pytest.mark.parametrize("mode", ["bounded", "full", "incremental", "backfill"])
-def test_every_http_import_mode_requires_an_operator_bounded_date_window(
-    tmp_path: Path, monkeypatch, mode: str,
-) -> None:
+@pytest.mark.parametrize("bounds", [(None, None), (None, IMPORT["until"]), (IMPORT["since"], None)])
+def test_bounded_http_import_requires_an_operator_bounded_date_window(monkeypatch, bounds: tuple) -> None:
     def forbidden(*args, **kwargs):
-        pytest.fail("Unbounded imports must be rejected before connecting to PostgreSQL")
+        pytest.fail("Invalid bounded imports must be rejected before connecting to PostgreSQL")
 
     monkeypatch.setattr(db, "connect", forbidden)
-    body = {**IMPORT, "collection_mode": mode, "since": None, "until": None}
+    body = {**IMPORT, "collection_mode": "bounded", "since": bounds[0], "until": bounds[1]}
     with TestClient(create_app("postgresql://test@127.0.0.1:1/unavailable", TOKEN), headers=AUTH) as client:
-        response = client.post("/v1/imports", json=body, headers={"Idempotency-Key": f"unbounded-{mode}"})
+        response = client.post("/v1/imports", json=body, headers={"Idempotency-Key": "missing-bound"})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_date_window"
 
 
 @pytest.mark.parametrize("mode", ["full", "incremental", "backfill"])
-def test_history_import_modes_share_the_configured_total_date_budget(
-    tmp_path: Path, monkeypatch, mode: str,
-) -> None:
-    def forbidden(*args, **kwargs):
-        pytest.fail("Over-budget imports must be rejected before connecting to PostgreSQL")
+def test_history_import_modes_allow_optional_dates_under_durable_quotas(database_url: str, mode: str) -> None:
+    body = {**IMPORT, "collection_mode": mode, "since": None, "until": None}
+    with TestClient(create_app(database_url, TOKEN), headers=AUTH) as client:
+        response = client.post("/v1/imports", json=body, headers={"Idempotency-Key": f"history-{mode}"})
+        assert response.status_code == 202, response.text
+        submission = response.json()
+        budget = client.get(f"/v1/runs/{submission['run_id']}/budget").json()
+        assert budget["id"] > 0 and budget["policy"]["job_max_remote_requests"] > 0
+        job = client.get(f"/v1/jobs/{submission['job_ids'][1]}").json()
+        assert job["budget"]["id"] == budget["id"]
+        assert job["params"]["since"] is None and job["params"]["until"] is None
+        assert "since_ms" not in job["params"] and "until_ms" not in job["params"]
+    with db.connection(database_url) as conn:
+        assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 0
 
-    monkeypatch.setattr(db, "connect", forbidden)
-    body = {**IMPORT, "collection_mode": mode, "until": 1704067200 + 3 * 86400}
-    limits = Limits(max_date_span_days=2)
-    with TestClient(
-        create_app("postgresql://test@127.0.0.1:1/unavailable", TOKEN, limits=limits), headers=AUTH,
-    ) as client:
-        response = client.post("/v1/imports", json=body, headers={"Idempotency-Key": f"over-budget-{mode}"})
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "invalid_date_window"
+
+@pytest.mark.parametrize("mode", ["bounded", "full", "incremental", "backfill"])
+def test_only_bounded_import_caps_the_configured_date_span(database_url: str, mode: str) -> None:
+    since = int(str(IMPORT["since"]))
+    until = since + 3 * 86400
+    body = {**IMPORT, "collection_mode": mode, "since": since, "until": until}
+    with TestClient(create_app(database_url, TOKEN, limits=Limits(max_date_span_days=2)), headers=AUTH) as client:
+        response = client.post("/v1/imports", json=body, headers={"Idempotency-Key": f"long-window-{mode}"})
+        if mode == "bounded":
+            assert response.status_code == 422
+            assert response.json()["error"]["code"] == "invalid_date_window"
+        else:
+            assert response.status_code == 202, response.text
+            job = client.get(f"/v1/jobs/{response.json()['job_ids'][1]}").json()
+            assert job["params"]["since_ms"] == since * 1000
+            assert job["params"]["until_ms"] == until * 1000
+    with db.connection(database_url) as conn:
+        assert require_row(conn.execute("SELECT COUNT(*) FROM discovery_jobs"))[0] == (0 if mode == "bounded" else 2)
 
 
 @pytest.mark.parametrize("key", [None, "", " ", "a" * 129])
@@ -211,7 +227,7 @@ def test_worker_status_distinguishes_absent_alive_and_stale(api: TestClient, dat
     assert api.get("/v1/worker").json()["alive"] is False
 
 
-def test_worker_status_and_retained_history_are_bounded(database_url: str) -> None:
+def test_worker_status_and_retained_history_are_bounded(database_url: str, monkeypatch) -> None:
     with db.connection(database_url, mode="rw") as conn:
         for index in range(140):
             conn.execute(
@@ -230,10 +246,15 @@ def test_worker_status_and_retained_history_are_bounded(database_url: str) -> No
                    ) VALUES(%s,%s,%s,%s,%s,'stopped')""",
                 (f"recent-{index}", 999_000, 999_000+index, 999_000+index, 999_000+index),
             )
-        snapshot = state.worker_status(conn, now=1_000_000)
+    monkeypatch.setattr(state.time, "time", lambda: 1_000_000)
+    with TestClient(create_app(database_url, TOKEN), headers=AUTH) as client:
+        snapshot = client.get("/v1/worker").json()
     assert snapshot["active_workers"] == 1
-    assert len(snapshot["workers"]) == state.WORKER_HISTORY_LIMIT
+    assert snapshot["worker_limit"] == state.WORKER_SNAPSHOT_LIMIT
+    assert len(snapshot["workers"]) == snapshot["worker_limit"] and snapshot["workers_truncated"]
     assert snapshot["workers"][0]["worker_id"] == "current"
+    with db.connection(database_url) as conn:
+        assert require_row(conn.execute("SELECT COUNT(*) FROM executor_heartbeats"))[0] == 141
 
 
 def test_archive_queries_are_provider_scoped_and_paginated(seeded_database_url: str) -> None:

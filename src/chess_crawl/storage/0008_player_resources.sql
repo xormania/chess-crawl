@@ -1,5 +1,11 @@
 -- Profile bodies are deduplicated; observations retain every successful fetch.
 ALTER TABLE raw_payloads ADD COLUMN owner_scope TEXT NOT NULL DEFAULT 'public';
+ALTER TABLE fetch_logs ADD COLUMN provider_user_id BIGINT REFERENCES provider_users(id);
+CREATE INDEX idx_fetch_log_provider_user ON fetch_logs(provider_user_id, id);
+-- A private-only target is an identity placeholder, not a public observation.
+-- Its collection dates remain on the scoped acquisition/observation records.
+ALTER TABLE provider_users ALTER COLUMN first_seen_at DROP NOT NULL;
+ALTER TABLE provider_users ALTER COLUMN updated_at DROP NOT NULL;
 -- Historical request captures cannot prove whether OAuth was used, and bodies
 -- may be compressed or external. Keep all old Lichess profiles out of public
 -- reads until a source replay verifies the absence of caller-relative fields.
@@ -49,6 +55,7 @@ CREATE TABLE user_observations (
 );
 CREATE INDEX idx_user_observations_history ON user_observations(provider_user_id, captured_at DESC, id DESC);
 CREATE INDEX idx_user_observations_snapshot ON user_observations(snapshot_id);
+CREATE INDEX idx_user_observations_raw_account ON user_observations(raw_payload_id, provider_user_id, captured_at);
 INSERT INTO user_observations(provider_user_id, snapshot_id, raw_payload_id,
                              fetch_log_id, observation_key, captured_at, endpoint_type)
 SELECT DISTINCT ON(f.id) s.provider_user_id, s.id, f.raw_payload_id, f.id,
@@ -104,8 +111,10 @@ CREATE TABLE user_resource_observations (
     captured_at BIGINT NOT NULL
 );
 CREATE INDEX idx_user_resource_observation_history ON user_resource_observations(snapshot_id, captured_at DESC, id DESC);
+CREATE INDEX idx_user_resource_observation_raw ON user_resource_observations(raw_payload_id, snapshot_id, captured_at);
 
 CREATE TABLE user_resource_acquisition (
+    provider_user_id BIGINT NOT NULL REFERENCES provider_users(id),
     provider TEXT NOT NULL REFERENCES providers(key),
     username_normalized TEXT NOT NULL,
     owner_scope TEXT NOT NULL,
@@ -116,8 +125,10 @@ CREATE TABLE user_resource_acquisition (
     attempted_at BIGINT NOT NULL,
     status_code INTEGER NOT NULL,
     raw_payload_id BIGINT REFERENCES raw_payloads(id),
-    PRIMARY KEY(provider, username_normalized, owner_scope, resource_key, parameters_hash)
+    PRIMARY KEY(provider_user_id, owner_scope, resource_key, parameters_hash)
 );
+CREATE INDEX idx_resource_acquisition_username
+    ON user_resource_acquisition(provider, username_normalized);
 
 CREATE TABLE rating_history_points (
     snapshot_id BIGINT NOT NULL REFERENCES user_resource_snapshots(id),

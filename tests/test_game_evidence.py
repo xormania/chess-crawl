@@ -471,3 +471,80 @@ def test_upgrade_populated_v5_archive_then_replay_without_network(uninitialized_
 
 
 INITIAL_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+
+def _parallel_notation_data(provider: str) -> dict:
+    if provider == "lichess":
+        return _data("1. e4 e5 *", moves="  d4 d5  ")
+    return {"uuid": "parallel-notation", "url": "https://www.chess.com/game/live/parallel-notation",
+            "rules": "chess", "pgn": "1. e4 e5 *", "moves": "  d4 d5  ",
+            "white": {"username": "alice"}, "black": {"username": "bob"}}
+
+
+@pytest.mark.parametrize("provider", ["lichess", "chess.com"])
+def test_format_parser_preserves_native_moves_with_pgn(provider: str) -> None:
+    from chess_crawl.providers.chesscom.parser import parse_game as parse_chesscom_game
+
+    data = _parallel_notation_data(provider)
+    parser = parse_game if provider == "lichess" else parse_chesscom_game
+    evidence = parse_game_evidence(parser(data))
+    assert evidence.move_text_origin == "pgn"
+    assert evidence.source_metadata["moves"] == "  d4 d5  "
+    assert [node.move_uci for node in evidence.nodes if node.node_index] == ["e2e4", "e7e5"]
+    assert [token["token_text"] for token in evidence.tokens if token["kind"] == "move"] == ["e4", "e5"]
+
+
+@pytest.mark.parametrize("provider", ["lichess", "chess.com"])
+def test_database_preserves_native_moves_with_pgn(initialized_conn: Connection, provider: str) -> None:
+    data = _parallel_notation_data(provider)
+    payload = data if provider == "lichess" else {"games": [data]}
+    raw_id = store_raw_payload(initialized_conn, RawRecord(
+        provider=provider, endpoint_type="game" if provider == "lichess" else "monthly_archive",
+        request_url="https://lichess.org/api/game/evidence" if provider == "lichess" else data["url"],
+        canonical_source_key=provider + "/parallel-notation", fetched_at=123,
+        body=json.dumps(payload).encode(), media_type="application/json",
+    ))
+    game_id = normalize_games_payload(initialized_conn, raw_id)[0]
+    version = read_game_version(initialized_conn, game_id)
+    assert version is not None and version["move_text_origin"] == "pgn"
+    assert version["source_metadata"]["moves"] == "  d4 d5  "
+    assert [node["move_uci"] for node in version["nodes"] if node["node_index"]] == ["e2e4", "e7e5"]
+    assert [row[0] for row in initialized_conn.execute(
+        "SELECT token_text FROM game_pgn_tokens WHERE version_id=%s AND kind='move' ORDER BY token_index",
+        (version["id"],),
+    )] == ["e4", "e5"]
+    assert "d4" not in export_game_version_pgn(initialized_conn, game_id)
+
+
+def test_unused_nontext_native_moves_are_retained() -> None:
+    evidence = parse_game_evidence(parse_game(_data("", moves=["e4", "e5"])))
+    assert evidence.move_text_origin == "unavailable"
+    assert evidence.source_metadata["moves"] == ["e4", "e5"]
+
+
+def test_offline_replay_repairs_native_move_metadata_without_mutating_old_revision(
+    initialized_conn: Connection, monkeypatch,
+) -> None:
+    from chess_crawl.normalize import games as games_normalizer
+    from chess_crawl.storage import game_evidence as stored_evidence
+
+    def old_evidence(game):
+        evidence = parse_game_evidence(game)
+        evidence.source_metadata.pop("moves", None)
+        return evidence
+
+    with monkeypatch.context() as old:
+        old.setattr(stored_evidence, "EVIDENCE_VERSION", "game-evidence-v1")
+        old.setattr(stored_evidence, "parse_game_evidence", old_evidence)
+        old.setattr(games_normalizer, "parse_game_evidence", old_evidence, raising=False)
+        old.setattr(games_normalizer, "PARSER_VERSION", "games-normalizer-v5/game-evidence-v1")
+        raw_id, game_id = _store(initialized_conn, _parallel_notation_data("lichess"))
+    previous = read_game_version(initialized_conn, game_id)
+    assert previous is not None and "moves" not in previous["source_metadata"]
+    assert normalize_games_payload(initialized_conn, raw_id) == [game_id]
+    repaired = read_game_version(initialized_conn, game_id)
+    assert repaired is not None and repaired["id"] != previous["id"]
+    assert repaired["source_metadata"]["moves"] == "  d4 d5  "
+    assert read_game_version(initialized_conn, game_id, previous["id"]) == previous
+    assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
+    assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == 0

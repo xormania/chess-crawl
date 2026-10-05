@@ -5,12 +5,6 @@ to `full`, `incremental`, or `backfill` to use resumable collection rather than
 the legacy bounded fetch. Opening a profile or reading archived games never
 starts a collection request.
 
-Authenticated HTTP and CLI submissions require explicit `since` and `until`
-bounds in every mode. The configured maximum date span is a total acquisition
-budget for one import, including full, incremental, and backfill requests.
-Checkpointed units return to the back of their priority/depth queue after each
-attempt so one workspace's long import cannot monopolize equal-priority work.
-
 Each execution handles at most `batch_size` monthly archives (default 4, maximum
 100), one Lichess stream page, or `batch_size` preserved source pages or
 unfinished-game follow-ups. The
@@ -112,17 +106,28 @@ table for a later import, while the current import continues to newer available
 games. Transient errors retain the current cursor for retry. Follow-up refreshes are intentionally separate
 from historical enrichment/backfill of already completed games.
 
-The bounded responses are currently read into memory by the existing HTTP
-client. The page budget bounds game count; it is not a byte-size limit. Very
-large annotated games still require a future streamed/byte-budget acquisition
-path. Coverage describes provider-visible games at the scan time, not deleted,
-private, or otherwise unavailable games.
+Page budgets bound game count per execution. Budgeted HTTP responses are streamed
+under an operator-configured byte limit and a whole-response deadline. The worker
+reserves response capacity before the request and charges the actual bytes read;
+an interrupted attempt retains its conservative reservation. Durable run budgets
+also bound remote requests, total bytes, games, and normalization work, while
+workspace quotas limit monthly usage and unfinished jobs. These limits apply to
+undated full, incremental, and backfill imports without silently shortening their
+history. See [work budgets](work-budgets.md) for the configured defaults.
+
+Exhaustion leaves the run incomplete with its checkpoint and captured sources
+intact. An operator can raise the configured policy and resume the run; this
+preserves its lifetime counters. A new UTC month refreshes monthly workspace
+capacity but does not reset a run's budget or automatically resume it. Coverage
+describes provider-visible games at the scan time, not deleted, private, or
+otherwise unavailable games.
 
 ## Data upgrades and recovery
 
 Schema versions remain SQL-only. Parser upgrades reprocess local sources.
 Provider evidence upgrades use explicit backfill jobs. Each has its own identity
 and progress. A job interruption after storing a response but before updating
-its checkpoint is safe: the next execution reuses/deduplicates evidence and
-repeats the uncheckpointed unit. Source coverage and cursor advancement commit
+its checkpoint is safe: the next execution reuses that job's retained successful
+response and fetch observation, then repeats the uncheckpointed normalization
+without another provider request. Source coverage and cursor advancement commit
 together after validation. Analysis results remain independently versioned.

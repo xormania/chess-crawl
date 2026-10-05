@@ -10,6 +10,7 @@ import time
 import uuid
 import os
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import httpx
 
@@ -18,6 +19,7 @@ from chess_crawl.jobs import state
 from chess_crawl.jobs.locking import ExecutorBusy, parallel_executor_lock
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.jobs.settings import WorkerSettings
+from chess_crawl.jobs.worker_identity import write_worker_identity
 from chess_crawl.providers.registry import ProviderSession
 from chess_crawl.storage.db import DatabaseError, connection, database_url
 from chess_crawl.storage.migrations import initialize
@@ -39,6 +41,7 @@ class Worker:
         runner_factory: Callable[..., JobRunner] = JobRunner,
         stage: str = "all",
         queue_consumer=None,
+        identity_path: str | Path | None = None,
     ) -> None:
         self.db_path = database_url(db_path)
         self.settings = settings or WorkerSettings()
@@ -50,6 +53,7 @@ class Worker:
         self.worker_id = uuid.uuid4().hex
         self.stage = stage
         self.queue_consumer = queue_consumer
+        self.identity_path = identity_path
         self._stop = threading.Event()
         self._heartbeat_stop = threading.Event()
         self._activity_lock = threading.Lock()
@@ -113,6 +117,8 @@ class Worker:
             heartbeat.start()
             failed = False
             try:
+                if self.identity_path is not None:
+                    write_worker_identity(self.identity_path, self.worker_id)
                 provider_sleeper = self.sleeper if self.sleeper is not None else self._stop.wait
                 with ProviderSession(
                     self.config, transport=self.transport, sleeper=provider_sleeper, clock=self.clock,
@@ -133,7 +139,8 @@ class Worker:
                             count = runner.run(max_jobs=1).claimed
                         else:
                             count = self.queue_consumer.run_once(
-                                conn, lambda job_id: runner.run(max_jobs=1, job_id=job_id, resume_stale=True).claimed,
+                                conn, lambda job_id: runner.run(max_jobs=1, job_id=job_id, resume_stale=True,
+                                                               respect_fairness=True).claimed,
                             )
                             # Queue delivery is a latency hint. Expired/DLQ'd
                             # messages and temporarily unclaimable hints must
@@ -195,7 +202,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if selected_queue:
             from chess_crawl.jobs.dispatch import SqsConsumer, aws_sqs_client
             consumer = SqsConsumer(aws_sqs_client(), selected_queue)
-        worker = Worker(database_url(args.database_url), settings=settings, stage=args.stage, queue_consumer=consumer)
+        worker = Worker(database_url(args.database_url), settings=settings, stage=args.stage, queue_consumer=consumer,
+                        identity_path=os.getenv("CHESS_CRAWL_WORKER_IDENTITY_FILE"))
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
         for sig in previous:
             signal.signal(sig, lambda signum, frame: worker.request_stop())

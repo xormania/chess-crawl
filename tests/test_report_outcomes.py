@@ -252,8 +252,11 @@ def test_standalone_game_archive_304_refreshes_the_current_source(initialized_co
     refreshed = fetch_chesscom_month(
         conn, "alice", 2024, 1, config=config, transport=httpx.MockTransport(unchanged),
     )
-    assert refreshed.raw_payload_id == first.raw_payload_id
-    assert refreshed.normalized_ids == first.normalized_ids
+    assert refreshed.status_code == 304
+    # A non-body response may omit result payload IDs; stored evidence is authoritative.
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 2
+    observed = require_row(conn.execute("SELECT status_code,raw_payload_id FROM fetch_logs ORDER BY id DESC LIMIT 1"))
+    assert (observed["status_code"], observed["raw_payload_id"]) == (304, first.raw_payload_id)
     assert require_row(conn.execute(
         "SELECT result_raw FROM game_participants WHERE game_id=%s AND color='white'", (game_id,),
     ))[0] == "win"

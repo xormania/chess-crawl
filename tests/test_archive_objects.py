@@ -153,7 +153,12 @@ def test_blocked_object_publication_does_not_block_database_writes(
             assert not publication.done()
         finally:
             release.set()
-        assert publication.result(timeout=10) > 0
+        published = publication.result(timeout=10)
+        if operation == "response":
+            raw_id, fetch_id = published
+            assert raw_id > 0 and fetch_id > 0
+        else:
+            assert published > 0
 
 
 def test_external_writes_in_outer_transaction_require_preparation(initialized_conn, tmp_path, monkeypatch) -> None:
@@ -178,14 +183,16 @@ def test_existing_raw_payload_deduplication_avoids_object_io(initialized_conn, t
     conn = initialized_conn
     monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_BACKEND", "local")
     monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_DIRECTORY", str(tmp_path))
-    raw_id = _persist_response(conn, record(), job_id=None, crawl_run_id=None)
+    raw_id, first_fetch = _persist_response(conn, record(), job_id=None, crawl_run_id=None)
 
     def forbidden(*args, **kwargs):
         pytest.fail("Deduplicated source must not re-upload or download objects")
 
     monkeypatch.setattr(LocalObjectStore, "put", forbidden)
     monkeypatch.setattr(LocalObjectStore, "read", forbidden)
-    assert _persist_response(conn, record(), job_id=None, crawl_run_id=None) == raw_id
+    repeated_id, next_fetch = _persist_response(conn, record(), job_id=None, crawl_run_id=None)
+    assert repeated_id == raw_id
+    assert first_fetch is not None and next_fetch is not None and next_fetch != first_fetch
     assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
     assert require_row(conn.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == 2
 

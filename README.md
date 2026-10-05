@@ -161,6 +161,8 @@ request ceilings.
 Lichess game requests retain available clocks, evaluations, and accuracy data
 in the raw archive by default. The capture switches are listed in
 [.env.example](.env.example); disabling one affects subsequent requests.
+These public game requests do not send the configured OAuth token; account-private
+game acquisition is unsupported. Explicit owned resources use scoped OAuth.
 
 ## Contributing
 

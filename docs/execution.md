@@ -3,6 +3,9 @@
 Chess-Crawl keeps job/run state in PostgreSQL. Local polling and SQS both select
 the same durable jobs; a message is a delivery hint, never an execution lease.
 
+See [durable work budgets](work-budgets.md) for trusted cost ceilings, workspace
+admission, fair claims, and explicit incomplete/resume semantics.
+
 ## Ownership and recovery
 
 Workers claim eligible rows with `FOR UPDATE SKIP LOCKED`, then hold a PostgreSQL
@@ -43,9 +46,17 @@ mutex is no longer the concurrency mechanism.
 Worker heartbeat state now has one record per worker. `/v1/worker` includes
 `workers` and `active_workers` while retaining the representative status fields.
 Heartbeat records measure liveness independently from execution ownership.
-The status response is capped at 100 records. Starting a worker removes expired
-records older than seven days and excess inactive history, so autoscaling and
-restart churn cannot grow the table or response without bound.
+Snapshots return at most 128 workers, prioritizing live workers and then recent
+heartbeats from the last 24 hours. `active_workers` counts every live worker,
+including workers outside the list; `workers_truncated` identifies a shortened
+list and `worker_limit` states its cap. Actual heartbeat ages and running or
+stopping states are preserved. Snapshot reads do not mutate history.
+Worker start, heartbeat, and stop writes prune at most 256 stopped or failed rows
+whose heartbeat is older than 24 hours and whose liveness has expired, skipping
+locked rows. Stale running and stopping records are retained because heartbeat
+expiry does not prove loss of session ownership; they leave the visible recent
+history after 24 hours. Migration `0013` indexes these bounded status and cleanup
+queries.
 
 ## Local execution and stages
 

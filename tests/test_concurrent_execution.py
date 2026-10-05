@@ -66,9 +66,12 @@ def test_claims_serialize_provider_acquisition_but_not_processing(database_url: 
         state.release_job_ownership(other)
 
 
-def test_checkpointed_job_returns_behind_equal_priority_work(initialized_conn: Connection) -> None:
+@pytest.mark.parametrize("first_priority", [20, 10])
+def test_checkpointed_job_returns_behind_equal_priority_work(
+    initialized_conn: Connection, first_priority: int,
+) -> None:
     first = state.enqueue_job(
-        initialized_conn, provider="lichess", kind="normalize_payload", target="1", priority=20,
+        initialized_conn, provider="lichess", kind="normalize_payload", target="1", priority=first_priority,
     ).job_id
     claimed = state.claim_next_job(initialized_conn, now=100)
     assert claimed is not None and claimed.id == first
@@ -82,7 +85,8 @@ def test_checkpointed_job_returns_behind_equal_priority_work(initialized_conn: C
     state.finish_attempt(initialized_conn, first, "pending", reason="checkpointed", now=200)
     state.release_job_ownership(initialized_conn)
     next_job = state.claim_next_job(initialized_conn, now=201)
-    assert next_job is not None and next_job.id == second
+    assert next_job is not None and next_job.id == (second if first_priority == 20 else first)
+    assert next_job.priority == first_priority
     state.release_job_ownership(initialized_conn)
 
 

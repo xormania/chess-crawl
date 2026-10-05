@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from typing import Any, cast
 
-from chess_crawl.storage.db import Connection, Row, require_row
+from chess_crawl.storage.db import Connection, Row, lock_key, require_row
 from chess_crawl.storage.workspaces import require_run
 
 
@@ -81,6 +81,20 @@ def months_page(conn: Connection, *, provider: str, after: str, limit: int) -> d
 def check_export_schema(conn: Connection) -> None:
     """Fail before response headers when the archive has no usable schema."""
     require_row(conn.execute("SELECT COUNT(*) FROM games WHERE false"))
+
+
+def admit_export_snapshot(conn: Connection, *, workspace_id: str, slots: int, timeout_ms: int) -> bool:
+    """Bound preparation across API replicas; locks end with this snapshot."""
+    require_row(conn.execute("SELECT set_config('statement_timeout',%s,true)", (str(timeout_ms),)))
+    for slot in range(slots):
+        key = lock_key("export-preparation", f"{workspace_id}:{slot}")
+        if bool(require_row(conn.execute("SELECT pg_try_advisory_xact_lock(%s)", (key,)))[0]):
+            return True
+    return False
+
+
+def set_export_timeout(conn: Connection, timeout_ms: int) -> None:
+    require_row(conn.execute("SELECT set_config('statement_timeout',%s,true)", (str(timeout_ms),)))
 
 
 def iter_owned_graph(conn: Connection, *, workspace_id: str, provider: str | None) -> Generator[Row,None,None]:

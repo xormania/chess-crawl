@@ -19,6 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from chess_crawl import __version__
 from chess_crawl import application
 from chess_crawl.jobs import state
+from chess_crawl.jobs.budget import BudgetPolicy, QuotaExceeded
 from chess_crawl.storage import workspaces
 from chess_crawl.storage.db import DatabaseError, connection
 from chess_crawl.storage.db import database_url as resolve_database_url
@@ -83,12 +84,15 @@ class WorkerStatus(BaseModel):
 class WorkerSnapshot(WorkerStatus):
     active_workers: int = 0
     workers: list[WorkerStatus] = Field(default_factory=list)
+    worker_limit: int = 128
+    workers_truncated: bool = False
 
 
 class ErrorDetail(BaseModel):
     code: str
     message: str
     details: list[dict[str, Any]] | None = None
+    quota: dict[str, Any] | None = None
 
 
 class ErrorResponse(BaseModel):
@@ -105,6 +109,7 @@ def create_app(
     *,
     limits: application.Limits | None = None,
     workspace_tokens: Mapping[str, str] | None = None,
+    budget_policy: BudgetPolicy | None = None,
 ) -> FastAPI:
     """Build an API without opening or migrating an archive at startup.
 
@@ -143,6 +148,7 @@ def create_app(
     if len(set(credentials_by_workspace.values())) != len(credentials_by_workspace):
         raise ValueError("Workspace bearer tokens must be unique")
     request_limits = limits or application.Limits.from_env()
+    work_policy = budget_policy if budget_policy is not None else BudgetPolicy.from_env()
     app = FastAPI(
         title="chess-crawl API",
         version=__version__,
@@ -167,6 +173,15 @@ def create_app(
     async def application_error(request: Request, exc: application.ApplicationError) -> JSONResponse:
         status = 404 if isinstance(exc, application.NotFound) else 409 if isinstance(exc, application.Conflict) else 422
         return _error(status, exc.code, exc.message)
+
+    @app.exception_handler(QuotaExceeded)
+    async def quota_error(request: Request, exc: QuotaExceeded) -> JSONResponse:
+        return JSONResponse(status_code=429, content={"error": {
+            "code": exc.code, "message": str(exc), "quota": {
+                "dimension": exc.dimension, "remaining": exc.remaining,
+                "reset_at": exc.reset_at, "budget_id": exc.budget_id,
+            },
+        }})
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -215,11 +230,11 @@ def create_app(
     router = APIRouter(
         prefix="/v1",
         dependencies=[Depends(authenticate)],
-        responses={code: {"model": ErrorResponse} for code in (401, 404, 409, 422, 503)},
+        responses={code: {"model": ErrorResponse} for code in (401, 404, 409, 422, 429, 503)},
     )
     from chess_crawl.api.compat import register_compat_routes
     # Literal lookup/status paths must precede numeric resource parameters.
-    register_compat_routes(router, archive, request_limits)
+    register_compat_routes(router, archive, request_limits, work_policy)
 
     @router.post("/imports", status_code=202, response_model=Submission, tags=["collection"])
     def submit_import(
@@ -231,7 +246,7 @@ def create_app(
         request = application.validate_import(application.ImportRequest(**body.model_dump()), limits=request_limits)
         idempotency_key = application.validate_idempotency_key(idempotency_key)
         with connection(archive, mode="rw") as conn:
-            result = application.submit_import(conn, request, idempotency_key=idempotency_key, limits=request_limits, workspace_id=http_request.state.workspace_id)
+            result = application.submit_import(conn, request, idempotency_key=idempotency_key, limits=request_limits, workspace_id=http_request.state.workspace_id, budget_policy=work_policy)
         response.headers["Location"] = f"/v1/runs/{result['run_id']}"
         return result
 
@@ -245,7 +260,7 @@ def create_app(
         request = application.validate_crawl(application.CrawlRequest(**body.model_dump()), limits=request_limits)
         idempotency_key = application.validate_idempotency_key(idempotency_key)
         with connection(archive, mode="rw") as conn:
-            result = application.submit_crawl(conn, request, idempotency_key=idempotency_key, limits=request_limits, workspace_id=http_request.state.workspace_id)
+            result = application.submit_crawl(conn, request, idempotency_key=idempotency_key, limits=request_limits, workspace_id=http_request.state.workspace_id, budget_policy=work_policy)
         response.headers["Location"] = f"/v1/runs/{result['run_id']}"
         return result
 
@@ -302,6 +317,6 @@ def create_app(
             return application.summary(conn,workspace_id=request.state.workspace_id)
 
     from chess_crawl.api.archive import register_archive_routes
-    register_archive_routes(router, archive, request_limits)
+    register_archive_routes(router, archive, request_limits, work_policy)
     app.include_router(router)
     return app

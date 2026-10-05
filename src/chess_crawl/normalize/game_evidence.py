@@ -22,7 +22,7 @@ from pgn_read.core.parser import add_token_to_game  # type: ignore[import-untype
 from chess_crawl.providers.base import NormalizedGame
 
 
-EVIDENCE_VERSION = "game-evidence-v1"
+EVIDENCE_VERSION = "game-evidence-v2"
 INITIAL_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 _MOVES = {c.IFG_PIECE_MOVE, c.IFG_PIECE_DESTINATION, c.IFG_PAWN_TO_RANK,
           c.IFG_PAWN_PROMOTE_TO_RANK, c.IFG_PAWN_PROMOTE_PIECE, c.IFG_CASTLES, c.IFG_PASS}
@@ -100,7 +100,10 @@ def parse_game_evidence(game: NormalizedGame) -> GameEvidence:
         # Lichess JSON can carry SAN moves without pgnInJson. Synthetic tags
         # are parser context, not falsely represented as supplied PGN tags.
         text = native["moves"] + " *"
-    metadata = {key: value for key, value in native.items() if key not in {"pgn", "moves"}}
+    # Omit notation represented by tokens, retaining parallel or unusable native
+    # moves unchanged when PGN supplies the interpreted text.
+    tokenized_fields = {"pgn", "moves"} if moves_only else {"pgn"}
+    metadata = {key: value for key, value in native.items() if key not in tokenized_fields}
     origin = "provider.moves" if moves_only else "pgn" if text else "unavailable"
     if not text:
         unavailable = GameEvidence({}, [], metadata, origin, _initial_fen({}, native), game.variant_key,
