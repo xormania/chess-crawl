@@ -70,3 +70,24 @@ def archive_lock(target: str, *, purpose: str = "worker") -> Iterator[ExecutorLe
     with connection(target, mode="rw") as conn:
         with executor_lock(conn, purpose=purpose) as lease:
             yield lease
+
+
+@contextmanager
+def parallel_executor_lock(conn: Connection, *, lease: ExecutorLease | None = None) -> Iterator[ExecutorLease]:
+    """Shared maintenance gate; execution ownership is separately per job."""
+    if lease is not None:
+        lease.require(conn)
+        yield lease
+        return
+    if not acquire_session_lock(conn, "worker", shared=True):
+        raise ExecutorBusy("An exclusive archive maintenance process owns this database")
+    acquired = ExecutorLease(conn)
+    previous = conn._ownership_purposes
+    conn._ownership_purposes = (*previous, "worker")
+    try:
+        yield acquired
+    finally:
+        acquired.active = False
+        conn._ownership_purposes = previous
+        if not conn.closed:
+            release_session_lock(conn, "worker", shared=True)

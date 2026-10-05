@@ -9,7 +9,7 @@ from support import seed_game
 from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage.db import Connection, require_row, transaction
-from chess_crawl.storage.queries import games_by_month
+from chess_crawl.storage.api_views import months_page
 from chess_crawl.storage.raw import read_raw_payload, store_raw_payload
 
 
@@ -36,7 +36,7 @@ def test_month_report_guards_calendar_boundaries_and_preserves_bigint_values(
 
     # Session timezone must not move epoch zero into the previous month.
     conn.execute("SET TIME ZONE 'America/New_York'")
-    rows = games_by_month(conn, provider="chess.com")
+    rows = months_page(conn, provider="chess.com", after="", limit=100)["items"]
 
     assert [(row["month"], row["games"]) for row in rows] == [
         ("0001-01", 1), ("1969-12", 1), ("1970-01", 1),
@@ -66,7 +66,7 @@ def test_provider_timestamp_overflow_does_not_break_report_or_rewrite_evidence(
     ))
     game_id = normalize_games_payload(conn, raw_id)[0]
 
-    report = games_by_month(conn, provider="chess.com")
+    report = months_page(conn, provider="chess.com", after="", limit=100)["items"]
 
     assert [(row["month"], row["games"]) for row in report] == [("unknown", 1)]
     assert require_row(conn.execute("SELECT ended_at FROM games WHERE id = %s", (game_id,)))["ended_at"] == 2**63 - 1

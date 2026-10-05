@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from importlib import resources
 
-from chess_crawl.storage.db import Connection, atomic, require_row
+from chess_crawl.storage.db import Connection, migration_atomic, require_row
 
 
 def migration_resources() -> tuple[tuple[int, str, str], ...]:
@@ -36,7 +36,7 @@ def read_schema_sql() -> str:
     return resources.files("chess_crawl.storage").joinpath("schema.sql").read_text("utf-8")
 
 
-@atomic
+@migration_atomic
 def initialize(conn: Connection) -> MigrationResult:
     migrations = migration_resources()
     has_history = require_row(conn.execute("SELECT to_regclass('schema_migrations') IS NOT NULL"))[0]
@@ -66,6 +66,8 @@ def _execute_schema(conn: Connection, sql: str) -> None:
 
 
 def current_version(conn: Connection) -> int:
+    if not require_row(conn.execute("SELECT to_regclass('schema_migrations') IS NOT NULL"))[0]:
+        return 0
     row = require_row(conn.execute("SELECT MAX(version) AS version FROM schema_migrations"))
     return int(row["version"] or 0)
 

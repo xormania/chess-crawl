@@ -21,6 +21,7 @@ class ProviderSettings:
     include_clocks: bool = True
     include_evals: bool = True
     include_accuracy: bool = True
+    oauth_owner_scope: str = "local"
 
     def __post_init__(self) -> None:
         for name in ("include_clocks", "include_evals", "include_accuracy"):
@@ -39,6 +40,7 @@ class Config:
     lichess_clocks: bool = True
     lichess_evals: bool = True
     lichess_accuracy: bool = True
+    lichess_token_owner_scope: str = "local"
 
     def __post_init__(self) -> None:
         for name in ("lichess_clocks", "lichess_evals", "lichess_accuracy"):
@@ -51,6 +53,7 @@ class Config:
             contact=os.getenv("CHESS_CRAWL_CONTACT", DEFAULT_CONTACT),
             user_agent=os.getenv("CHESS_CRAWL_USER_AGENT"),
             lichess_token=os.getenv("CHESS_CRAWL_LICHESS_TOKEN"),
+            lichess_token_owner_scope=os.getenv("CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE", "local"),
             lichess_clocks=_boolean_from_env("CHESS_CRAWL_LICHESS_CLOCKS", default=True),
             lichess_evals=_boolean_from_env("CHESS_CRAWL_LICHESS_EVALS", default=True),
             lichess_accuracy=_boolean_from_env("CHESS_CRAWL_LICHESS_ACCURACY", default=True),
@@ -75,6 +78,7 @@ class Config:
             include_clocks=self.lichess_clocks,
             include_evals=self.lichess_evals,
             include_accuracy=self.lichess_accuracy,
+            oauth_owner_scope=self.lichess_token_owner_scope,
         )
 
 

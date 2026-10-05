@@ -151,18 +151,20 @@ def test_profile_refresh_is_independent_of_sparse_observation_time(initialized_c
     assert user["updated_at"] == 300
 
 
-def test_equivalent_snapshot_replay_keeps_latest_capture(initialized_conn: Connection) -> None:
+def test_activity_change_is_preserved_without_replacing_current_profile(initialized_conn: Connection) -> None:
     conn = initialized_conn
     identity = {"id": "alice", "username": "Alice", "title": "FM"}
     normalize_observation(conn, "lichess", {**identity, "seenAt": 200000}, fetched_at=200)
     latest_raw_id = require_row(conn.execute("SELECT id FROM raw_payloads"))[0]
 
-    # seenAt is raw profile evidence but not part of the normalized snapshot.
+    # Activity is now normalized profile evidence; an older observation remains
+    # queryable without replacing the current profile.
     normalize_observation(conn, "lichess", {**identity, "seenAt": 100000}, fetched_at=100)
 
     snapshot = require_row(conn.execute("SELECT captured_at, raw_payload_id FROM user_snapshots"))
     assert tuple(snapshot.values()) == (200, latest_raw_id)
-    assert require_row(conn.execute("SELECT COUNT(*) FROM user_snapshots"))[0] == 1
+    assert require_row(conn.execute("SELECT COUNT(*) FROM user_snapshots"))[0] == 2
+    assert {row[0] for row in conn.execute("SELECT last_seen_at FROM user_snapshots")} == {100, 200}
 
 
 def test_304_replays_profiles_normalized_before_metadata_fix(initialized_conn: Connection) -> None:

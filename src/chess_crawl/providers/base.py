@@ -10,6 +10,7 @@ ProviderKey = Literal["chess.com", "lichess"]
 EndpointType = Literal[
     "user_profile",
     "user_stats",
+    "user_resource",
     "archives_index",
     "monthly_archive",
     "user_games_stream",
@@ -21,6 +22,42 @@ Color = Literal["white", "black"]
 
 class ProviderRequestStopped(Exception):
     """Shutdown was requested before any provider request was sent."""
+
+
+class ProviderResponseTooLarge(Exception):
+    """A provider body exceeded its capacity at the application read boundary.
+
+    ``received`` includes the final bounded read that crossed the limit; it
+    excludes buffering/prefetch owned by the transport or TLS implementation.
+    """
+
+    def __init__(self, limit: int, received: int, status_code: int | None, url: str) -> None:
+        self.limit = limit
+        self.received = received
+        self.status_code = status_code
+        self.url = url
+        super().__init__(f"Provider response exceeded {limit} bytes after receiving {received} bytes")
+
+
+class ProviderResponseEncodingError(Exception):
+    """A budgeted response requires decoding outside its acquisition bound."""
+
+    def __init__(self, encoding: str, status_code: int, url: str) -> None:
+        self.encoding = encoding
+        self.status_code = status_code
+        self.url = url
+        super().__init__("Provider response did not honor the identity content encoding")
+
+
+class ProviderResponseDeadlineExceeded(Exception):
+    """A budgeted response exceeded the operator's total acquisition allowance."""
+
+    def __init__(self, timeout_s: float, received: int, status_code: int | None, url: str) -> None:
+        self.timeout_s = timeout_s
+        self.received = received
+        self.status_code = status_code
+        self.url = url
+        super().__init__(f"Provider response exceeded {timeout_s:g} seconds after receiving {received} bytes")
 
 
 @dataclass(frozen=True)
@@ -60,6 +97,7 @@ class RawRecord:
     archive_unit: str | None = None
     response_headers: Mapping[str, Any] = field(default_factory=dict)
     fetch_attempts: tuple[FetchAttempt, ...] = ()
+    owner_scope: str = "public"
 
 
 @dataclass(frozen=True)
@@ -111,6 +149,7 @@ class NormalizedGame:
     opening_name: str | None = None
     opening_ply: int | None = None
     pgn: str | None = None
+    source_data: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -5,15 +5,30 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from chess_crawl.storage.db import Connection, atomic
+from chess_crawl.storage.db import Connection, atomic, operation_lock
 from chess_crawl.providers.base import RawRecord
+from chess_crawl.storage.archives import (
+    PreparedArchiveObject, prepare_or_reuse_archive_object, read_archive_object, register_archive_object,
+)
+from chess_crawl.storage.object_store import ObjectStore, configured_store
+from chess_crawl.costs import UsageSample, emit_sample
 
 
 COMPRESSION_THRESHOLD_BYTES = 4096
+
+
+@dataclass(frozen=True)
+class PreparedRawPayload:
+    """Validated source and optional publication, including inline/deduplicated sources."""
+    record: RawRecord
+    body_hash: str
+    archive_object: PreparedArchiveObject | None
+    external_expected: bool
 
 
 @dataclass(frozen=True)
@@ -32,36 +47,114 @@ class StoredRawPayload:
     compression: str
     normalization_status: str
     parser_version: str | None
+    owner_scope: str = "public"
 
 
 def compute_body_hash(body: bytes) -> str:
     return "sha256:" + hashlib.sha256(body).hexdigest()
 
 
-@atomic
 def store_raw_payload(
     conn: Connection,
     record: RawRecord,
     *,
     parser_version: str | None = None,
     normalization_status: str = "pending",
+    store: ObjectStore | None = None,
+    prepared_object: PreparedArchiveObject | None = None,
+    prepared_payload: PreparedRawPayload | None = None,
 ) -> int:
+    if prepared_payload is not None:
+        if prepared_object is not None or prepared_payload.record is not record:
+            raise ValueError("Prepared raw payload does not match the supplied record")
+    elif prepared_object is not None:
+        prepared_payload = PreparedRawPayload(record, _body_hash(record), prepared_object, True)
+    else:
+        prepared_payload = prepare_raw_payload(conn, record, store=store)
+    prepared_object = prepared_payload.archive_object
+    if store is not None and not prepared_payload.external_expected:
+        raise ValueError("Prepared raw payload does not match the selected store")
+    if prepared_object is not None and store is not None and (
+        prepared_object.backend, prepared_object.location,
+    ) != (store.backend, store.location):
+        raise ValueError("Prepared archive object does not match the selected store")
+    return _store_raw_payload(
+        conn, record, parser_version=parser_version, normalization_status=normalization_status,
+        prepared=prepared_payload,
+    )
+
+
+def _body_hash(record: RawRecord) -> str:
     if record.body is None:
         raise ValueError("raw payload storage requires body bytes")
+    body_hash = compute_body_hash(record.body)
+    if record.body_hash is not None and record.body_hash != body_hash:
+        raise ValueError("Supplied raw payload body hash does not match its bytes")
+    return body_hash
 
-    body_hash = record.body_hash or compute_body_hash(record.body)
+
+def _existing_payload(conn: Connection, record: RawRecord, body_hash: str) -> int | None:
     existing = conn.execute(
         """
         SELECT id FROM raw_payloads
-        WHERE provider = %s AND endpoint_type = %s AND canonical_source_key = %s AND body_hash = %s
+        WHERE provider = %s AND endpoint_type = %s AND canonical_source_key = %s AND body_hash = %s AND owner_scope = %s
         ORDER BY id LIMIT 1
         """,
-        (record.provider, record.endpoint_type, record.canonical_source_key, body_hash),
+        (record.provider, record.endpoint_type, record.canonical_source_key, body_hash, record.owner_scope),
     ).fetchone()
     if existing is not None:
         return int(existing["id"])
+    return None
 
-    compression, stored_body = _encode_body(record.body)
+
+def prepare_raw_payload(
+    conn: Connection, record: RawRecord, *, store: ObjectStore | None = None,
+) -> PreparedRawPayload:
+    """Avoid duplicate object I/O and publish new bodies before taking write locks."""
+    body_hash = _body_hash(record)
+    external_expected = store is not None or os.getenv("CHESS_CRAWL_ARCHIVE_BACKEND", "database") != "database"
+    if not external_expected:
+        # Inline sources need no speculative lookup: the locked write checks once.
+        return PreparedRawPayload(record, body_hash, None, False)
+    if _existing_payload(conn, record, body_hash) is not None:
+        return PreparedRawPayload(record, body_hash, None, external_expected)
+    if external_expected and conn.in_transaction:
+        raise ValueError("External archive writes in a transaction require a prepared object")
+    selected_store = store or configured_store()
+    if selected_store is None:
+        return PreparedRawPayload(record, body_hash, None, False)
+    if record.body is None:
+        raise ValueError("raw payload storage requires body bytes")
+    published = prepare_or_reuse_archive_object(conn, record.body, store=selected_store)
+    return PreparedRawPayload(record, body_hash, published, True)
+
+
+@atomic
+def _store_raw_payload(
+    conn: Connection, record: RawRecord, *, parser_version: str | None,
+    normalization_status: str, prepared: PreparedRawPayload,
+) -> int:
+    operation_lock(conn, "raw-source", record.canonical_source_key)
+    body_hash = prepared.body_hash
+    existing = _existing_payload(conn, record, body_hash)
+    if existing is not None:
+        emit_sample(UsageSample("source_dedupe", 0, 0, deduplicated=1))
+        return existing
+    if record.body is None:
+        raise ValueError("raw payload storage requires body bytes")
+
+    archive_id = None
+    prepared_object = prepared.archive_object
+    if prepared_object is None:
+        if prepared.external_expected:
+            raise ValueError("External archive writes in a transaction require a prepared object")
+        compression, inline_body = _encode_body(record.body)
+        stored_body: bytes | None = inline_body
+    else:
+        if prepared_object.body_hash != body_hash or prepared_object.body_bytes != len(record.body):
+            raise ValueError("Prepared archive object does not match supplied source bytes")
+        archive_id = register_archive_object(conn, prepared_object)
+        compression, stored_body = "gzip", None
     response_headers = dict(record.response_headers)
     if record.etag is not None:
         response_headers.setdefault("etag", record.etag)
@@ -74,9 +167,9 @@ def store_raw_payload(
           provider, endpoint_type, provider_url, canonical_source_key,
           request_params, response_status, response_headers, content_type,
           fetched_at, body_hash, body_compression, raw_body, body_bytes,
-          parser_version, normalization_status
+          parser_version, normalization_status, archive_object_id, owner_scope
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
@@ -95,6 +188,8 @@ def store_raw_payload(
             len(record.body),
             parser_version,
             normalization_status,
+            archive_id,
+            record.owner_scope,
         ),
     )
     row = cursor.fetchone()
@@ -105,6 +200,9 @@ def store_raw_payload(
 
 
 def read_raw_payload(conn: Connection, raw_payload_id: int) -> StoredRawPayload:
+    if conn._work_budget_id is not None:
+        from chess_crawl.storage.work_budgets import reserve_payload_read
+        reserve_payload_read(conn, conn._work_budget_id, raw_payload_id)
     row = conn.execute(
         "SELECT * FROM raw_payloads WHERE id = %s",
         (raw_payload_id,),
@@ -112,10 +210,16 @@ def read_raw_payload(conn: Connection, raw_payload_id: int) -> StoredRawPayload:
     if row is None:
         raise KeyError(f"raw payload not found: {raw_payload_id}")
 
-    body = _decode_body(row["raw_body"], row["body_compression"])
+    body = (
+        read_archive_object(conn, int(row["archive_object_id"]))
+        if row["archive_object_id"] is not None
+        else _decode_body(row["raw_body"], row["body_compression"])
+    )
     body_hash = compute_body_hash(body)
     if body_hash != row["body_hash"]:
         raise ValueError(f"raw payload hash mismatch for id {raw_payload_id}")
+    if len(body) != row["body_bytes"]:
+        raise ValueError(f"raw payload size mismatch for id {raw_payload_id}")
 
     return StoredRawPayload(
         id=int(row["id"]),
@@ -132,7 +236,18 @@ def read_raw_payload(conn: Connection, raw_payload_id: int) -> StoredRawPayload:
         compression=row["body_compression"],
         normalization_status=row["normalization_status"],
         parser_version=row["parser_version"],
+        owner_scope=row["owner_scope"],
     )
+
+
+def raw_payload_metadata(conn: Connection, raw_payload_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT provider,endpoint_type,normalization_status,parser_version FROM raw_payloads WHERE id=%s",
+        (raw_payload_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"raw payload not found: {raw_payload_id}")
+    return dict(row)
 
 
 @atomic
@@ -202,37 +317,33 @@ def insert_fetch_log(
     attempt: int = 1,
     raw_payload_id: int | None = None,
     error_ref: int | None = None,
+    provider_user_id: int | None = None,
 ) -> int:
-    cursor = conn.execute(
-        """
-        INSERT INTO fetch_logs(
-          provider, job_id, crawl_run_id, url, endpoint_type, method,
-          status_code, from_cache, etag, last_modified, retry_after, bytes,
-          duration_ms, attempt, attempted_at, raw_payload_id, error_ref
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING id
-        """,
-        (
-            provider,
-            job_id,
-            crawl_run_id,
-            url,
-            endpoint_type,
-            method,
-            status_code,
-            int(from_cache),
-            etag,
-            last_modified,
-            retry_after,
-            bytes_count,
-            duration_ms,
-            attempt,
-            attempted_at,
-            raw_payload_id,
-            error_ref,
-        ),
+    values = (
+        provider, job_id, crawl_run_id, url, endpoint_type, method, status_code,
+        int(from_cache), etag, last_modified, retry_after, bytes_count, duration_ms,
+        attempt, attempted_at, raw_payload_id, error_ref,
     )
+    if provider_user_id is None:
+        cursor = conn.execute(
+            """INSERT INTO fetch_logs(
+                 provider, job_id, crawl_run_id, url, endpoint_type, method,
+                 status_code, from_cache, etag, last_modified, retry_after, bytes,
+                 duration_ms, attempt, attempted_at, raw_payload_id, error_ref)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            values,
+        )
+    else:
+        cursor = conn.execute(
+            """INSERT INTO fetch_logs(
+                 provider, job_id, crawl_run_id, url, endpoint_type, method,
+                 status_code, from_cache, etag, last_modified, retry_after, bytes,
+                 duration_ms, attempt, attempted_at, raw_payload_id, error_ref, provider_user_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            (*values, provider_user_id),
+        )
     row = cursor.fetchone()
     if row is None:
         raise RuntimeError("fetch log insert did not return a row id")
@@ -345,3 +456,20 @@ def latest_validators(conn: Connection, canonical_source_key: str) -> tuple[str 
         row["etag"] or headers.get("etag"),
         row["last_modified"] or headers.get("last-modified") or headers.get("last_modified"),
     )
+
+
+def latest_job_payload(
+    conn: Connection, job_id: int, *, endpoint_type: str, source_key: str | None,
+) -> tuple[int, int] | None:
+    """Retain the original successful occurrence across quota/processing pauses."""
+    row = conn.execute(
+        """SELECT f.raw_payload_id,f.id FROM fetch_logs f
+             JOIN raw_payloads r ON r.id=f.raw_payload_id JOIN discovery_jobs j ON j.id=f.job_id
+             WHERE f.job_id=%s AND f.status_code IN (200,304) AND r.endpoint_type=%s
+               AND f.raw_payload_id IS NOT NULL
+               AND r.provider=j.provider AND r.owner_scope IN ('public',j.workspace_id)
+               AND (%s::text IS NULL OR r.canonical_source_key=%s)
+             ORDER BY f.attempted_at DESC,f.id DESC LIMIT 1""",
+        (job_id, endpoint_type, source_key, source_key),
+    ).fetchone()
+    return (int(row[0]), int(row[1])) if row is not None else None

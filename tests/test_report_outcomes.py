@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from chess_crawl.storage.db import Connection, open_database, require_row, transaction
 
+from helpers.games import normalize_game
+
 import json
+import time
 from typing import Any
 
 import httpx
@@ -12,39 +15,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from support import seed_game
-from chess_crawl import cli
 from chess_crawl.api import create_app
 from chess_crawl.application import list_opponents
 from chess_crawl.config import Config
 from chess_crawl.ingest import fetch_chesscom_month
 from chess_crawl.normalize.games import normalize_games_payload
 from chess_crawl.providers.base import RawRecord
-from chess_crawl.storage.queries import games_by_month, opponent_report, user_game_summary
+from chess_crawl.storage.api_views import months_page
+from chess_crawl.storage.queries import user_game_summary
 from chess_crawl.storage.raw import read_raw_payload, store_raw_payload, update_raw_payload_status
-
-
-def normalize_game(conn: Connection, *, status: str, winner: str | None = None) -> int:
-    payload = {
-        "id": status,
-        "status": status,
-        "rated": False,
-        "variant": "standard",
-        "speed": "blitz",
-        "createdAt": 1704067200000,
-        "lastMoveAt": 1704067260000,
-        "clock": {"initial": 300, "increment": 0},
-        "players": {
-            "white": {"user": {"id": "alice", "name": "Alice"}},
-            "black": {"user": {"id": "bob", "name": "Bob"}},
-        },
-    }
-    if winner is not None:
-        payload["winner"] = winner
-    raw_id = store_raw_payload(conn, RawRecord(
-        provider="lichess", endpoint_type="game", request_url=f"https://lichess.org/game/export/{status}",
-        canonical_source_key=f"lichess/game/{status}", body=json.dumps(payload).encode(), fetched_at=1704067300,
-    ))
-    return normalize_games_payload(conn, raw_id)[0]
 
 
 @pytest.mark.parametrize(("status", "winner", "no_result", "in_progress", "wins", "losses", "draws"), [
@@ -72,13 +51,12 @@ def test_report_outcome_and_activity_are_independent(
     assert tuple(stored.values()) == (status, in_progress)
 
     user = user_game_summary(conn, "lichess", "alice")
-    opponents = opponent_report(conn, "lichess", "alice")
-    assert user is not None and opponents is not None
+    assert user is not None
     page = list_opponents(conn, "lichess", "alice")
-    months = games_by_month(conn, provider="lichess")
-    assert len(opponents) == page["total"] == len(months) == 1
+    months = months_page(conn, provider="lichess", after="", limit=100)["items"]
+    assert page["total"] == len(months) == 1
     surfaces = (
-        (user, "wins", "losses"), (opponents[0], "my_wins", "my_losses"),
+        (user, "wins", "losses"),
         (page["items"][0], "my_wins", "my_losses"), (months[0], "white_wins", "black_wins"),
     )
     for row, win_key, loss_key in surfaces:
@@ -95,28 +73,6 @@ def test_report_outcome_and_activity_are_independent(
     assert (black_player["wins"], black_player["losses"]) == (losses, wins)
     assert black_player["no_result"] == no_result
     assert black_player["in_progress"] == in_progress
-
-
-def test_cli_labels_missing_results_separately_from_activity(
-    database_url: str, capsys: pytest.CaptureFixture[str],
-) -> None:
-    with open_database(database_url, writable=True) as conn:
-        for status in ("aborted", "unrecognized-provider-status", "started"):
-            normalize_game(conn, status=status)
-
-    assert cli.run(["report", "user", "lichess", "alice", "--database-url", str(database_url)]) == 0
-    user = capsys.readouterr().out
-    assert "W/D/L/no result: 0/0/0/3" in user
-    assert "In progress: 1" in user
-    for arguments in (
-        ["report", "opponents", "lichess", "alice"],
-        ["report", "games-by-month", "--provider", "lichess"],
-    ):
-        assert cli.run([*arguments, "--database-url", str(database_url)]) == 0
-        table = capsys.readouterr().out
-        assert "NO_RESULT" in table
-        assert "IN_PROGRESS" in table
-        assert "UNFINISHED" not in table
 
 
 def test_http_opponents_expose_result_and_activity_counts(database_url: str) -> None:
@@ -167,11 +123,10 @@ def test_archived_chesscom_game_without_result_is_not_known_in_progress(
     if result == "none":
         assert [row[0] for row in conn.execute("SELECT result_raw FROM game_participants")] == ["none", "none"]
     user = user_game_summary(conn, "chess.com", "alice")
-    opponents = opponent_report(conn, "chess.com", "alice")
-    assert user is not None and opponents is not None
+    assert user is not None
     for row in (
-        user, opponents[0], list_opponents(conn, "chess.com", "alice")["items"][0],
-        games_by_month(conn, provider="chess.com")[0],
+        user, list_opponents(conn, "chess.com", "alice")["items"][0],
+        months_page(conn, provider="chess.com", after="", limit=100)["items"][0],
     ):
         assert row["no_result"] == row["unfinished"] == 1
         assert row["in_progress"] == 0
@@ -201,8 +156,61 @@ def test_304_repairs_previously_inferred_chesscom_activity(initialized_conn: Con
     )
 
     assert refreshed.normalized_ids == first.normalized_ids
-    assert read_raw_payload(conn, first.raw_payload_id).parser_version == "games-normalizer-v2"
+    from chess_crawl.normalize.games import PARSER_VERSION
+    assert read_raw_payload(conn, first.raw_payload_id).parser_version == PARSER_VERSION
     row = user_game_summary(conn, "chess.com", "alice")
     assert row is not None
     assert (row["no_result"], row["in_progress"]) == (1, 0)
     assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 1
+
+
+def test_standalone_game_archive_304_refreshes_the_current_source(initialized_conn: Connection) -> None:
+    conn = initialized_conn
+    config = Config(chesscom_delay_s=0, max_retries=0)
+    old_body = chesscom_archive_body("win")
+    first = fetch_chesscom_month(
+        conn, "alice", 2024, 1, config=config,
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, headers={"etag": '"january"'}, content=old_body,
+        )),
+    )
+    assert first.raw_payload_id is not None
+    baseline = int(time.time())
+    with transaction(conn):
+        conn.execute(
+            "UPDATE raw_payloads SET fetched_at=%s WHERE id=%s",
+            (baseline - 2, first.raw_payload_id),
+        )
+        conn.execute(
+            "UPDATE fetch_logs SET attempted_at=%s WHERE raw_payload_id=%s",
+            (baseline - 2, first.raw_payload_id),
+        )
+    newer_raw = store_raw_payload(conn, RawRecord(
+        provider="chess.com", endpoint_type="monthly_archive",
+        request_url="https://api.chess.com/pub/player/alice/games/2024/02",
+        canonical_source_key="chess.com/player/alice/games/2024/02",
+        body=chesscom_archive_body("checkmated"),
+        fetched_at=baseline - 1,
+        media_type="application/json",
+    ))
+    normalize_games_payload(conn, newer_raw)
+    game_id = first.normalized_ids[0]
+    assert require_row(conn.execute(
+        "SELECT result_raw FROM game_participants WHERE game_id=%s AND color='white'", (game_id,),
+    ))[0] == "checkmated"
+
+    def unchanged(request: httpx.Request) -> httpx.Response:
+        assert request.headers["If-None-Match"] == '"january"'
+        return httpx.Response(304)
+
+    refreshed = fetch_chesscom_month(
+        conn, "alice", 2024, 1, config=config, transport=httpx.MockTransport(unchanged),
+    )
+    assert refreshed.status_code == 304
+    # A non-body response may omit result payload IDs; stored evidence is authoritative.
+    assert require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0] == 2
+    observed = require_row(conn.execute("SELECT status_code,raw_payload_id FROM fetch_logs ORDER BY id DESC LIMIT 1"))
+    assert (observed["status_code"], observed["raw_payload_id"]) == (304, first.raw_payload_id)
+    assert require_row(conn.execute(
+        "SELECT result_raw FROM game_participants WHERE game_id=%s AND color='white'", (game_id,),
+    ))[0] == "win"

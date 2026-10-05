@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Any, Mapping
 
 import httpx
 
@@ -10,6 +10,7 @@ from chess_crawl.config import ProviderSettings
 from chess_crawl.providers.base import FetchPolicy, RawRecord
 from chess_crawl.providers.http import HttpClient, HttpFetchResult
 from chess_crawl.providers.lichess import endpoints
+from chess_crawl.providers.resources import get_resource, resource_owner_scope, resource_source_key
 
 
 PROVIDER = "lichess"
@@ -64,17 +65,21 @@ class LichessClient:
 
     def get_user_profile(self, username: str) -> RawRecord:
         normalized = _username(username)
+        params = {"trophies": "true", "profile": "true", "rank": "true", "fideId": "true"}
         result = self.http.request(
             "GET",
-            endpoints.user_profile(username),
+            endpoints.user_profile(username, **params),
             endpoint_type="user_profile",
-            headers=self._headers("application/json"),
+            # OAuth adds account-relative following/blocking information. This
+            # collector captures the broad public profile independently.
+            headers={"Accept": "application/json"},
         )
         return _raw_record(
             result,
             endpoint_type="user_profile",
             canonical_source_key=f"lichess/user/{normalized}/profile",
             target_username=normalized,
+            request_params=params,
         )
 
     def get_user_stats(self, username: str) -> RawRecord:
@@ -104,7 +109,8 @@ class LichessClient:
             "GET",
             endpoints.user_games(username, **params),
             endpoint_type="user_games_stream",
-            headers=self._headers("application/x-ndjson"),
+            # Public archive inputs must not inherit account-private access.
+            headers={"Accept": "application/x-ndjson"},
         )
         return _raw_record(
             result,
@@ -123,7 +129,7 @@ class LichessClient:
             "GET",
             endpoints.game(game_id, **params),
             endpoint_type="game",
-            headers=self._headers("application/json"),
+            headers={"Accept": "application/json"},
         )
         return _raw_record(
             result,
@@ -133,8 +139,67 @@ class LichessClient:
             request_params=params,
         )
 
+    def get_user_games_page(
+        self, username: str, *, since_ms: int | None, until_ms: int,
+        limit: int,
+    ) -> RawRecord:
+        """Acquire a bounded page without rounding millisecond cursor boundaries."""
+        for name, value in (("since_ms", since_ms), ("until_ms", until_ms)):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{name} must be a nonnegative integer")
+        if since_ms is not None and since_ms > until_ms:
+            raise ValueError("since_ms must not be greater than until_ms")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        normalized = _username(username)
+        unit = f"millis-{since_ms if since_ms is not None else 'open'}..{until_ms}-limit-{limit}"
+        params = {
+            "since": since_ms, "until": until_ms, "max": limit,
+            "sort": "dateDesc", "ongoing": "true", "finished": "true",
+            "pgnInJson": "true", "opening": "true", "division": "true",
+            **self._evidence_params(),
+        }
+        result = self.http.request(
+            "GET", endpoints.user_games(username, **params), endpoint_type="user_games_stream",
+            headers={"Accept": "application/x-ndjson"},
+        )
+        return _raw_record(
+            result, endpoint_type="user_games_stream",
+            canonical_source_key=f"lichess/games/user/{normalized}/{unit}",
+            target_username=normalized, archive_unit=unit,
+            request_params={key: value for key, value in params.items() if value is not None},
+        )
+
     def close(self) -> None:
         self.http.close()
+
+    def get_user_resource(
+        self, username: str, resource_key: str, *, parameters: dict[str, Any] | None = None,
+        owner_scope: str = "public", etag: str | None = None, last_modified: str | None = None,
+    ) -> RawRecord:
+        resource = get_resource(PROVIDER, resource_key)
+        values = resource.parameters(parameters)
+        scope = resource_owner_scope(resource, owner_scope)
+        if resource.authentication == "required" and not self.settings.oauth_token:
+            raise ValueError(f"resource {resource_key} requires an OAuth token")
+        if resource.access_scope == "workspace" and scope != self.settings.oauth_owner_scope:
+            raise ValueError("provider OAuth credentials belong to a different workspace")
+        authenticated = resource.authentication != "none" and bool(self.settings.oauth_token)
+        result = self.http.request(
+            "GET", resource.url(username, values), endpoint_type="user_resource",
+            headers=self._authenticated_headers("application/json") if authenticated else {"Accept": "application/json"},
+        )
+        return _raw_record(
+            result, endpoint_type="user_resource",
+            canonical_source_key=resource_source_key(
+                PROVIDER, username, resource_key, values, owner_scope=scope, authenticated=authenticated,
+            ),
+            target_username=_username(username), request_params={
+                "resource_key": resource_key, "parameters": values, "owner_scope": scope,
+                "authenticated": authenticated,
+            },
+            owner_scope=scope,
+        )
 
     def _evidence_params(self) -> dict[str, str]:
         return {
@@ -143,7 +208,7 @@ class LichessClient:
             "accuracy": str(self.settings.include_accuracy).lower(),
         }
 
-    def _headers(self, accept: str) -> Mapping[str, str]:
+    def _authenticated_headers(self, accept: str) -> Mapping[str, str]:
         headers = {"Accept": accept}
         if self.settings.oauth_token:
             headers["Authorization"] = f"Bearer {self.settings.oauth_token}"
@@ -159,6 +224,7 @@ def _raw_record(
     target_game_id: str | None = None,
     archive_unit: str | None = None,
     request_params: Mapping[str, object] | None = None,
+    owner_scope: str = "public",
 ) -> RawRecord:
     return RawRecord(
         provider=PROVIDER,
@@ -178,6 +244,7 @@ def _raw_record(
         archive_unit=archive_unit,
         response_headers=result.headers,
         fetch_attempts=result.attempts,
+        owner_scope=owner_scope,
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from contextlib import nullcontext
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -19,17 +20,24 @@ from chess_crawl.ingest import (
     fetch_lichess_game,
     fetch_lichess_games,
     fetch_user_profile,
+    replay_raw_payload,
+    installed_parser_target,
 )
 from chess_crawl.jobs import discovery, state
+from chess_crawl.jobs.budget import BudgetExceeded, BudgetPolicy
 from chess_crawl.jobs.models import DiscoveryJob, JobState
-from chess_crawl.jobs.locking import ExecutorLease, ExecutorLeaseLost, executor_lock
+from chess_crawl.jobs.locking import ExecutorLease, ExecutorLeaseLost, parallel_executor_lock
 from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.providers.registry import ProviderSession, get_provider_info
-from chess_crawl.providers.base import ProviderRequestStopped
+from chess_crawl.providers.base import (
+    ProviderRequestStopped, ProviderResponseTooLarge, ProviderResponseEncodingError, ProviderResponseDeadlineExceeded,
+)
 from chess_crawl.storage.acquisition import associate_run_game
 from chess_crawl.storage.db import Connection, DatabaseError, transaction
 from chess_crawl.storage.discovery import opponents_of_user, record_discovery_edges
 from chess_crawl.storage.repository import insert_error
+from chess_crawl.storage.execution import start_upgrade, upgrade_batch, checkpoint_upgrade, fail_upgrade
+from chess_crawl.storage import work_budgets
 
 
 GameFetcher = Callable[[Connection, str, str, Mapping[str, Any], int | None], IngestResult]
@@ -96,6 +104,9 @@ class JobRunner:
         lease: ExecutorLease | None = None,
         stop_requested: Callable[[], bool] | None = None,
         on_job: Callable[[int | None], None] | None = None,
+        worker_id: str | None = None,
+        stage: str = "all",
+        budget_policy: BudgetPolicy | None = None,
     ) -> None:
         self.conn = conn
         self.config = config or Config.from_env()
@@ -109,6 +120,10 @@ class JobRunner:
         self.stop_requested = stop_requested or (lambda: False)
         self.on_job = on_job or (lambda job_id: None)
         self._active_session: ProviderSession | None = None
+        self.worker_id = worker_id or uuid.uuid4().hex
+        self.stage = stage
+        self.budget_policy = budget_policy or BudgetPolicy.from_env()
+        self._request_reservation: int | None = None
 
     def run(
         self,
@@ -117,18 +132,27 @@ class JobRunner:
         max_jobs: int | None = None,
         resume_stale: bool = False,
         unblock: bool = False,
+        job_id: int | None = None,
+        respect_fairness: bool = False,
     ) -> RunnerResult:
-        with executor_lock(self.conn, lease=self.lease) as lease:
+        with parallel_executor_lock(self.conn, lease=self.lease) as lease:
             sessions = nullcontext(self.session) if self.session is not None else ProviderSession(
                 self.config, transport=self.transport, sleeper=self.sleeper, clock=self.clock,
                 stop_requested=self.stop_requested,
             )
             with sessions as session:
                 self._active_session = session
+                if session is not None:
+                    session.before_request = self._before_provider_request
+                    session.persist_deadline = self._persist_provider_deadline
+                    session.reserve_request = self._reserve_request
+                    session.finish_request = self._finish_request
                 try:
                     return self._run_owned(
                         lease, crawl_run_id=crawl_run_id, max_jobs=max_jobs,
                         resume_stale=resume_stale, unblock=unblock,
+                        job_id=job_id,
+                        respect_fairness=respect_fairness,
                     )
                 finally:
                     self._active_session = None
@@ -136,6 +160,8 @@ class JobRunner:
     def _run_owned(
         self, lease: ExecutorLease, *, crawl_run_id: int | None,
         max_jobs: int | None, resume_stale: bool, unblock: bool,
+        job_id: int | None,
+        respect_fairness: bool,
     ) -> RunnerResult:
         stale_count = state.resume_stale_in_progress(
             self.conn, crawl_run_id=crawl_run_id, now=int(self.clock()), lease=lease,
@@ -144,8 +170,14 @@ class JobRunner:
         result = RunnerResult().with_resume_counts(stale_resumed=stale_count, unblocked=unblocked_count)
         while (max_jobs is None or result.claimed < max_jobs) and not self.stop_requested():
             lease.require(self.conn)
-            job = state.claim_next_job(self.conn, crawl_run_id=crawl_run_id, now=self.clock())
+            job = state.claim_next_job(self.conn, crawl_run_id=crawl_run_id, now=self.clock(),
+                                       worker_id=self.worker_id, job_id=job_id, stage=self.stage,
+                                       budget_policy=self.budget_policy, respect_fairness=respect_fairness)
             if job is None:
+                pacing = state.next_pacing_deadline(self.conn, crawl_run_id=crawl_run_id, now=self.clock())
+                if pacing is not None and self.stage != "processing" and job_id is None:
+                    (self.sleeper or time.sleep)(max(0, pacing - self.clock()))
+                    continue
                 break
             if job.id is None:
                 raise RuntimeError("claimed job is missing a persisted id")
@@ -166,6 +198,10 @@ class JobRunner:
                 )
                 result = result.add(state=completed)
             finally:
+                self.conn._work_budget_id = None
+                self.conn._work_payload_read_credits = 0
+                self._request_reservation = None
+                state.release_job_ownership(self.conn)
                 self.on_job(None)
         # Normal completions already refreshed their own run. Avoid rewriting
         # every historical run on each idle daemon poll.
@@ -175,6 +211,28 @@ class JobRunner:
 
     def _execute(self, job: DiscoveryJob) -> ExecutionOutcome:
         try:
+            if job.id is None:
+                raise ValueError("Execution requires a persisted job")
+            self.conn._work_budget_id = work_budgets.ensure_job_budget(
+                self.conn, job.id, self.budget_policy, now=int(self.clock()),
+            )
+            if job.kind == "normalize_payload":
+                params = state.load_params(job.params_json)
+                result = replay_raw_payload(self.conn, int(params.get("raw_payload_id", job.target)),
+                                            crawl_run_id=job.crawl_run_id, max_games=params.get("max_games"),
+                                            fetch_log_id=params.get("fetch_log_id"))
+                return _outcome_from_ingest(result)
+            if job.kind == "reprocess_archive":
+                return self._reprocess_archive(job)
+            if job.kind == "fetch_user_resource":
+                from chess_crawl import ingest
+                params = state.load_params(job.params_json)
+                fetch = getattr(ingest, "fetch_user_resource")
+                result = fetch(self.conn, job.provider, job.target, params["resource_key"],
+                               parameters=params.get("parameters"), config=self.config,
+                               session=self._active_session, job_id=job.id,
+                               crawl_run_id=job.crawl_run_id, owner_scope=params.get("owner_scope", "public"))
+                return _outcome_from_ingest(result)
             if job.kind == "fetch_user_profile":
                 result = fetch_user_profile(
                     self.conn,
@@ -192,6 +250,25 @@ class JobRunner:
                 result = self._fetch_stats(job)
                 return _outcome_from_ingest(result)
             if job.kind == "fetch_user_games":
+                params = state.load_params(job.params_json)
+                if params.get("collection_mode", "bounded") != "bounded":
+                    from chess_crawl.jobs.collection import execute_collection
+                    previous = self.conn._defer_normalization
+                    self.conn._defer_normalization = True
+                    try:
+                        collected = execute_collection(
+                            self.conn, job, params, config=self.config,
+                            session=self._active_session, sleeper=self.sleeper, clock=self.clock,
+                            transport=self.transport, stop_requested=self.stop_requested,
+                        )
+                    finally:
+                        self.conn._defer_normalization = previous
+                    if collected.status_code not in {200, 304}:
+                        return _outcome_from_ingest(IngestResult(
+                            job.provider, "collection", collected.status_code, None,
+                            collected.normalized_ids, collected.message, collected.retry_after,
+                        ))
+                    return ExecutionOutcome("done" if collected.done else "pending", collected.message)
                 result = self._fetch_user_games(job)
                 return _outcome_from_ingest(result)
             if job.kind == "fetch_game_by_id":
@@ -200,6 +277,14 @@ class JobRunner:
             if job.kind == "crawl_opponents":
                 return self._crawl_opponents(job)
             return ExecutionOutcome("error", f"unknown job kind: {job.kind}")
+        except (BudgetExceeded, ProviderResponseTooLarge, ProviderResponseEncodingError, ProviderResponseDeadlineExceeded) as exc:
+            dimension = exc.dimension if isinstance(exc, BudgetExceeded) else (
+                "response_bytes" if isinstance(exc, ProviderResponseTooLarge) else
+                "response_encoding" if isinstance(exc, ProviderResponseEncodingError) else "response_deadline"
+            )
+            if self.conn._work_budget_id is not None:
+                work_budgets.exhaust_budget(self.conn, self.conn._work_budget_id, dimension, now=int(self.clock()))
+            return ExecutionOutcome("blocked", f"budget_exhausted: {dimension}; requested work remains incomplete")
         except (_AcquisitionStopped, ProviderRequestStopped) as exc:
             return ExecutionOutcome("pending", str(exc))
         except (DatabaseError, ExecutorLeaseLost):
@@ -207,6 +292,13 @@ class JobRunner:
             # Storage or ownership loss is not a failed provider acquisition.
             raise
         except Exception as exc:
+            if job.kind == "reprocess_archive" and job.id is not None:
+                params = state.load_params(job.params_json)
+                fail_upgrade(
+                    self.conn, str(params.get("upgrade_id", job.target)), job_id=job.id,
+                    provider=job.provider, owner_scope=str(params.get("owner_scope", "public")),
+                    error=str(exc),
+                )
             insert_error(
                 self.conn,
                 provider=job.provider,
@@ -215,6 +307,40 @@ class JobRunner:
                 retry_count=job.attempts,
             )
             return ExecutionOutcome("error", str(exc), transient=isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)))
+
+    def _before_provider_request(self, provider: str) -> None:
+        # Verify fencing immediately before network work, including each retry.
+        with transaction(self.conn):
+            ready = state.provider_ready_at(self.conn, provider)
+        delay = (ready or 0) - self.clock()
+        if delay > 0:
+            (self.sleeper or time.sleep)(delay)
+            with transaction(self.conn):
+                pass  # Recheck ownership after waiting, immediately before HTTP.
+        if self.stop_requested():
+            raise ProviderRequestStopped("Provider request stopped before acquisition")
+
+    def _persist_provider_deadline(self, provider: str, deadline: float, reason: str) -> None:
+        state.defer_provider(self.conn, provider, not_before=deadline, reason=reason, now=self.clock())
+
+    def _reserve_request(self, provider: str) -> int:
+        if self.conn._work_budget_id is None:
+            raise RuntimeError("Provider acquisition has no durable work budget")
+        if self._request_reservation is not None:
+            raise RuntimeError("Previous request reservation is unsettled")
+        if self.conn._defer_normalization:
+            work_budgets.require_backlog_room(self.conn, self.conn._work_budget_id)
+        identity, limit = work_budgets.reserve_request(self.conn, self.conn._work_budget_id, now=int(self.clock()))
+        self._request_reservation = identity
+        self.conn._work_payload_read_credits += 1
+        return limit
+
+    def _finish_request(self, provider: str, received: int) -> None:
+        if self._request_reservation is None:
+            raise RuntimeError("Provider response has no reserved work")
+        identity = self._request_reservation
+        work_budgets.settle_request(self.conn, identity, received)
+        self._request_reservation = None
 
     def _fetch_stats(self, job: DiscoveryJob) -> IngestResult:
         if job.provider == "chess.com":
@@ -274,6 +400,29 @@ class JobRunner:
             job_id=job.id,
             crawl_run_id=job.crawl_run_id,
         )
+
+    def _reprocess_archive(self, job: DiscoveryJob) -> ExecutionOutcome:
+        if job.id is None:
+            raise ValueError("Upgrade requires a persisted job")
+        params = state.load_params(job.params_json)
+        size = int(params.get("batch_size", 25))
+        if not 1 <= size <= 100:
+            raise ValueError("Upgrade batch_size must be between one and one hundred")
+        upgrade_id = str(params.get("upgrade_id", job.target))
+        upgrade = start_upgrade(self.conn, upgrade_id=upgrade_id, provider=job.provider,
+                                parser_version=installed_parser_target(str(params.get("parser_version", "current"))),
+                                job_id=job.id,
+                                owner_scope=str(params.get("owner_scope", "public")))
+        batch = upgrade_batch(self.conn, upgrade, batch_size=size)
+        for raw_id in batch:
+            if self.stop_requested() or self._cancelled(job):
+                return ExecutionOutcome("pending", "Upgrade checkpoint retained")
+            replay_raw_payload(self.conn, raw_id)
+            checkpoint_upgrade(self.conn, upgrade_id, raw_id)
+        if len(batch) < size:
+            checkpoint_upgrade(self.conn, upgrade_id, int(upgrade["high_water_raw_id"]), done=True)
+            return ExecutionOutcome("done", f"Upgrade completed: {upgrade_id}")
+        return ExecutionOutcome("pending", f"Upgrade checkpointed {len(batch)} source payloads")
 
     def _fetch_chesscom_bounded_months(self, job: DiscoveryJob, params: dict[str, Any]) -> IngestResult:
         since = _int_or_none(params.get("since"))

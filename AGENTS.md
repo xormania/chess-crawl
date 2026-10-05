@@ -1,8 +1,8 @@
 # Agent orientation
 
 chess-crawl is a Python project for collecting, preserving, and analyzing
-chess data. Its current interfaces include a CLI and an HTTP API, with
-background jobs and Mercure updates.
+chess data. Product operations use an HTTP API, with background workers and
+Mercure updates. Dedicated administration commands maintain the archive.
 
 This file provides orientation and navigation. The maintainer's current
 request sets the task.
@@ -12,7 +12,7 @@ request sets the task.
 - [README.md](README.md): project overview, current capabilities, and setup.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development setup, shared implementation,
   validation, branches, pull requests, and changelog requirements.
-- [CLI guide](docs/cli.md): commands and archive operations.
+- [Operations guide](docs/cli.md): migrations, readiness, and archive maintenance.
 - [Backend guide](docs/backend.md): API, workers, Mercure, and deployment.
 
 ## Find the implementation

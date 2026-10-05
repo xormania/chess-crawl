@@ -73,14 +73,27 @@ jobs:
         env:
           SCOPE_RESULT: ${{ steps.scope.outcome }}
           RUN_CHECK: ${{ steps.scope.outputs.offline }}
+          RUN_DATABASE: ${{ steps.scope.outputs.database }}
+          RUN_COMPOSE: ${{ steps.scope.outputs.compose }}
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           PROMOTION_RESULT: ${{ needs.promotion-source.result }}
         run: |
           test "$SCOPE_RESULT" = success
           test "$RUN_CHECK" = true || test "$RUN_CHECK" = false
-          test "$EVENT_NAME" = pull_request || test "$RUN_CHECK" = true
+          test "$RUN_DATABASE" = true || test "$RUN_DATABASE" = false
+          test "$RUN_COMPOSE" = true || test "$RUN_COMPOSE" = false
+          if [ "$RUN_CHECK" = false ]; then
+            test "$RUN_DATABASE" = false
+          elif [ "$RUN_DATABASE" = false ]; then
+            test "$RUN_COMPOSE" = true
+          fi
+          if [ "$EVENT_NAME" != pull_request ] || [ "$BASE_REF" = master ]; then
+            test "$RUN_CHECK" = true
+            test "$RUN_DATABASE" = true
+          fi
           if [ "$EVENT_NAME" = pull_request ] && [ "$BASE_REF" = master ]; then
+            test "$RUN_CHECK" = true
             test "$PROMOTION_RESULT" = success
           fi
           echo "Offline checks selected: $RUN_CHECK" >> "$GITHUB_STEP_SUMMARY"
@@ -92,7 +105,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Start disposable PostgreSQL
-        if: steps.scope.outputs.offline == 'true'
+        if: steps.scope.outputs.offline == 'true' && steps.scope.outputs.database == 'true'
         env:
           POSTGRES_PASSWORD: ${{ env.CHESS_CRAWL_TEST_DATABASE_PASSWORD }}
         run: python .github/scripts/ci_performance.py measure --label postgres-ready --output-dir "$CI_PERFORMANCE_DIR" -- python .github/scripts/test_postgres.py start
@@ -136,14 +149,17 @@ jobs:
 
       - name: Offline tests
         if: steps.scope.outputs.offline == 'true'
-        run: python .github/scripts/ci_performance.py measure --label offline-tests --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync python -m pytest -q -m "not live and not slow" --durations=15 --junitxml="$CI_PERFORMANCE_DIR/pytest.xml"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: uv run --no-sync python .github/scripts/ci_scope.py --event-name "$EVENT_NAME" --base-ref "$BASE_REF" --run-tests
 
       - name: Packaged CLI help
         if: steps.scope.outputs.offline == 'true'
-        run: python .github/scripts/ci_performance.py measure --label cli-help --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync chess-crawl --help
+        run: python .github/scripts/ci_performance.py measure --label cli-help --output-dir "$CI_PERFORMANCE_DIR" -- uv run --no-sync chess-crawl-admin --help
 
       - name: Remove disposable PostgreSQL
-        if: always() && steps.scope.outputs.offline == 'true'
+        if: always() && steps.scope.outputs.offline == 'true' && steps.scope.outputs.database == 'true'
         run: python .github/scripts/ci_performance.py measure --label postgres-cleanup --output-dir "$CI_PERFORMANCE_DIR" -- python .github/scripts/test_postgres.py stop
 
       - name: Save Mypy analysis
@@ -202,6 +218,7 @@ jobs:
           test "$RUN_CHECK" = true || test "$RUN_CHECK" = false
           test "$EVENT_NAME" = pull_request || test "$RUN_CHECK" = true
           if [ "$EVENT_NAME" = pull_request ] && [ "$BASE_REF" = master ]; then
+            test "$RUN_CHECK" = true
             test "$PROMOTION_RESULT" = success
           fi
           echo "Compose smoke selected: $RUN_CHECK" >> "$GITHUB_STEP_SUMMARY"

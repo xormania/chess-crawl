@@ -9,10 +9,6 @@ from typing import Any, cast
 from chess_crawl.storage.db import Connection, Row, require_row
 
 
-_FIRST_REPORT_EPOCH = -62135596800  # 0001-01-01T00:00:00Z
-_AFTER_LAST_REPORT_EPOCH = 253402300800  # 10000-01-01T00:00:00Z
-
-
 @dataclass(frozen=True)
 class UserReport:
     id: int
@@ -54,6 +50,7 @@ def query_user(conn: Connection, provider: str, username: str) -> UserReport | N
                  WHERE gp.provider_user_id = pu.id AND g.provider = pu.provider) AS games
           FROM provider_users pu
          WHERE pu.provider = %s AND pu.username_normalized = %s
+           AND (pu.first_seen_at IS NOT NULL OR pu.updated_at IS NOT NULL)
         """,
         (provider, normalized),
     ).fetchone()
@@ -108,43 +105,32 @@ def query_game(conn: Connection, provider: str, game_id: str) -> GameReport | No
     )
 
 
-def query_raw(conn: Connection, provider: str, limit: int) -> list[Row]:
-    return list(
-        conn.execute(
-            """
-            SELECT id, provider, endpoint_type, canonical_source_key, response_status,
-                   content_type, body_hash, body_bytes, normalization_status, fetched_at
-              FROM raw_payloads
-             WHERE provider = %s
-             ORDER BY fetched_at DESC, id DESC
-             LIMIT %s
-            """,
-            (provider, limit),
-        )
-    )
-
-
-def summary_report(conn: Connection) -> dict[str, Any]:
+def summary_report(conn: Connection, *, workspace_id: str | None = None) -> dict[str, Any]:
     providers = list(
         conn.execute(
             """
             SELECT p.key AS provider,
-                   (SELECT COUNT(*) FROM provider_users pu WHERE pu.provider = p.key) AS users,
+                   (SELECT COUNT(*) FROM provider_users pu WHERE pu.provider = p.key
+                      AND (pu.first_seen_at IS NOT NULL OR pu.updated_at IS NOT NULL)) AS users,
                    (SELECT COUNT(*) FROM games g WHERE g.provider = p.key) AS games
               FROM providers p
              ORDER BY p.key COLLATE "C"
             """
         )
     )
-    raw_payloads = int(require_row(conn.execute("SELECT COUNT(*) FROM raw_payloads"))[0])
+    raw_payloads = int(require_row(conn.execute(
+        "SELECT COUNT(*) FROM raw_payloads WHERE owner_scope IN ('public',COALESCE(%s,'public'))",
+        (workspace_id,),
+    ))[0])
     runs = list(
         conn.execute(
             """
             SELECT status, COUNT(*) AS count
               FROM crawl_runs
+             WHERE (%s::text IS NULL OR workspace_id=%s)
              GROUP BY status
              ORDER BY status COLLATE "C"
-            """
+            """, (workspace_id,workspace_id),
         )
     )
     jobs = list(
@@ -152,9 +138,10 @@ def summary_report(conn: Connection) -> dict[str, Any]:
             """
             SELECT state, COUNT(*) AS count
               FROM discovery_jobs
+             WHERE (%s::text IS NULL OR workspace_id=%s)
              GROUP BY state
              ORDER BY state COLLATE "C"
-            """
+            """, (workspace_id,workspace_id),
         )
     )
     return {
@@ -221,72 +208,6 @@ def user_game_summary(conn: Connection, provider: str, username: str) -> Row | N
     ).fetchone()
 
 
-def opponent_report(conn: Connection, provider: str, username: str) -> list[Row] | None:
-    user = query_user(conn, provider, username)
-    if user is None:
-        return None
-    return list(
-        conn.execute(
-            """
-            WITH opp AS (
-              SELECT gp_o.provider_user_id AS opponent_id,
-                     gp_m.color AS my_color,
-                     g.outcome, g.is_live
-                FROM games g
-                JOIN game_participants gp_m
-                  ON gp_m.game_id = g.id AND gp_m.provider_user_id = %s
-                JOIN game_participants gp_o
-                  ON gp_o.game_id = g.id AND gp_o.color <> gp_m.color
-               WHERE g.provider = %s
-                 AND gp_o.provider_user_id IS NOT NULL
-            )
-            SELECT pu.provider AS provider,
-                   pu.username_normalized AS opponent_username,
-                   pu.display_username AS opponent_display,
-                   COUNT(*) AS games,
-                   COUNT(*) FILTER (WHERE (my_color='white' AND outcome='white_win')
-                             OR (my_color='black' AND outcome='black_win')) AS my_wins,
-                   COUNT(*) FILTER (WHERE outcome='draw') AS draws,
-                   COUNT(*) FILTER (WHERE (my_color='white' AND outcome='black_win')
-                             OR (my_color='black' AND outcome='white_win')) AS my_losses,
-                   COUNT(*) FILTER (WHERE outcome IS NULL) AS unfinished,
-                   COUNT(*) FILTER (WHERE outcome IS NULL) AS no_result,
-                   COUNT(*) FILTER (WHERE is_live = 1) AS in_progress
-              FROM opp
-              JOIN provider_users pu ON pu.id = opp.opponent_id AND pu.provider = %s
-             GROUP BY pu.id
-             ORDER BY games DESC, pu.username_normalized COLLATE "C"
-            """,
-            (user.id, provider, provider),
-        )
-    )
-
-
-def games_by_month(conn: Connection, *, provider: str) -> list[Row]:
-    """Bucket UTC Gregorian years 0001–9999; other preserved times are unknown."""
-    return list(
-        conn.execute(
-            """
-            SELECT CASE WHEN ended_at >= %s AND ended_at < %s
-                        THEN to_char(to_timestamp(ended_at) AT TIME ZONE 'UTC', 'YYYY-MM')
-                        ELSE 'unknown' END AS month,
-                   COUNT(*) AS games,
-                   COUNT(*) FILTER (WHERE outcome='white_win') AS white_wins,
-                   COUNT(*) FILTER (WHERE outcome='black_win') AS black_wins,
-                   COUNT(*) FILTER (WHERE outcome='draw') AS draws,
-                   COUNT(*) FILTER (WHERE outcome IS NULL) AS unfinished,
-                   COUNT(*) FILTER (WHERE outcome IS NULL) AS no_result,
-                   COUNT(*) FILTER (WHERE is_live = 1) AS in_progress
-              FROM games
-             WHERE provider = %s
-             GROUP BY month
-             ORDER BY month
-            """,
-            (_FIRST_REPORT_EPOCH, _AFTER_LAST_REPORT_EPOCH, provider),
-        )
-    )
-
-
 def iter_games(
     conn: Connection, *, provider: str | None = None
 ) -> Generator[Row, None, None]:
@@ -319,7 +240,7 @@ def iter_games(
 def iter_users(
     conn: Connection, *, provider: str | None = None
 ) -> Generator[Row, None, None]:
-    """Stream normalized user records without loading the archive into memory."""
+    """Stream public identities without loading the archive into memory."""
     with conn.cursor() as cursor:
         stream = cast(Generator[Row, None, None], cursor.stream(
             """
@@ -327,6 +248,7 @@ def iter_users(
                    account_status, title, first_seen_at, updated_at
               FROM provider_users
              WHERE (%s::text IS NULL OR provider = %s)
+               AND (first_seen_at IS NOT NULL OR updated_at IS NOT NULL)
              ORDER BY provider COLLATE "C", username_normalized COLLATE "C"
             """,
             (provider, provider),
@@ -337,51 +259,24 @@ def iter_users(
             stream.close()
 
 
-def iter_graph_edges(
-    conn: Connection, *, provider: str | None = None
-) -> Generator[Row, None, None]:
-    """Stream provider-scoped discovery edges and their endpoint usernames."""
-    with conn.cursor() as cursor:
-        stream = cast(Generator[Row, None, None], cursor.stream(
-            """
-            SELECT e.provider,
-                   e.crawl_run_id,
-                   fu.username_normalized AS from_username,
-                   tu.username_normalized AS to_username,
-                   e.from_user_id,
-                   e.to_user_id,
-                   e.via_game_id,
-                   e.game_count,
-                   e.depth,
-                   e.edge_kind
-              FROM discovery_edges e
-              JOIN provider_users fu ON fu.id = e.from_user_id AND fu.provider = e.provider
-              JOIN provider_users tu ON tu.id = e.to_user_id AND tu.provider = e.provider
-             WHERE (%s::text IS NULL OR e.provider = %s)
-             ORDER BY e.provider COLLATE "C", e.depth, fu.username_normalized COLLATE "C", tu.username_normalized COLLATE "C"
-            """,
-            (provider, provider),
-        ))
-        try:
-            yield from stream
-        finally:
-            stream.close()
-
-
-def archive_freshness(conn: Connection, *, provider: str | None = None) -> dict[str, Any]:
+def archive_freshness(conn: Connection, *, provider: str | None = None, owner_scope: str = "public") -> dict[str, Any]:
     """Describe preserved and normalized observations, without implying live data."""
     row = require_row(conn.execute(
         """
         SELECT (SELECT MAX(attempted_at) FROM fetch_logs
-                 WHERE (%s::text IS NULL OR provider = %s) AND status_code IN (200, 304)) AS last_checked_at,
+                 WHERE (%s::text IS NULL OR provider = %s) AND status_code IN (200, 304)
+                   AND EXISTS(SELECT 1 FROM raw_payloads r
+                        WHERE r.id=fetch_logs.raw_payload_id
+                        AND r.owner_scope IN ('public',%s))) AS last_checked_at,
                MAX(fetched_at) AS last_fetched_at,
                MAX(normalized_at) AS last_normalized_at,
                COUNT(*) FILTER (WHERE normalization_status IN ('pending', 'stale')) AS pending_payloads,
                COUNT(*) FILTER (WHERE normalization_status = 'failed') AS failed_payloads
           FROM raw_payloads
          WHERE (%s::text IS NULL OR provider = %s)
+           AND owner_scope IN ('public',%s)
         """,
-        (provider, provider, provider, provider),
+        (provider, provider, owner_scope, provider, provider, owner_scope),
     ))
     return {"provider": provider, **dict(row)}
 
@@ -417,7 +312,8 @@ def user_page(
     conn: Connection, *, provider: str | None, after: int, limit: int
 ) -> tuple[list[Row], int]:
     total = int(require_row(conn.execute(
-        "SELECT COUNT(*) FROM provider_users WHERE (%s::text IS NULL OR provider = %s)", (provider, provider),
+        """SELECT COUNT(*) FROM provider_users WHERE (%s::text IS NULL OR provider = %s)
+           AND (first_seen_at IS NOT NULL OR updated_at IS NOT NULL)""", (provider, provider),
     ))[0])
     rows = list(conn.execute(
         """
@@ -429,6 +325,7 @@ def user_page(
                  WHERE gp.provider_user_id = pu.id AND g.provider = pu.provider) AS games
           FROM provider_users pu
          WHERE pu.id > %s AND (%s::text IS NULL OR pu.provider = %s)
+           AND (pu.first_seen_at IS NOT NULL OR pu.updated_at IS NOT NULL)
          ORDER BY pu.id
          LIMIT %s
         """,

@@ -5,7 +5,127 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ## Unreleased
 
+### Security
+
+- Bound cumulative stored analysis results by workspace count and logical payload
+  bytes, with atomic admission across working sets and API replicas. Exact-result
+  replay remains available at capacity; new excess results return 429. Migration
+  `0016` accounts for retained results, and the operator-only `prune-results`
+  command releases capacity in bounded workspace-scoped batches without deleting
+  source evidence or working sets. See [result limits](docs/backend.md#reproducible-working-sets)
+  and [retention](docs/cli.md#retain-analysis-results).
+
 ### Added
+
+- A bounded, cursor-based operational transfer for referenced local/S3 archive
+  objects. It verifies and copies exact compressed evidence before atomically
+  repointing raw/import references, retains source backups and IDs, resumes after
+  failures, and supports the local-to-AWS data lift without provider refetches.
+  See [archive storage](docs/archive-storage.md#transferring-existing-external-objects).
+- A private AWS CloudFormation foundation for encrypted PostgreSQL 18, retained
+  versioned S3 archives, SQS/DLQ, and zero-task ECS startup with separate migration
+  credentials. Includes verified RDS trust roots, restricted runtime-role
+  bootstrap, anonymous workload telemetry, and explicit-price cost estimates.
+  AWS provisioning and production release verification remain operator steps.
+  See [AWS deployment](docs/aws-deployment.md).
+
+- Trusted `chess-crawl-admin budgets show` and `budgets resume` aliases preserve
+  spent work, retained checkpoints, and completed jobs while extending ceilings.
+
+- Server-owned lifetime run budgets, monthly workspace quotas, bounded streamed
+  provider responses, and fair workspace claims. Budget exhaustion retains
+  incomplete checkpoints for explicit operator extension and resume. Descendant
+  backlog admission and original-response replay preserve captured work without
+  historical re-fetch after a quota pause or interrupted coverage commit.
+  Selective lookup indexes keep quota and replay checks independent of terminal
+  shared archive history.
+
+- Bounded worker status with an exact active-worker count and batched 24-hour
+  retention for expired stopped/failed heartbeats. Migration `0013` supports
+  status and cleanup without changing execution ownership.
+- Container health probes bind to the worker's own UUID and live local process,
+  so another healthy executor cannot hide an expired container heartbeat.
+- Workspace-owned submissions, jobs, Mercure topics, immutable player working sets,
+  and exact-input analysis result reuse, with server-bound service credentials.
+- Rich archive APIs for profile/resource history, game evidence, clock precision,
+  coverage, offline upgrades, resource collection, and normalized PGN export.
+- Full/incremental/backfill import request contracts with optional date bounds and
+  bounded execution batches. Synchronous working sets enforce a configurable
+  10,000-member default with atomic overflow rejection.
+- Authenticated archive lookup, reports, scoped cached-payload/job/run catalogs,
+  streamed public game/user JSONL and owned graph CSV exports, and one-job
+  profile/statistics refresh submissions. Streamed archive exports close their
+  snapshot and connection when an HTTP download is interrupted.
+
+- Concurrent durable workers with per-job session ownership and fencing,
+  independent provider acquisition and local processing stages, persistent
+  request/retry pacing, and aggregate worker liveness. Migration `0009` must
+  precede starting the new workers; stop old serial executors before upgrading.
+- Queue-independent bounded outbox cleanup retains current pending/retry hints,
+  retires obsolete revisions transactionally, and prunes delivered/superseded
+  history after 24 hours by default. Workers drain fair PostgreSQL work before
+  idle SQS long polls and acknowledge duplicate hints without waiting. Apply
+  migration `0015`; see [execution settings](docs/execution.md#dispatch-history-retention)
+  for configurable retention and cleanup throughput.
+- Durable job dispatch outbox with optional SQS publication and consumption.
+  Duplicate deliveries reuse database job state; local polling remains available.
+- Checkpointed offline normalization upgrades with fixed source high-water marks
+  and workspace-scoped source selection; upgrades do not fetch provider data.
+- Resumable full-history, incremental, and explicit backfill acquisition with
+  durable resource coverage. Closed Chess.com monthly sources are reused and
+  parser upgrades replay their archived bodies locally. Lichess pagination
+  preserves millisecond boundaries and timestamp ties, with individual
+  follow-ups for unfinished games that complete after an incremental watermark.
+  Completed history watermarks remain monotonic; later full jobs reuse stored
+  history locally and request only newer ranges. Sealed monthly collection
+  adopts newer archived sources without downloading them again.
+  Proven finite and partially acquired Lichess intervals are subtracted from
+  later collection requests; missing gaps and oldest timestamp ties remain
+  explicit. Reused broad pages respect exact creation-time run selection.
+- A focused `chess-crawl-admin` entrypoint for packaged schema migrations,
+  read-only readiness inspection, and resumable compressed-backup relocation.
+  Product collection, archive reads, exports, and working selections now use
+  the authenticated API; the old direct-fetch and product CLI are retired.
+  Worker and event publisher process entrypoints remain available.
+
+- Immutable gzip source archives with local filesystem and optional S3 adapters,
+  verified original/encoded checksums, import evidence references, and resumable
+  offline relocation of existing PostgreSQL payload bodies. Inline storage stays
+  compatible by default; object-backed archives require backing up their objects
+  alongside PostgreSQL. See [archive storage](docs/archive-storage.md).
+- Immutable game evidence revisions, queryable PGN move/variation trees,
+  headers, comments, NAGs, provider metadata and lexical tokens. Precise clock
+  and reported elapsed observations retain conflicting sources, malformed
+  values, and decimal resolution. Migration 0006 preserves existing archives;
+  replay fills the new records locally. Standard chess supports legal replay;
+  Chess960/other variants retain notation and clocks with explicit unsupported
+  board interpretation. PGN exports can be reconstructed from the database.
+  Recurring source bodies refresh the current revision and game metadata even
+  when the same run already acquired the game and has exhausted its allowance.
+- Complete queryable provider profile/statistics facts, typed rating records,
+  alias evidence, and observation history retaining recurring values and
+  conditional refreshes. Migration `0008_player_resources` recovers retained
+  fetch occurrences; local parser replay populates newly normalized fields.
+- A registered supplementary player-resource catalog and collectors for
+  Chess.com clubs, team matches, tournaments, and online status, plus Lichess
+  rating history, performance statistics, activity, and teams. Complete native
+  JSON, rating-history source points, and explicit coverage/failure evidence
+  remain available without treating unknown or unavailable data as empty.
+- Ownership for raw player resources and authenticated team observations,
+  OAuth credential/workspace binding, and preservation with quarantine of
+  unowned legacy Lichess profile relationship facts. Public profiles request
+  all documented public extensions independently of OAuth relationship data.
+  See [player data](docs/player-data.md) for migration and ownership details.
+- Current Chess.com statistics alongside profile facts in the rich player read;
+  statistics replay preserves account identity and display names after renames.
+- Migration-time quarantine of historical Lichess profile captures until safe
+  source replay, provider-native verification/streaming flags, and queryable
+  highest/lowest tactics and lessons ratings.
+- Fresh statistics/resources follow the account currently holding a username
+  even when raw-body deduplication reuses older bytes; acquisition attempts stay
+  attached to stable account identity across renames and username reuse.
+- Public resource requests omit configured OAuth credentials; private resource
+  collection does not publish its timestamps in shared alias history.
 
 - A locked Devbox development environment with Python 3.13, uv, Git, and
   PostgreSQL 18 tools, plus setup, source-check, and test commands. uv owns the
@@ -30,6 +150,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   need and of the result; a changelog update requirement for all PRs beyond
   CI/test-only changes.
 
+- Compose forwards the Lichess token's workspace owner, API export limits, and
+  worker dispatch cleanup settings;
+  PostgreSQL recovery instructions now pair database backups with verified source
+  objects, restore local archives into isolated volumes, and require operator-owned
+  recovery evidence for S3 archives.
 - A PostgreSQL operations guide with full-database custom backups, isolated
   restoration, binary payload and event identity verification, authenticated
   readiness checks, and major-version upgrade and recovery instructions.
@@ -39,6 +164,31 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Changed
 
+- Fargate tasks use supported task-scoped ephemeral scratch volumes instead of
+  unsupported tmpfs settings, with image-defined UID 10001 write permissions.
+  Local Compose sets the same private application ownership explicitly on its
+  tmpfs so worker process identity files and API export spools remain writable.
+  Worker task health verifies its own process incarnation and database heartbeat.
+  The ALB idle timeout leaves headroom for bounded API export preparation.
+- Local Compose stores compressed source objects in a persistent archive volume,
+  initialized for UID 10001 before workers start and mounted read-only in the API.
+  Runtime images include the optional AWS SDK and pinned RDS CA bundle. Back up
+  the object volume alongside PostgreSQL; historical inline bodies remain readable
+  and move only through the offline archive relocation helper.
+
+- Reuse validated raw-source preparation and immutable game evidence across
+  repeated observations, while retaining locked deduplication and replay repairs.
+  Deduplication telemetry counts each stored duplicate once, and game detail/PGN
+  reads select only the evidence they return in one consistent SQL statement.
+- Game normalization prepares PGN evidence outside write transactions, commits
+  each game's evidence and run attribution with its source checkpoint, and
+  resumes remaining items after interruption. Account reconciliation takes
+  exclusive provider ownership only for confirmed renames or placeholder merges.
+
+- The usage and contributor guides now describe the product API, dedicated
+  archive administration, per-job worker ownership, provider acquisition gates,
+  and staged processing. Collection examples distinguish HTTP limits from
+  internal executor settings and documented page/total budgets.
 - Full CI and Devbox smoke now run after pushes to `master` and support manual
   runs. Push/manual checks validate the selected commit without PR merge-history
   assumptions; PR scope, promotion policy, and required check names are retained.
@@ -60,6 +210,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   one acquisition executor and one publisher per archive. Database integration
   tests run against real disposable PostgreSQL instances in both Python CI jobs.
 
+- CI runs Python deployment contracts for container-only changes, selects safe
+  leaf test modules for test-only changes with conservative full-suite fallbacks,
+  and reuses the pinned Devbox Nix toolchain cache while preserving all checks.
 - CI isolates deployment-only checks, overlaps image build/pull and polls
   startup health sooner without weakening readiness. It records stage timings,
   test durations and machine-readable performance evidence, with optional
@@ -76,6 +229,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 - Reports expose separate `no_result` and `in_progress` counts. The API retains
   `unfinished` as a compatibility alias for `no_result`; CLI labels now state
   the actual metric.
+- Offline tests clone a sealed migrated PostgreSQL template into independent
+  databases, while migration tests retain pristine databases. Shared test
+  helpers, bounded child-process handshakes, and explicit clocks keep focused
+  validation deterministic; contributor examples now select current API/worker tests.
 - Tests ignore inherited runtime configuration and require `--run-live` for
   marked provider/network tests; unmarked tests stay offline and isolated.
 - Promotion checks require this repository's `dev` branch, and CI reruns on PR
@@ -91,6 +248,106 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   and contribution guides describing the current implementation.
 
 ### Fixed
+
+- Public archive freshness uses successful fetches linked to public source
+  evidence, excluding private payloads and fetches with no captured source.
+
+- Standalone Chess.com conditional game observations refresh the current
+  revision, clocks, outcome, and participant facts when a previously retained
+  source becomes latest again, while preserving immutable evidence history.
+
+- Public Lichess game exports and history collection omit account OAuth tokens,
+  preventing token-only private game evidence from entering the public archive.
+  Explicit owned resources retain workspace-scoped OAuth access.
+
+- Cloud bootstrap rotates runtime credentials using attributes allowed to a
+  non-superuser RDS master, preserving restrictive creation defaults and unsafe
+  role refusal. Raw response registration retains a per-source transaction lock
+  while unrelated archival writes proceed concurrently.
+
+- CloudFormation rejects the unsupported Fargate combination of 0.5 vCPU and
+  8 GiB before creating runtime task definitions.
+
+- Cloud bootstrap denies temporary-table creation as well as schema/role DDL,
+  and refuses existing runtime roles carrying unexpected explicit grants or
+  ownership. Dedicated-database PUBLIC privilege assumptions are documented.
+- Development Mercure credentials authorize the workspace-scoped local job and
+  run topics, restoring private event delivery in Compose without granting
+  access to other workspaces or rotating existing master credentials.
+- Server-owned run ceilings and monthly workspace quotas bound history acquisition
+  and deferred processing across continuations, retries, and new submission keys.
+  API admission rejects excess workspace backlog/quota atomically with scoped
+  HTTP 429 diagnostics; stored budget reads preserve lifetime policy and usage.
+- Bound retained export files and reserved bytes across all requests in each API
+  process through download close or expiry, including slow and unconsumed
+  responses. Retained files and bytes also have per-workspace quotas that leave
+  room for another workspace's full-sized export. Completion, failure, and
+  cancellation release storage without retaining a database connection. Remove retired CLI writers and duplicate report queries;
+  preserve their provider, outcome, and privacy coverage on supported API reads.
+- HTTP exports prepare a finite temporary spool before sending response bytes,
+  releasing database snapshots before slow client delivery. Operator row, byte,
+  preparation and download limits bound each export, and per-workspace database
+  admission works across API replicas. Failed or interrupted streams close the
+  private temporary file explicitly.
+
+- Archive relocation selects pending payloads through a partial ordered index
+  and checks continuation without counting the entire remaining queue per batch.
+  Its JSON result adds `has_more`; `remaining` is null while work remains unless
+  `--count-remaining` explicitly requests an exact reporting scan.
+
+- Configured local archival requires an explicit absolute directory and rejects
+  missing, blank, or relative locations, preventing source-run processes from
+  silently selecting different archives based on their working directory.
+
+- Object reuse rechecks publication and readback before relocation releases an
+  inline backup, restoring missing objects and retaining inline evidence on
+  corruption. Compose uses a persistent shared local object volume; source-run
+  clients and operational helpers require an explicit archive location.
+
+
+- Object publication and verification run before database write transactions,
+  keeping API/job mutations responsive during slow archive storage. Raw-response
+  deduplication skips object I/O; callers owning outer transactions must prepare
+  external objects beforehand so source references still roll back atomically.
+- Preserve unused native move data alongside PGN-derived tokens, including
+  conflicting notation and nontext native values. Evidence parser v2 repairs
+  previous omissions through local replay into a new immutable revision.
+
+- Read game revisions and reconstruct PGN from one complete database snapshot,
+  including when a concurrent writer replaces and removes an old unreferenced
+  version. Read/export helpers remain coherent inside READ COMMITTED callers
+  and preserve exact clock and derived-timing decimal strings.
+- Restore explicitly null current game times, opening facts, and participant
+  results when a previously observed body becomes current again. Sparse omitted
+  facts remain preserved; known live observations cannot retain a stale completed
+  end time. The v5 game normalizer can repair existing facts by offline replay.
+- SQS workers poll durable database jobs after missing or unclaimable delivery
+  hints, preventing expired or dead-lettered messages from stranding runnable work.
+
+- Rejected offline upgrade identities preserve another job's progress; failure
+  reporting updates only the requesting job's provider and ownership scope.
+- Player resource/statistics parsing preserves the account and time bound to
+  its acquisition across intervening renames, conditional responses, and local
+  replay of bytes reused by multiple holders. Stable identity reconciliation
+  moves fetch bindings with the other evidence. Private collection preserves
+  public identity facts; private-only placeholders have null public dates until
+  a public observation supplies them. Replay uses user parser v7 and resource
+  parser v2 without downloading stored sources again.
+- Deferred normalization queues preserve the captured fetch identity through
+  worker resumes. New observations schedule a successor when older processing
+  is still running, so a source rejected as out of date cannot remain pending
+  without work. Private placeholder creation and multi-account replay retain
+  scoped identity locks while unrelated account writes proceed concurrently.
+  Internal delayed replay can target its exact successful fetch occurrence;
+  the existing worker retains the same captured identity through parsing.
+  Private-only profile lookups remain invisible outside the owning scope;
+  public user lookups, listings, exports, and user totals also exclude those
+  identities until public evidence exists, while authorized scoped reads retain them.
+  Public identities with supplied zero dates or game observations remain visible.
+
+- Failed Chess.com statistics requests retain request evidence without creating
+  or refreshing a player account. Local Lichess profile replay also populates
+  legacy first/last names while preserving explicit current names and native JSON.
 
 - Reconcile renamed accounts with username-only placeholders while preserving
   their game, snapshot, source, and discovery history. Conflicting stable

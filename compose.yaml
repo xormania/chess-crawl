@@ -8,7 +8,8 @@ x-python: &python
   user: "10001:10001"
   read_only: true
   tmpfs:
-    - /tmp
+    # A tmpfs hides the image directory's owner; set it for the runtime user.
+    - /tmp:uid=10001,gid=10001,mode=0700
   cap_drop:
     - ALL
   security_opt:
@@ -20,8 +21,32 @@ x-database-env: &database-env
   # This explicit policy trusts only the bundled Compose service hostname.
   CHESS_CRAWL_DATABASE_TRANSPORT: local
   CHESS_CRAWL_DATABASE_TRUSTED_HOST: postgres
+  CHESS_CRAWL_ARCHIVE_BACKEND: local
+  CHESS_CRAWL_ARCHIVE_DIRECTORY: /var/lib/chess-crawl/archive
+
+x-budget-env: &budget-env
+  CHESS_CRAWL_JOB_MAX_GAMES: ${CHESS_CRAWL_JOB_MAX_GAMES:-100000}
+  CHESS_CRAWL_JOB_MAX_NORMALIZATION_UNITS: ${CHESS_CRAWL_JOB_MAX_NORMALIZATION_UNITS:-100000}
+  CHESS_CRAWL_JOB_MAX_REMOTE_BYTES: ${CHESS_CRAWL_JOB_MAX_REMOTE_BYTES:-268435456}
+  CHESS_CRAWL_JOB_MAX_REMOTE_REQUESTS: ${CHESS_CRAWL_JOB_MAX_REMOTE_REQUESTS:-2000}
+  CHESS_CRAWL_MAX_RESPONSE_BYTES: ${CHESS_CRAWL_MAX_RESPONSE_BYTES:-16777216}
+  CHESS_CRAWL_WORKSPACE_MAX_GAMES: ${CHESS_CRAWL_WORKSPACE_MAX_GAMES:-1000000}
+  CHESS_CRAWL_WORKSPACE_MAX_NORMALIZATION_UNITS: ${CHESS_CRAWL_WORKSPACE_MAX_NORMALIZATION_UNITS:-1000000}
+  CHESS_CRAWL_WORKSPACE_MAX_REMOTE_BYTES: ${CHESS_CRAWL_WORKSPACE_MAX_REMOTE_BYTES:-2147483648}
+  CHESS_CRAWL_WORKSPACE_MAX_REMOTE_REQUESTS: ${CHESS_CRAWL_WORKSPACE_MAX_REMOTE_REQUESTS:-10000}
+  CHESS_CRAWL_WORKSPACE_MAX_ACTIVE_JOBS: ${CHESS_CRAWL_WORKSPACE_MAX_ACTIVE_JOBS:-2}
+  CHESS_CRAWL_WORKSPACE_MAX_QUEUED_JOBS: ${CHESS_CRAWL_WORKSPACE_MAX_QUEUED_JOBS:-32}
 
 services:
+  archive-init:
+    <<: *python
+    user: "0:0"
+    cap_add: [CHOWN, FOWNER]
+    command: ["python", "/app/docker/archive_init.py"]
+    volumes:
+      - archive_data:/var/lib/chess-crawl/archive
+    restart: "no"
+
   postgres:
     image: postgres:18
     restart: unless-stopped
@@ -44,7 +69,7 @@ services:
 
   init:
     <<: *python
-    command: ["chess-crawl", "init"]
+    command: ["python", "-m", "chess_crawl.operations", "migrate"]
     environment: *database-env
     secrets:
       - postgres_password
@@ -59,8 +84,12 @@ services:
     depends_on:
       init:
         condition: service_completed_successfully
+      archive-init:
+        condition: service_completed_successfully
+    volumes:
+      - archive_data:/var/lib/chess-crawl/archive:ro
     environment:
-      <<: *database-env
+      <<: [*database-env, *budget-env]
       CHESS_CRAWL_API_TOKEN_FILE: /run/secrets/api_token
       CHESS_CRAWL_MAX_GAMES: ${CHESS_CRAWL_MAX_GAMES:-1000}
       CHESS_CRAWL_MAX_DEPTH: ${CHESS_CRAWL_MAX_DEPTH:-2}
@@ -68,6 +97,18 @@ services:
       CHESS_CRAWL_MAX_JOBS: ${CHESS_CRAWL_MAX_JOBS:-200}
       CHESS_CRAWL_PAGE_SIZE: ${CHESS_CRAWL_PAGE_SIZE:-100}
       CHESS_CRAWL_MAX_DATE_SPAN_DAYS: ${CHESS_CRAWL_MAX_DATE_SPAN_DAYS:-366}
+      CHESS_CRAWL_MAX_WORKING_SET_MEMBERS: ${CHESS_CRAWL_MAX_WORKING_SET_MEMBERS:-10000}
+      CHESS_CRAWL_MAX_ANALYSIS_RESULTS: ${CHESS_CRAWL_MAX_ANALYSIS_RESULTS:-1000}
+      CHESS_CRAWL_MAX_ANALYSIS_RESULT_BYTES: ${CHESS_CRAWL_MAX_ANALYSIS_RESULT_BYTES:-67108864}
+      CHESS_CRAWL_EXPORT_MAX_ROWS: ${CHESS_CRAWL_EXPORT_MAX_ROWS:-100000}
+      CHESS_CRAWL_EXPORT_MAX_BYTES: ${CHESS_CRAWL_EXPORT_MAX_BYTES:-67108864}
+      CHESS_CRAWL_EXPORT_PREPARE_SECONDS: ${CHESS_CRAWL_EXPORT_PREPARE_SECONDS:-60}
+      CHESS_CRAWL_EXPORT_DOWNLOAD_SECONDS: ${CHESS_CRAWL_EXPORT_DOWNLOAD_SECONDS:-300}
+      CHESS_CRAWL_EXPORT_WORKSPACE_SLOTS: ${CHESS_CRAWL_EXPORT_WORKSPACE_SLOTS:-2}
+      CHESS_CRAWL_EXPORT_OUTSTANDING_SPOOLS: ${CHESS_CRAWL_EXPORT_OUTSTANDING_SPOOLS:-4}
+      CHESS_CRAWL_EXPORT_OUTSTANDING_BYTES: ${CHESS_CRAWL_EXPORT_OUTSTANDING_BYTES:-268435456}
+      CHESS_CRAWL_EXPORT_WORKSPACE_OUTSTANDING_SPOOLS: ${CHESS_CRAWL_EXPORT_WORKSPACE_OUTSTANDING_SPOOLS:-2}
+      CHESS_CRAWL_EXPORT_WORKSPACE_OUTSTANDING_BYTES: ${CHESS_CRAWL_EXPORT_WORKSPACE_OUTSTANDING_BYTES:-134217728}
     secrets:
       - postgres_password
       - api_token
@@ -86,6 +127,10 @@ services:
     depends_on:
       init:
         condition: service_completed_successfully
+      archive-init:
+        condition: service_completed_successfully
+    volumes:
+      - archive_data:/var/lib/chess-crawl/archive
     command:
       - python
       - -m
@@ -101,12 +146,16 @@ services:
       - --retry-max
       - "${CHESS_CRAWL_RETRY_MAX:-3600}"
     environment:
-      <<: *database-env
+      <<: [*database-env, *budget-env]
       CHESS_CRAWL_CONTACT: ${CHESS_CRAWL_CONTACT:-set-me@example.invalid}
       CHESS_CRAWL_LICHESS_TOKEN: ${CHESS_CRAWL_LICHESS_TOKEN:-}
+      CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE: ${CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE:-local}
       CHESS_CRAWL_LICHESS_CLOCKS: ${CHESS_CRAWL_LICHESS_CLOCKS:-true}
       CHESS_CRAWL_LICHESS_EVALS: ${CHESS_CRAWL_LICHESS_EVALS:-true}
       CHESS_CRAWL_LICHESS_ACCURACY: ${CHESS_CRAWL_LICHESS_ACCURACY:-true}
+      CHESS_CRAWL_DISPATCH_RETENTION_SECONDS: ${CHESS_CRAWL_DISPATCH_RETENTION_SECONDS:-86400}
+      CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS: ${CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS:-60}
+      CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE: ${CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE:-256}
     secrets:
       - postgres_password
     stop_grace_period: 90s
@@ -165,6 +214,7 @@ services:
       start_period: 10s
 
 volumes:
+  archive_data:
   postgres_data:
   mercure_data:
   mercure_config:

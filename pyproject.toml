@@ -9,14 +9,15 @@ description = "Provider-neutral, raw-first PostgreSQL chess data archive"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.27,<1.0", "psycopg[binary]>=3.2,<4"]
+dependencies = ["httpx>=0.27,<1.0", "psycopg[binary]>=3.2,<4", "pgn-read==2.7.3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
 api = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1"]
+s3 = ["boto3>=1.36,<2"]
 
 [project.scripts]
-chess-crawl = "chess_crawl.cli:main"
+chess-crawl-admin = "chess_crawl.operations:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -28,7 +29,6 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
-    "workflow: CLI workflow tests that exercise multiple commands and PostgreSQL state",
     "integration: offline integration tests that cross package boundaries",
     "slow: slow tests excluded from default CI unless explicitly selected",
     "live: requires explicit --run-live to use provider APIs or network access; skipped by default",

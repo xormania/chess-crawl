@@ -87,8 +87,19 @@ def test_edge_membership_migration_backfills_only_recorded_provenance(monkeypatc
             old.setattr(migrations, "migration_resources", lambda: tuple(item for item in available if item[0] <= 4))
             old.setattr(migrations, "SCHEMA_VERSION", 4)
             migrations.initialize(conn)
-        first, _ = create_run(conn)
-        second, _ = create_run(conn)
+        # Seed the legacy schema directly: today's scheduler requires columns
+        # introduced after this migration's starting version.
+        with transaction(conn):
+            runs = [
+                require_row(conn.execute(
+                    """INSERT INTO crawl_runs(seed_spec, provider, params_json, status,
+                                              counters, started_at, updated_at)
+                       VALUES ('a', 'lichess', '{}', 'running', '{}', 123, 123)
+                       RETURNING id""",
+                ))[0]
+                for _ in range(2)
+            ]
+        first, second = runs
         game, a, b = seed_game(conn, provider="lichess", game_key="a-b", white="a", black="b")
         other_game, _, c = seed_game(conn, provider="lichess", game_key="a-c", white="a", black="c")
         with transaction(conn):
