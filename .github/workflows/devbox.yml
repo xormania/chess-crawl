@@ -42,7 +42,9 @@ jobs:
         uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0 # v0.14.0
         with:
           devbox-version: '0.18.4'
-          enable-cache: false
+          # The pinned action keys its Nix store by OS, architecture, Nix version
+          # and devbox.lock. Package setup and verification still run on a hit.
+          enable-cache: true
 
       - name: Set up the uv environment
         run: devbox run setup

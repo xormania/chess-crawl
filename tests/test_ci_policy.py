@@ -90,6 +90,8 @@ def _ci_guard(
     base_ref: str = "dev",
     promotion_result: str = "skipped",
     event_name: str = "pull_request",
+    database_output: str | None = "automatic",
+    compose_output: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     selected_scope = "offline" if job_id == "offline-checks" else "compose"
     other_scope = "compose" if selected_scope == "offline" else "offline"
@@ -97,6 +99,10 @@ def _ci_guard(
     outputs = {other_scope: "false" if output == "true" else "true"}
     if output is not None:
         outputs[selected_scope] = output
+    if database_output is not None:
+        outputs["database"] = ("true" if output == "true" else "false") if database_output == "automatic" else database_output
+    if compose_output is not None:
+        outputs["compose"] = compose_output
     return _run_guard(job_id, "Validate CI prerequisites", {
         "github": {"base_ref": base_ref, "event_name": event_name},
         "steps": {"scope": {"outcome": scope_result, "outputs": outputs}},
@@ -303,8 +309,10 @@ def test_required_checks_accept_valid_scope_including_scoped_skips(
         job_id, summary, output=output, base_ref=base_ref,
         promotion_result="success" if base_ref == "master" else "skipped",
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert summary.read_text().strip().endswith(f"selected: {output}")
+    accepted = base_ref != "master" or output == "true"
+    assert (result.returncode == 0) is accepted, result.stdout + result.stderr
+    if accepted:
+        assert summary.read_text().strip().endswith(f"selected: {output}")
 
 
 @pytest.mark.parametrize("job_id", ["offline-checks", "compose-smoke"])
@@ -514,8 +522,8 @@ def test_compose_smoke_rejects_disabled_assertions(optimization: str) -> None:
 
 
 @pytest.mark.parametrize(("step_name", "condition", "phase"), [
-    ("Start disposable PostgreSQL", "steps.scope.outputs.offline == 'true'", "start"),
-    ("Remove disposable PostgreSQL", "always() && steps.scope.outputs.offline == 'true'", "stop"),
+    ("Start disposable PostgreSQL", "steps.scope.outputs.offline == 'true' && steps.scope.outputs.database == 'true'", "start"),
+    ("Remove disposable PostgreSQL", "always() && steps.scope.outputs.offline == 'true' && steps.scope.outputs.database == 'true'", "stop"),
 ])
 def test_postgres_lifecycle_respects_scope_and_failure_cleanup(step_name: str, condition: str, phase: str) -> None:
     step = _step("offline-checks", step_name)
@@ -532,3 +540,63 @@ def test_postgres_starts_after_scope_validation_and_has_no_unconditional_job_ser
     assert job.index("Validate CI prerequisites") < job.index("Start disposable PostgreSQL")
     assert job.index("Start disposable PostgreSQL") < job.index("Offline tests")
     assert job.index("Offline tests") < job.index("Remove disposable PostgreSQL")
+
+
+def test_offline_step_uses_verified_merge_selection_and_retains_event_context() -> None:
+    step = _step("offline-checks", "Offline tests")
+    assert "EVENT_NAME: ${{ github.event_name }}" in step
+    assert "BASE_REF: ${{ github.base_ref }}" in step
+    assert 'ci_scope.py --event-name "$EVENT_NAME" --base-ref "$BASE_REF" --run-tests' in step
+    assert "if: steps.scope.outputs.offline == 'true'" in step
+    assert "continue-on-error" not in step
+
+
+def test_devbox_cache_preserves_setup_and_toolchain_verification() -> None:
+    workflow = _workflow("devbox")
+    installer = workflow.split("      - name: Install the locked development toolchain\n", 1)[1].split("      - name:", 1)[0]
+    assert "enable-cache: true" in installer
+    assert "jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0" in installer
+    for name in ("Set up the uv environment", "Verify tool and interpreter selection", "Ensure setup preserves both lock files"):
+        step = workflow.split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
+        assert "if:" not in step and "continue-on-error" not in step
+
+
+@pytest.mark.parametrize("database_output", [None, "", "yes", "True", "FALSE"])
+def test_offline_guard_rejects_missing_or_invalid_database_output(tmp_path: Path, database_output: str | None) -> None:
+    result = _ci_guard("offline-checks", tmp_path / "summary", database_output=database_output)
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("event_name", ["push", "workflow_dispatch"])
+def test_non_pr_guard_rejects_no_database_lane(tmp_path: Path, event_name: str) -> None:
+    result = _ci_guard(
+        "offline-checks", tmp_path / "summary", event_name=event_name,
+        database_output="false", compose_output="true",
+    )
+    assert result.returncode != 0
+
+
+def test_master_guard_rejects_no_database_lane(tmp_path: Path) -> None:
+    result = _ci_guard(
+        "offline-checks", tmp_path / "summary", base_ref="master", promotion_result="success",
+        database_output="false", compose_output="true",
+    )
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize(("offline", "database", "compose", "accepted"), [
+    ("true", "false", "true", True),
+    ("true", "false", "false", False),
+    ("true", "true", "true", True),
+    ("true", "true", "false", True),
+    ("false", "true", "false", False),
+    ("false", "false", "false", True),
+])
+def test_offline_guard_validates_database_scope_consistency(
+    tmp_path: Path, offline: str, database: str, compose: str, accepted: bool,
+) -> None:
+    result = _ci_guard(
+        "offline-checks", tmp_path / "summary", output=offline,
+        database_output=database, compose_output=compose,
+    )
+    assert (result.returncode == 0) is accepted, result.stdout + result.stderr
