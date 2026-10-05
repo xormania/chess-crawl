@@ -22,6 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
     migrate = commands.add_parser("migrate", help="Apply packaged database migrations without provider requests")
     info = commands.add_parser("info", help="Inspect schema readiness without changing the archive")
     relocate = commands.add_parser("relocate", help="Move one resumable batch of inline backup bodies to configured storage")
+    budgets = commands.add_parser("budgets", help="Inspect or resume run budgets using trusted operator access")
+    budgets.add_argument("arguments", nargs=argparse.REMAINDER)
     for command in (migrate, info, relocate):
         command.add_argument("--database-url", help="PostgreSQL connection settings; prefer environment password sources")
     relocate.add_argument("--batch-size", type=int, default=100)
@@ -30,7 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    values = list(sys.argv[1:] if argv is None else argv)
+    if values and values[0] == "budgets":
+        from chess_crawl.jobs.budget import main as budget_main
+        return budget_main(values[1:])
+    args = build_parser().parse_args(values)
     try:
         target = database_url(args.database_url)
         if args.command == "migrate":

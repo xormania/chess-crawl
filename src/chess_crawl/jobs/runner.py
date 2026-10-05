@@ -24,16 +24,20 @@ from chess_crawl.ingest import (
     installed_parser_target,
 )
 from chess_crawl.jobs import discovery, state
+from chess_crawl.jobs.budget import BudgetExceeded, BudgetPolicy
 from chess_crawl.jobs.models import DiscoveryJob, JobState
 from chess_crawl.jobs.locking import ExecutorLease, ExecutorLeaseLost, parallel_executor_lock
 from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.providers.registry import ProviderSession, get_provider_info
-from chess_crawl.providers.base import ProviderRequestStopped
+from chess_crawl.providers.base import (
+    ProviderRequestStopped, ProviderResponseTooLarge, ProviderResponseEncodingError, ProviderResponseDeadlineExceeded,
+)
 from chess_crawl.storage.acquisition import associate_run_game
 from chess_crawl.storage.db import Connection, DatabaseError, transaction
 from chess_crawl.storage.discovery import opponents_of_user, record_discovery_edges
 from chess_crawl.storage.repository import insert_error
 from chess_crawl.storage.execution import start_upgrade, upgrade_batch, checkpoint_upgrade, fail_upgrade
+from chess_crawl.storage import work_budgets
 
 
 GameFetcher = Callable[[Connection, str, str, Mapping[str, Any], int | None], IngestResult]
@@ -102,6 +106,7 @@ class JobRunner:
         on_job: Callable[[int | None], None] | None = None,
         worker_id: str | None = None,
         stage: str = "all",
+        budget_policy: BudgetPolicy | None = None,
     ) -> None:
         self.conn = conn
         self.config = config or Config.from_env()
@@ -117,6 +122,8 @@ class JobRunner:
         self._active_session: ProviderSession | None = None
         self.worker_id = worker_id or uuid.uuid4().hex
         self.stage = stage
+        self.budget_policy = budget_policy or BudgetPolicy.from_env()
+        self._request_reservation: int | None = None
 
     def run(
         self,
@@ -126,6 +133,7 @@ class JobRunner:
         resume_stale: bool = False,
         unblock: bool = False,
         job_id: int | None = None,
+        respect_fairness: bool = False,
     ) -> RunnerResult:
         with parallel_executor_lock(self.conn, lease=self.lease) as lease:
             sessions = nullcontext(self.session) if self.session is not None else ProviderSession(
@@ -137,11 +145,14 @@ class JobRunner:
                 if session is not None:
                     session.before_request = self._before_provider_request
                     session.persist_deadline = self._persist_provider_deadline
+                    session.reserve_request = self._reserve_request
+                    session.finish_request = self._finish_request
                 try:
                     return self._run_owned(
                         lease, crawl_run_id=crawl_run_id, max_jobs=max_jobs,
                         resume_stale=resume_stale, unblock=unblock,
                         job_id=job_id,
+                        respect_fairness=respect_fairness,
                     )
                 finally:
                     self._active_session = None
@@ -150,6 +161,7 @@ class JobRunner:
         self, lease: ExecutorLease, *, crawl_run_id: int | None,
         max_jobs: int | None, resume_stale: bool, unblock: bool,
         job_id: int | None,
+        respect_fairness: bool,
     ) -> RunnerResult:
         stale_count = state.resume_stale_in_progress(
             self.conn, crawl_run_id=crawl_run_id, now=int(self.clock()), lease=lease,
@@ -159,7 +171,8 @@ class JobRunner:
         while (max_jobs is None or result.claimed < max_jobs) and not self.stop_requested():
             lease.require(self.conn)
             job = state.claim_next_job(self.conn, crawl_run_id=crawl_run_id, now=self.clock(),
-                                       worker_id=self.worker_id, job_id=job_id, stage=self.stage)
+                                       worker_id=self.worker_id, job_id=job_id, stage=self.stage,
+                                       budget_policy=self.budget_policy, respect_fairness=respect_fairness)
             if job is None:
                 pacing = state.next_pacing_deadline(self.conn, crawl_run_id=crawl_run_id, now=self.clock())
                 if pacing is not None and self.stage != "processing" and job_id is None:
@@ -185,6 +198,9 @@ class JobRunner:
                 )
                 result = result.add(state=completed)
             finally:
+                self.conn._work_budget_id = None
+                self.conn._work_payload_read_credits = 0
+                self._request_reservation = None
                 state.release_job_ownership(self.conn)
                 self.on_job(None)
         # Normal completions already refreshed their own run. Avoid rewriting
@@ -195,10 +211,16 @@ class JobRunner:
 
     def _execute(self, job: DiscoveryJob) -> ExecutionOutcome:
         try:
+            if job.id is None:
+                raise ValueError("Execution requires a persisted job")
+            self.conn._work_budget_id = work_budgets.ensure_job_budget(
+                self.conn, job.id, self.budget_policy, now=int(self.clock()),
+            )
             if job.kind == "normalize_payload":
                 params = state.load_params(job.params_json)
                 result = replay_raw_payload(self.conn, int(params.get("raw_payload_id", job.target)),
-                                            crawl_run_id=job.crawl_run_id, max_games=params.get("max_games"))
+                                            crawl_run_id=job.crawl_run_id, max_games=params.get("max_games"),
+                                            fetch_log_id=params.get("fetch_log_id"))
                 return _outcome_from_ingest(result)
             if job.kind == "reprocess_archive":
                 return self._reprocess_archive(job)
@@ -255,6 +277,14 @@ class JobRunner:
             if job.kind == "crawl_opponents":
                 return self._crawl_opponents(job)
             return ExecutionOutcome("error", f"unknown job kind: {job.kind}")
+        except (BudgetExceeded, ProviderResponseTooLarge, ProviderResponseEncodingError, ProviderResponseDeadlineExceeded) as exc:
+            dimension = exc.dimension if isinstance(exc, BudgetExceeded) else (
+                "response_bytes" if isinstance(exc, ProviderResponseTooLarge) else
+                "response_encoding" if isinstance(exc, ProviderResponseEncodingError) else "response_deadline"
+            )
+            if self.conn._work_budget_id is not None:
+                work_budgets.exhaust_budget(self.conn, self.conn._work_budget_id, dimension, now=int(self.clock()))
+            return ExecutionOutcome("blocked", f"budget_exhausted: {dimension}; requested work remains incomplete")
         except (_AcquisitionStopped, ProviderRequestStopped) as exc:
             return ExecutionOutcome("pending", str(exc))
         except (DatabaseError, ExecutorLeaseLost):
@@ -292,6 +322,25 @@ class JobRunner:
 
     def _persist_provider_deadline(self, provider: str, deadline: float, reason: str) -> None:
         state.defer_provider(self.conn, provider, not_before=deadline, reason=reason, now=self.clock())
+
+    def _reserve_request(self, provider: str) -> int:
+        if self.conn._work_budget_id is None:
+            raise RuntimeError("Provider acquisition has no durable work budget")
+        if self._request_reservation is not None:
+            raise RuntimeError("Previous request reservation is unsettled")
+        if self.conn._defer_normalization:
+            work_budgets.require_backlog_room(self.conn, self.conn._work_budget_id)
+        identity, limit = work_budgets.reserve_request(self.conn, self.conn._work_budget_id, now=int(self.clock()))
+        self._request_reservation = identity
+        self.conn._work_payload_read_credits += 1
+        return limit
+
+    def _finish_request(self, provider: str, received: int) -> None:
+        if self._request_reservation is None:
+            raise RuntimeError("Provider response has no reserved work")
+        identity = self._request_reservation
+        work_budgets.settle_request(self.conn, identity, received)
+        self._request_reservation = None
 
     def _fetch_stats(self, job: DiscoveryJob) -> IngestResult:
         if job.provider == "chess.com":

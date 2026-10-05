@@ -54,3 +54,47 @@ def test_info_reads_an_empty_database_without_initializing_it(
     assert result["schema_version"] == 0 and result["ready"] is False
     with connection(uninitialized_database_url) as conn:
         assert require_row(conn.execute("SELECT to_regclass('schema_migrations')"))[0] is None
+
+
+def test_budget_alias_preserves_usage_and_exact_checkpoint(database_url, capsys, monkeypatch) -> None:
+    from chess_crawl.jobs import state
+    from chess_crawl.jobs.budget import BudgetPolicy
+    from chess_crawl.storage.collection import save_checkpoint
+    from chess_crawl.storage.db import transaction
+    from chess_crawl.storage.work_budgets import admit_run_budget, exhaust_budget, reserve_request, settle_request
+    from chess_crawl.storage.workspaces import submission_context
+    policy = BudgetPolicy(job_max_remote_requests=1, workspace_max_remote_requests=3)
+    checkpoint = {"units": ["2020/01", "2020/02"], "unit_index": 1, "until_ms": 77}
+    with connection(database_url, mode="rw") as conn:
+        with transaction(conn):
+            submission_context(conn, "alpha")
+            run_id = state.create_crawl_run(conn, provider="lichess", seed_spec="target", params={})
+            blocked = state.enqueue_job(conn, provider="lichess", kind="fetch_user_games", target="target", crawl_run_id=run_id).job_id
+            done = state.enqueue_job(conn, provider="lichess", kind="fetch_user_profile", target="target", crawl_run_id=run_id).job_id
+            budget_id = admit_run_budget(conn, run_id, "alpha", policy)["id"]
+        ticket, _ = reserve_request(conn, budget_id)
+        settle_request(conn, ticket, 0)
+        state.mark_blocked(conn, blocked, reason="budget_exhausted:remote_requests")
+        state.mark_done(conn, done, reason="retained profile")
+        save_checkpoint(conn, blocked, checkpoint, now=1)
+        exhaust_budget(conn, budget_id, "remote_requests")
+        before = [dict(row) for row in conn.execute("SELECT * FROM discovery_jobs ORDER BY id")]
+    monkeypatch.setenv("CHESS_CRAWL_JOB_MAX_REMOTE_REQUESTS", "2")
+    monkeypatch.setenv("CHESS_CRAWL_WORKSPACE_MAX_REMOTE_REQUESTS", "4")
+    arguments = ["--run-id", str(run_id), "--database-url", database_url]
+    assert operations.main(["budgets", "show", *arguments]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["workspace_id"] == "alpha"
+    assert shown["budget"]["remote_requests"] == 1
+    assert shown["budget"]["policy"]["job_max_remote_requests"] == 1
+    with connection(database_url) as conn:
+        assert [dict(row) for row in conn.execute("SELECT * FROM discovery_jobs ORDER BY id")] == before
+    assert operations.main(["budgets", "resume", *arguments]) == 0
+    resumed = json.loads(capsys.readouterr().out)
+    assert resumed["budget"]["remote_requests"] == 1
+    assert resumed["budget"]["policy"]["job_max_remote_requests"] == 2
+    with connection(database_url) as conn:
+        assert require_row(conn.execute("SELECT state FROM discovery_jobs WHERE id=%s", (blocked,)))[0] == "pending"
+        assert require_row(conn.execute("SELECT state FROM discovery_jobs WHERE id=%s", (done,)))[0] == "done"
+        assert require_row(conn.execute("SELECT cursor FROM collection_checkpoints WHERE job_id=%s", (blocked,)))[0] == checkpoint
+        assert require_row(conn.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == 0

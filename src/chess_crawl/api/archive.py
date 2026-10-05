@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chess_crawl import application
+from chess_crawl.jobs.budget import BudgetPolicy
 from chess_crawl.application.validation import validate_page, validate_provider, validate_username
 from chess_crawl.storage import working_sets
 from chess_crawl.storage.db import connection, transaction
@@ -88,7 +89,7 @@ class ResourceBody(BaseModel):
     parameters: dict[str,Any] = Field(default_factory=dict)
 
 
-def register_archive_routes(router: APIRouter, archive: str, limits: application.Limits) -> None:
+def register_archive_routes(router: APIRouter, archive: str, limits: application.Limits, budget_policy: BudgetPolicy) -> None:
     @router.post("/working-sets", status_code=201, tags=["analysis"])
     def create_set(
         body: WorkingSetBody, request: Request, response: Response,
@@ -129,6 +130,17 @@ def register_archive_routes(router: APIRouter, archive: str, limits: application
     def get_result(result_id: int, request: Request) -> dict[str, Any]:
         with connection(archive) as conn, transaction(conn, write=False):
             return working_sets.read_result(conn, result_id, request.state.workspace_id)
+
+    @router.get("/runs/{run_id}/budget", tags=["jobs"])
+    def run_budget(run_id: int, request: Request) -> dict[str, Any]:
+        from chess_crawl.storage.work_budgets import get_run_budget
+        from chess_crawl.storage.workspaces import require_run
+        with connection(archive) as conn, transaction(conn, write=False):
+            require_run(conn, run_id, request.state.workspace_id)
+            budget = get_run_budget(conn, run_id, request.state.workspace_id)
+            if budget is None:
+                raise application.NotFound("Run budget not found", code="budget_not_found")
+            return budget
 
     @router.get("/workspace", tags=["access"])
     def workspace(request: Request) -> dict[str, str]:
@@ -278,7 +290,7 @@ def register_archive_routes(router: APIRouter, archive: str, limits: application
             raise ValidationError(str(exc),code="invalid_resource") from exc
         key = application.validate_idempotency_key(idempotency_key)
         with connection(archive,mode="rw") as conn:
-            result = submit_resource(conn,normalized,idempotency_key=key,workspace_id=request.state.workspace_id)
+            result = submit_resource(conn,normalized,idempotency_key=key,workspace_id=request.state.workspace_id,budget_policy=budget_policy)
         response.headers["Location"] = f"/v1/runs/{result['run_id']}"
         return result
 
@@ -291,7 +303,7 @@ def register_archive_routes(router: APIRouter, archive: str, limits: application
         normalized = {**body.model_dump(),"provider":validate_provider(body.provider)}
         key = application.validate_idempotency_key(idempotency_key)
         with connection(archive,mode="rw") as conn:
-            result = submit_upgrade(conn,normalized,idempotency_key=key,workspace_id=request.state.workspace_id)
+            result = submit_upgrade(conn,normalized,idempotency_key=key,workspace_id=request.state.workspace_id,budget_policy=budget_policy)
         response.headers["Location"] = f"/v1/upgrades/{result['job_ids'][0]}"
         return result
 

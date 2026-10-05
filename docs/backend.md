@@ -9,6 +9,24 @@ services and its archive. A future Symfony application using Symfony Docker
 can consume the API and events while keeping its own deployment, configuration,
 user authentication, and UI.
 
+## Export resource limits
+
+Authenticated exports prepare a private temporary file from one archive snapshot
+before response headers are sent. The database connection and transaction close
+before the client receives bytes. Downloads that fail, disconnect or exceed the
+delivery deadline close the file explicitly; no snapshot waits on client speed.
+
+Operator configuration sets `CHESS_CRAWL_EXPORT_MAX_ROWS` (100,000),
+`CHESS_CRAWL_EXPORT_MAX_BYTES` (64 MiB), `CHESS_CRAWL_EXPORT_PREPARE_SECONDS`
+(60), `CHESS_CRAWL_EXPORT_DOWNLOAD_SECONDS` (300), and
+`CHESS_CRAWL_EXPORT_WORKSPACE_SLOTS` (2). Preparation slots are enforced in
+PostgreSQL across API replicas and are isolated by the authenticated workspace.
+An oversized export fails with `422 export_limit_exceeded` before delivery;
+a busy workspace receives `429` and can retry. Narrow the provider filter or
+adjust trusted operator limits for larger local exports. All settings must be
+finite positive integers; callers cannot override them. Provision temporary
+storage for the configured maximum export size and concurrent preparation count.
+
 ## Start the development backend
 
 Use a source checkout with Docker, the Compose v2 plugin, Linux container
@@ -31,6 +49,10 @@ are ignored by Git and excluded from image builds. It preserves
 `mercure_publisher_jwt` and `mercure_subscriber_jwt` files. The subscriber token
 stays on the host for integration clients. These development JWTs have no expiry;
 deployment and end-user token issuance belong to the deploying application.
+Development grants are confined to workspace `local`, matching the single API
+token. To replace older topic grants, rerun the bootstrap and recreate `events`
+with `docker compose up -d --force-recreate events`; master credentials remain
+unchanged.
 
 | Service | Responsibility |
 | --- | --- |
@@ -285,6 +307,19 @@ worker remains alive: `/v1/worker` separates heartbeat liveness from activity
 and includes individual workers and their aggregate active count. API readiness
 alone does not prove that acquisition is running. See [execution](execution.md).
 
+Container worker health checks probe their own incarnation instead of aggregate
+worker liveness. The image sets `CHESS_CRAWL_WORKER_IDENTITY_FILE` to
+`/tmp/chess-crawl-worker.json`; the worker CLI writes a mode-0600 atomic binding
+after its database heartbeat starts. The probe requires the bound UUID's live
+heartbeat and a matching local Linux process PID/start time. Missing or malformed
+bindings, stopped processes, PID reuse, and stale own heartbeats fail even when
+another worker remains live. Keep this file on writable, container-local storage
+and use a distinct path for each process when running several workers in one
+container. The small last binding remains after stop, where terminal database
+state makes it unhealthy, and the next incarnation replaces it atomically.
+Host/programmatic workers leave binding disabled unless explicitly configured;
+this Linux container probe does not fall back to aggregate status.
+
 On startup and while idle, the worker recovers orphaned in-progress work only
 after obtaining the orphan's job lock.
 It preserves cancelled runs. Transient failures have durable retry counters
@@ -457,6 +492,7 @@ The following authenticated routes read only the local archive:
 | `GET /v1/raw` | Cached payload metadata; public and current workspace only; no raw bodies or request credentials |
 | `GET /v1/jobs` | Owned queue page; optional owned `run_id`, numeric `after`, bounded `limit` |
 | `GET /v1/runs` | Owned run metadata page; numeric `after`, bounded `limit` |
+| `GET /v1/runs/{id}/budget` | Owned lifetime policy/usage and exhaustion state; also included in run/job snapshots |
 | `GET /v1/jobs/status` | Owned state/kind/depth counts; optional owned `run_id` |
 | `GET /v1/exports/games.jsonl` | Stream shared normalized game metadata; optional provider |
 | `GET /v1/exports/users.jsonl` | Stream shared normalized public account facts; optional provider |
@@ -486,10 +522,15 @@ history use the registered resources. These handlers do not acquire data.
 `POST /v1/games/collect` queues one public Lichess game export, using `provider`
 and its eight-character public `game_id` plus `Idempotency-Key`. URLs and player
 secret IDs are rejected; Chess.com direct game acquisition is unsupported.
+Public Lichess game exports and user-game history requests omit provider OAuth,
+even when an account token is configured. Account-private games are unsupported
+by these public collectors. Explicit owned resources keep their workspace-bound
+OAuth access.
 
-JSONL/CSV exports own a read-only repeatable-read snapshot and stream database
-rows with bounded memory. Completion exports all matching rows; an interrupted
-HTTP download must be retried. The graph export emits each owned run membership
+JSONL/CSV exports prepare a bounded private temporary file from a read-only
+repeatable-read snapshot, then close that snapshot before downloading the file.
+Accepted exports contain all matching rows; an interrupted HTTP download must
+be retried. See [export resource limits](#export-resource-limits). The graph export emits each owned run membership
 with that run's ID. Its game counts and representative game IDs are reconstructed
 from that run's attributed games, and depth from its discovery jobs. Missing
 historical attribution leaves those metrics zero or unknown; another workspace's
@@ -542,3 +583,79 @@ by later registered analysis workers, not by these result-storage routes.
 
 Private PGN uploads require a separate namespace and access-aware normalization;
 this API does not publish private imports into the shared provider archive.
+
+
+### Trusted work ceilings and workspace quotas
+
+A page size and provider pacing do not bound an entire history import. Every
+queued API operation receives one server-owned run budget, inherited by its
+acquisition, continuation, and normalization jobs. HTTP JSON cannot choose or
+raise these ceilings. An idempotent replay retains the original budget; changing
+request keys does not clear workspace usage.
+
+| Limit | Per run lifetime | Per workspace UTC month |
+| --- | --- | --- |
+| Distinct games processed | 100,000 | 1,000,000 |
+| Normalization work units | 100,000 | 1,000,000 |
+| Remote response bytes | 256 MiB | 2 GiB |
+| Remote request attempts | 2,000 | 10,000 |
+
+The default response ceiling is 16 MiB. Each workspace may have two active jobs.
+The queued allowance plus active allowance bounds all unfinished jobs (pending,
+blocked, and running): 32 + 2 = 34 by default, including dynamically created
+children. These are operator settings, loaded from the
+`CHESS_CRAWL_JOB_MAX_*`, `CHESS_CRAWL_WORKSPACE_MAX_*`, and
+`CHESS_CRAWL_MAX_RESPONSE_BYTES` environment variables listed in `.env.example`.
+Compose passes the same configuration to the API and worker. Invalid, zero,
+negative, or non-bigint settings fail configuration validation.
+Repeated normalization attempts, including retained-source replay, consume work
+units before parsing. A native game identity consumes its game allowance once
+per run. Requests reserve finite byte and attempt allowances before HTTP; a
+completed read refunds unused reserved bytes, while an uncertain crash retains
+its conservative charge. Workers rotate workspaces and apply the active-job
+limit to database claims and SQS hints.
+
+Admission runs atomically with scoped submission creation. A full backlog or
+exhausted monthly quota returns HTTP `429` with
+`error.code=workspace_quota_exceeded` and owner-only `error.quota` fields:
+`dimension`, `remaining`, `reset_at`, and `budget_id`. Rejection creates no run,
+jobs, submission identity, or events. Retrying an already accepted idempotency
+key returns its original result without reserving a second budget. Other
+workspaces retain their independent quota and queue capacity.
+The trusted workspace policy is installed in a preceding short transaction, so
+a lowered operator limit remains effective even if admission is rejected.
+Later submissions cannot raise that workspace authority. Usage is unchanged by
+policy installation and every accepted run retains its own lifetime policy.
+
+`GET /v1/runs/<id>/budget`, run snapshots, and job snapshots expose the persisted
+policy, counters, and exhaustion reason. Quota months begin at midnight UTC on
+the first day; a new month does not reset any run's lifetime counters or ceilings.
+An exhausted collection remains incomplete with its durable checkpoint, rather
+than reporting a complete history or silently shortening its dates. After an
+operator-approved extension or a renewed quota period, resumption continues that
+checkpoint and reuses retained source bodies. Stored player/game reads remain
+offline and available when acquisition is blocked. Budget extension belongs to
+the operator workflow; there is no HTTP caller-supplied policy extension.
+
+Inspect and resume through a process with operator PostgreSQL access:
+
+```bash
+uv run chess-crawl-admin budgets show --run-id 42
+uv run chess-crawl-admin budgets resume --run-id 42
+```
+
+Both commands use `CHESS_CRAWL_DATABASE_URL`; `--database-url` is also supported.
+`show` opens a read-only snapshot and includes the stored budget, current
+workspace month/authority, and configured operator policy. Before extending a
+run, raise the required API and worker environment ceilings, restart those
+services, and run `resume` with that same environment. The command derives the
+workspace from the stored run, extends ceilings monotonically, and requeues only
+budget-blocked checkpoints. It preserves spent counters, job cursors, retained
+source objects, and completed jobs. A new UTC month renews workspace capacity;
+use the same command to resume its paused runs. A lifetime-exhausted run still
+requires a ceiling extension. These commands require an already migrated
+archive and do not run migrations or contact providers.
+
+Migration `0012_work_budgets` follows the tiny `0011_archive_transfer` import
+reference index prerequisite. Including that index does not enable the separate
+external-object transfer helper or cloud deployment package.

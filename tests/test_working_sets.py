@@ -179,13 +179,16 @@ def test_summary_does_not_reveal_other_workspace_activity_or_private_sources(dat
         assert a["freshness"]["last_fetched_at"] == 10 and b["freshness"]["last_fetched_at"] == 99
 
 
-def test_unbounded_import_modes_preserve_optional_dates_and_incremental_watermark(database_url: str) -> None:
+@pytest.mark.parametrize("mode", ["full", "incremental", "backfill"])
+def test_history_import_modes_preserve_optional_dates_and_incremental_watermark(database_url: str, mode: str) -> None:
     with client(database_url) as alpha:
-        response = alpha.post("/v1/imports",json={"provider":"lichess","username":"alice","max_games":10,"collection_mode":"incremental"},headers={"Idempotency-Key":"incremental"})
+        response = alpha.post("/v1/imports",json={"provider":"lichess","username":"alice","max_games":10,"collection_mode":mode},headers={"Idempotency-Key":f"{mode}-watermark"})
         assert response.status_code == 202,response.text
         params = alpha.get(f"/v1/jobs/{response.json()['job_ids'][1]}").json()["params"]
         assert params["since"] is None and "since_ms" not in params
-        explicit = alpha.post("/v1/imports",json={**IMPORT,"collection_mode":"full"},headers={"Idempotency-Key":"full"})
+        assert params["until"] is None and "until_ms" not in params
+        explicit = alpha.post("/v1/imports",json={**IMPORT,"collection_mode":mode},headers={"Idempotency-Key":f"{mode}-explicit"})
+        assert explicit.status_code == 202,explicit.text
         params = alpha.get(f"/v1/jobs/{explicit.json()['job_ids'][1]}").json()["params"]
         assert params["since_ms"] == IMPORT["since"] * 1000 and params["until_ms"] == IMPORT["until"] * 1000
         assert alpha.post("/v1/imports",json={"provider":"lichess","username":"alice","max_games":10},headers={"Idempotency-Key":"missing"}).status_code == 422

@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from chess_crawl.jobs.state import worker_status
+from chess_crawl.jobs.worker_identity import local_worker_alive
 from chess_crawl.storage.db import connection
 
 
@@ -24,7 +24,7 @@ def main() -> int:
                 client.close()
         if mode == "worker":
             with connection(os.environ["CHESS_CRAWL_DATABASE_URL"]) as conn:
-                return 0 if worker_status(conn)["alive"] else 1
+                return 0 if local_worker_alive(conn, os.environ["CHESS_CRAWL_WORKER_IDENTITY_FILE"]) else 1
         return 1
     except Exception:
         return 1

@@ -86,6 +86,12 @@ def normalize_games_payload(
         # Parsing occurs outside writes. Checkpointed background/run replay can
         # reuse its immutable evidence; explicit standalone replay repairs data.
         reusable = pointer in checkpoints and (crawl_run_id is not None or conn._job_fence is not None)
+        if conn._work_budget_id is not None:
+            from chess_crawl.storage.work_budgets import reserve_normalization
+            reserve_normalization(
+                conn, conn._work_budget_id,
+                game_key=game.provider + "/" + (game.provider_game_id or game.canonical_url or game.content_hash),
+            )
         prepared = None if reusable else parse_game_evidence(game)
         with normalization_transaction(conn, raw.provider, [game], crawl_run_id=crawl_run_id):
             bounds = (run_game_bounds(conn, crawl_run_id, provider=raw.provider, requested=remaining_request)

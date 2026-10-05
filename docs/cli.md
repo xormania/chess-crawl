@@ -37,6 +37,24 @@ container already has the database settings and mounted password secret:
 docker compose exec api chess-crawl-admin info
 ```
 
+## Inspect and resume work budgets
+
+Use trusted operator PostgreSQL access; HTTP bearer credentials cannot extend
+work ceilings. Inspect a run's stored usage and retained progress, then resume it
+with the same trusted ceiling configuration used by the API and workers:
+
+```bash
+uv run chess-crawl-admin budgets show --run-id 42
+uv run chess-crawl-admin budgets resume --run-id 42
+```
+
+These commands delegate to `python -m chess_crawl.jobs.budget` and require an
+already migrated archive. `show` is read-only. `resume` extends ceilings without
+resetting spent counters or changing retained checkpoints and completed jobs.
+It requeues only jobs blocked by budget exhaustion and makes no provider requests.
+See [work budgets](work-budgets.md) for finite defaults, monthly quotas, and the
+operator steps needed before raising a ceiling.
+
 ## Relocate compressed source backups
 
 Select `CHESS_CRAWL_ARCHIVE_BACKEND=local` with a durable shared
@@ -67,6 +85,7 @@ alongside PostgreSQL when backing up and restoring. The
 | Background execution | `python -m chess_crawl.jobs.worker` |
 | Private event publication | `python -m chess_crawl.events.publisher` |
 | Schema migration, readiness, backup relocation | `chess-crawl-admin migrate`, `info`, `relocate` |
+| Trusted budget inspection and checkpoint resume | `chess-crawl-admin budgets show`, `budgets resume` |
 
 All product reads reuse stored data. HTTP submissions enqueue durable work;
 workers perform acquisition separately. API tokens determine workspace access.

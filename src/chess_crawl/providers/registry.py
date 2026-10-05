@@ -123,10 +123,13 @@ class ProviderSession(AbstractContextManager["ProviderSession"]):
         self._clock = clock
         self._stop_requested = stop_requested
         self._clients: dict[str, ChessComClient | LichessClient] = {}
+        self._budgeted_providers: set[str] = set()
         self._resources = ExitStack()
         self._closed = False
         self.before_request: Callable[[str], None] | None = None
         self.persist_deadline: Callable[[str, float, str], None] | None = None
+        self.reserve_request: Callable[[str], int] | None = None
+        self.finish_request: Callable[[str, int], None] | None = None
 
     def client(self, provider: str):
         if self._closed:
@@ -145,6 +148,11 @@ class ProviderSession(AbstractContextManager["ProviderSession"]):
             client.http.persist_deadline = lambda deadline, reason: (
                 self.persist_deadline(provider, deadline, reason) if self.persist_deadline is not None else None
             )
+        reserve_request, finish_request = self.reserve_request, self.finish_request
+        if reserve_request is not None or finish_request is not None or provider in self._budgeted_providers:
+            client.http.reserve_request = None if reserve_request is None else lambda: reserve_request(provider)
+            client.http.finish_request = None if finish_request is None else lambda received: finish_request(provider, received)
+            self._budgeted_providers.add(provider)
         return self._clients[provider]
 
     def close(self) -> None:

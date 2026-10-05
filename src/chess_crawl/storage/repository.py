@@ -176,7 +176,8 @@ def _upsert_provider_user_locked(
         user_id = int(existing["id"])
         if profile_raw_payload_id is not None and not _is_latest_profile(conn, user_id, profile_raw_payload_id):
             return user_id
-        if identified is not None and profile_raw_payload_id is None and timestamp < int(existing["updated_at"]):
+        if (identified is not None and profile_raw_payload_id is None
+                and existing["updated_at"] is not None and timestamp < int(existing["updated_at"])):
             return user_id
         if named is not None and int(named["id"]) != user_id:
             if named["provider_user_id"] is not None:
@@ -193,12 +194,13 @@ def _upsert_provider_user_locked(
                    username_normalized = %s, display_username = %s,
                    account_status = CASE WHEN %s THEN %s ELSE COALESCE(%s, account_status) END,
                    title = CASE WHEN %s THEN %s ELSE COALESCE(%s, title) END,
+                   first_seen_at = LEAST(first_seen_at, %s),
                    updated_at = GREATEST(updated_at, %s)
              WHERE id = %s
             """,
             (provider_user_id, username_normalized, display,
              profile_raw_payload_id is not None, account_status, account_status,
-             profile_raw_payload_id is not None, title, title, timestamp, user_id),
+             profile_raw_payload_id is not None, title, title, timestamp, timestamp, user_id),
         )
         return user_id
 
