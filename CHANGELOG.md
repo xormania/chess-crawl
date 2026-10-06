@@ -78,6 +78,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   existing stack, and inventory retained old queues. Deployment and recovery
   verification remain operator steps. The [hosted-service guide](docs/saas-integration.md)
   documents public backend and private product boundaries.
+- Trusted anonymous operational JSON metrics report eligible acquisition and
+  processing backlog, oldest waiting age, durable active jobs, admission wait
+  reasons, and dispatch/event delivery health from one PostgreSQL snapshot.
+  Shared candidate admission expressions keep scheduling and measurement
+  consistent. See [operational measurements](docs/operations-metrics.md).
 
 - A bounded, cursor-based operational transfer for referenced local/S3 archive
   objects. It verifies and copies exact compressed evidence before atomically
