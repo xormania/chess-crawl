@@ -36,7 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     prune.add_argument("--workspace-id", required=True)
     prune.add_argument("--before", required=True, type=int, help="Exclusive creation-time cutoff, as Unix seconds")
     prune.add_argument("--batch-size", type=int, default=256)
-    for command in (migrate, info, relocate, prune):
+    artifacts = commands.add_parser("prune-artifacts", help="Delete expired private export artifacts in a bounded resumable batch")
+    artifacts.add_argument("--workspace-id", required=True)
+    artifacts.add_argument("--before", required=True, type=int, help="Inclusive expiration-time cutoff, as Unix seconds")
+    artifacts.add_argument("--batch-size", type=int, default=10)
+    for command in (migrate, info, relocate, prune, artifacts):
         command.add_argument("--database-url", help="PostgreSQL connection settings; prefer environment password sources")
     relocate.add_argument("--batch-size", type=int, default=100)
     relocate.add_argument("--count-remaining", action="store_true", help="Compute an optional exact pending count")
@@ -72,6 +76,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 version = current_version(conn)
             output = {"database": database_label(target), "schema_version": version,
                       "application_schema_version": SCHEMA_VERSION, "ready": version == SCHEMA_VERSION}
+        elif args.command == "prune-artifacts":
+            from chess_crawl.storage.artifacts import prune_artifacts
+            with connection(target, mode="rw") as conn:
+                if current_version(conn) != SCHEMA_VERSION:
+                    raise ValueError("Run chess-crawl-admin migrate before artifact retention")
+                output = {"workspace_id": args.workspace_id, **prune_artifacts(
+                    conn, args.workspace_id, before=args.before, limit=args.batch_size,
+                )}
         elif args.command == "prune-results":
             from chess_crawl.storage.working_sets import prune_results
             with connection(target, mode="rw") as conn:

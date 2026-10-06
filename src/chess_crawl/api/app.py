@@ -285,5 +285,7 @@ def create_app(
 
     from chess_crawl.api.archive import register_archive_routes
     register_archive_routes(router, archive, request_limits, work_policy)
+    from chess_crawl.api.archive_jobs import register_async_routes
+    register_async_routes(router, archive, work_policy)
     app.include_router(router)
     return app

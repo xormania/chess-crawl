@@ -17,6 +17,8 @@ JobKind = Literal[
     "normalize_payload",
     "reprocess_archive",
     "expand_opponents",
+    "build_working_set",
+    "prepare_export",
 ]
 
 JOB_STATES: tuple[str, ...] = ("pending", "in_progress", "done", "error", "skipped", "blocked")
@@ -30,15 +32,18 @@ JOB_KINDS: tuple[str, ...] = (
     "normalize_payload",
     "reprocess_archive",
     "expand_opponents",
+    "build_working_set",
+    "prepare_export",
 )
 
-PROCESSING_JOB_KINDS: tuple[str, ...] = ("normalize_payload", "reprocess_archive", "expand_opponents")
+ARCHIVE_JOB_KINDS: tuple[str, ...] = ("build_working_set", "prepare_export")
+PROCESSING_JOB_KINDS: tuple[str, ...] = ("normalize_payload", "reprocess_archive", "expand_opponents", *ARCHIVE_JOB_KINDS)
 
 
 @dataclass(frozen=True)
 class DiscoveryJob:
     id: int | None
-    provider: str
+    provider: str | None
     kind: JobKind
     target: str
     params_json: str = "{}"
@@ -75,3 +80,10 @@ class CollectionResult:
     message: str
     status_code: int = 200
     retry_after: float | None = None
+
+
+def source_provider(job: DiscoveryJob) -> str:
+    """Source-specific handlers must never accept an internal providerless job."""
+    if job.provider is None:
+        raise ValueError("Source processing requires a provider")
+    return job.provider

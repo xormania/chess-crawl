@@ -140,6 +140,7 @@ for configuration, verification, and backup steps.
 | Schema migration, readiness, backup relocation | `chess-crawl-admin migrate`, `info`, `relocate` |
 | Trusted budget inspection and checkpoint resume | `chess-crawl-admin budgets show`, `budgets resume` |
 | Scoped retention of stored analysis results | `chess-crawl-admin prune-results` |
+| Scoped retention of expired private exports | `chess-crawl-admin prune-artifacts` |
 | Verified transfer of existing external objects | `python -m chess_crawl.storage.archive_transfer` |
 
 All product reads reuse stored data. HTTP submissions enqueue durable work;
@@ -156,3 +157,14 @@ source origins with credentials redacted. Optional TOML configuration uses
 `CHESS_CRAWL_CONFIG_FILE`; environment values and explicit worker flags override
 it. See [runtime configuration](configuration.md) for supported roles, worker
 settings, and source precedence.
+
+
+## Retain private exports
+
+`chess-crawl-admin prune-artifacts --workspace-id example --before 1791244800
+--batch-size 10` deletes one resumable batch of expired private export objects and
+releases retained quota only after their tracked chunks are removed. The cutoff
+is inclusive and never removes artifacts that have not yet expired. Active jobs
+and live download leases defer cleanup. Processing/source evidence and immutable
+working sets are retained. See [queued archive operations](archive-jobs.md#retention)
+for batch bounds, storage permissions, and retry behavior.

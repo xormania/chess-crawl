@@ -2,16 +2,21 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from threading import RLock, Timer
-from typing import TextIO
+from typing import TextIO, Protocol
 
 from fastapi import HTTPException
 
-from chess_crawl.application import ValidationError
 from chess_crawl.application.export_limits import ExportLimits
 
 
+
+
+class ExportChunks(Protocol):
+    def __iter__(self) -> Iterator[str | bytes]: ...
+    def __next__(self) -> str | bytes: ...
+    def close(self) -> None: ...
 
 
 class ExportCapacity:
@@ -115,8 +120,5 @@ class ExportSpool:
 
 
 def check_export_bounds(*, limits: ExportLimits, rows: int, bytes_written: int, deadline: float) -> None:
-    if rows > limits.max_rows or bytes_written > limits.max_bytes or time.monotonic() >= deadline:
-        raise ValidationError(
-            "The export exceeds the operator's row, byte or preparation-time limit; narrow the provider filter",
-            code="export_limit_exceeded",
-        )
+    from chess_crawl.application.archive_exports import check_export_bounds as check
+    check(limits=limits, rows=rows, bytes_written=bytes_written, deadline=deadline, now=time.monotonic())

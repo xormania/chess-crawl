@@ -40,6 +40,27 @@ source objects it references. See [archive storage](archive-storage.md) for the
 transaction contract, resume behavior, and recovery requirements. Other local
 operational containers that access source bytes need the same archive mount.
 
+Optional [durable archive jobs](archive-jobs.md) use a separate `artifacts_data`
+volume. `artifacts-init` runs the same mount-root initializer with the configured
+absolute `CHESS_CRAWL_ARTIFACT_DIRECTORY`, defaulting to
+`/var/lib/chess-crawl/artifacts`. The API mounts both sources and artifacts
+read-only. Processing mounts sources read-only and artifacts writable; the
+combined local worker writes both. Acquisition has no artifact mount or artifact
+settings. API and processing startup wait for artifact initialization in all
+external-TLS, scalable, polling, and managed-auth overlay combinations.
+
+`CHESS_CRAWL_ARCHIVE_JOBS_ENABLED` defaults to `false`. Deploy matching API and
+worker images and run migrations before enabling it. API and processing receive
+the same async build/export ceilings and workspace artifact count/byte/TTL caps
+from `.env`; synchronous API export limits remain separate. All async caps are
+positive integers, and `ASYNC_EXPORT_MAX_BYTES` must be no greater than
+`ARTIFACT_MAX_BYTES`. The environment example lists the defaults. Select
+`CHESS_CRAWL_ARTIFACT_BACKEND=s3` with a bucket and normal SDK credentials for a
+multi-host deployment; an empty artifact bucket setting uses the raw archive S3
+bucket. API replicas and processing replicas must access the same artifact store.
+Keep referenced artifacts together with the database when backing up a deployment
+that must preserve completed downloads.
+
 ## Moving a local dataset to AWS
 
 Object references record their backend and location. Restoring a Compose database
@@ -95,6 +116,7 @@ restore, and scoped reads remain operator release checks.
 | --- | --- |
 | Archive database | Private encrypted RDS PostgreSQL 18, gp3 storage, configurable minor/class/size/backups/Multi-AZ, snapshots on removal/replacement, deletion protection by default. |
 | Source evidence | Private S3 bucket, encryption, ownership enforcement, public-access block, TLS-only policy, versioning, retained on removal/replacement. No expiry policy deletes referenced evidence. |
+| Export artifacts | Optional immutable objects under `artifacts/` in the same bucket, separate from raw `sha256/` evidence. Workspace artifact quotas and expiry apply to generated downloads. |
 | Dispatch | Separate encrypted standard SQS acquisition/processing queues and retained DLQs; configurable visibility and retry count. PostgreSQL remains durable job truth. |
 | API access | Internal ALB with ACM TLS listener, allowed only from the supplied frontend security group. ALB-to-container HTTP is confined to task security groups. |
 | Runtime | Separate digest-pinned Fargate API, acquisition, processing, and dispatcher task definitions; desired counts default to zero. Task-scoped ephemeral `/tmp` is writable by UID 10001; root filesystems remain read-only. |
@@ -139,10 +161,15 @@ credential correctly leaves the API unhealthy.
 Use one customer-managed key for both application secrets when supplying that
 parameter, or extend the execution policy explicitly for additional keys.
 The RDS-managed master secret is separate and accessible only to migration task
-execution. IAM task roles grant object reads to API and processing, object writes to
-acquisition, stage-specific queue receive to each worker role, and send to both
-queues to dispatcher. Processing cannot write objects or consume acquisition
-notifications. Dispatcher has no archive-object permission. The adapters use SDK
+execution. IAM task roles grant raw `sha256/*` reads to API and processing, raw
+writes to acquisition, stage-specific queue receive to each worker role, and send
+to both queues to dispatcher. API also receives GET on `artifacts/*`, and processing
+receives GET/PUT/DELETE on that prefix to publish artifacts and remove tracked
+partial objects after failed preparation.
+Processing cannot write or delete raw sources or consume acquisition notifications.
+API cannot write or delete objects. Dispatcher has no archive-object permission.
+Trusted administrative artifact cleanup needs a separate operator role with
+artifact deletion permissions. The adapters use SDK
 role credentials;
 no AWS access keys enter the template or archive references.
 
@@ -165,6 +192,18 @@ capacity across all replicas.
 The template exposes shared job/workspace budgets, worker heartbeat/retry
 settings, provider delays, HTTP retry limits, and dispatch retention as parameters.
 Admitting API tasks and executing workers reference the same budget parameters.
+`ArchiveJobsEnabled` defaults to `false`. API and processing tasks configure S3
+artifacts in the stack archive bucket and reference shared
+`AsyncMaxWorkingSetMembers`, `AsyncExportMaxRows`, `AsyncExportMaxBytes`,
+`AsyncExportPrepareSeconds`, `ArtifactMaxCount`, `ArtifactMaxBytes`, and
+`ArtifactTtlSeconds` parameters. Their positive bounds match runtime validation;
+configure export bytes no higher than workspace artifact bytes. CloudFormation
+does not compare those two numbers; the application rejects an invalid pair.
+Acquisition, dispatcher, and migration tasks receive no artifact settings.
+The feature flag gates new admission. Artifact IAM permissions remain available
+when it is disabled so queued work and retained downloads can finish. S3 versioning
+can retain noncurrent artifact bytes after logical deletion; any artifact-only
+lifecycle policy is an operator choice and must never expire raw evidence.
 Worker/provider parameters map to the same environment names used locally; HTTP
 retries and durable job retries remain separate. Set heartbeat maximum age to at
 least twice the configured heartbeat interval, and retry maximum at least retry

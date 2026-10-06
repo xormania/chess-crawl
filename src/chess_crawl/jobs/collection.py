@@ -19,7 +19,7 @@ from chess_crawl.ingest import (
     IngestResult, fetch_chesscom_archives, fetch_chesscom_month, fetch_lichess_game,
     fetch_lichess_games_page, replay_raw_payload,
 )
-from chess_crawl.jobs.models import CollectionResult, DiscoveryJob
+from chess_crawl.jobs.models import source_provider, CollectionResult, DiscoveryJob
 from chess_crawl.jobs.state import enqueue_payload_normalization
 from chess_crawl.normalize.games import PARSER_VERSION
 from chess_crawl.storage.normalization import observation_id
@@ -52,7 +52,7 @@ def execute_collection(
     if not username:
         raise ValueError("collection requires a username")
     fingerprint = hashlib.sha256(json.dumps(
-        [job.provider, username, {key: value for key, value in params.items()
+        [source_provider(job), username, {key: value for key, value in params.items()
                                  if key not in {"batch_size", "page_size", "max_page_size", "max_games"}}],
         sort_keys=True, separators=(",", ":"),
     ).encode()).hexdigest()
@@ -67,13 +67,13 @@ def execute_collection(
     stopped = stop_requested or (lambda: False)
     if stopped():
         return CollectionResult(False, 0, (), "collection paused before acquisition")
-    if job.provider == "chess.com":
+    if source_provider(job) == "chess.com":
         return _chesscom(conn, job, params, cursor, username, str(mode), batch_size,
                          fingerprint, options, now, stopped)
-    if job.provider == "lichess":
+    if source_provider(job) == "lichess":
         return _lichess(conn, job, params, cursor, username, str(mode), batch_size,
                         fingerprint, options, int(clock() * 1000), stopped)
-    raise ValueError(f"unsupported collection provider: {job.provider}")
+    raise ValueError(f"unsupported collection provider: {source_provider(job)}")
 
 
 def _chesscom(conn, job, params, cursor, username, mode, batch_size, fingerprint, options, now, stopped):
@@ -98,14 +98,14 @@ def _chesscom(conn, job, params, cursor, username, mode, batch_size, fingerprint
                 _month_bounds(unit)
             units = [unit for unit in units if unit in requested]
             for unit in set(requested) - set(units):
-                store.record_coverage(conn, provider=job.provider, username=username, unit=unit,
+                store.record_coverage(conn, provider=source_provider(job), username=username, unit=unit,
                                       state="missing", error="not listed by provider", now=now)
         cursor = {"request_fingerprint": fingerprint, "units": units, "unit_index": 0}
         with transaction(conn):
             for unit in units:
-                existing = store.coverage(conn, job.provider, username, unit)
+                existing = store.coverage(conn, source_provider(job), username, unit)
                 if existing is None:
-                    store.record_coverage(conn, provider=job.provider, username=username,
+                    store.record_coverage(conn, provider=source_provider(job), username=username,
                                           unit=unit, state="pending", now=now)
             store.save_checkpoint(conn, job.id, cursor, now=now)
     processed = 0
@@ -116,7 +116,7 @@ def _chesscom(conn, job, params, cursor, username, mode, batch_size, fingerprint
             break
         unit = units[cursor["unit_index"]]
         year, month, end = _month_bounds(unit)
-        coverage = store.coverage(conn, job.provider, username, unit)
+        coverage = store.coverage(conn, source_provider(job), username, unit)
         # Coverage records acquisition progress; another importer may already
         # have preserved a newer successful observation of this same source.
         raw_id = store.latest_successful_source(conn, f"chess.com/player/{username}/games/{unit}")
@@ -131,7 +131,7 @@ def _chesscom(conn, job, params, cursor, username, mode, batch_size, fingerprint
             if not isinstance(body, dict) or not isinstance(body.get("games"), list):
                 raise ValueError("stored monthly source is not a complete games collection")
             ids.extend(_use_local_payload(conn, job, raw.id, options))
-            result = IngestResult(job.provider, "monthly_archive", 200, raw.id, (), "reused stored archive")
+            result = IngestResult(source_provider(job), "monthly_archive", 200, raw.id, (), "reused stored archive")
         else:
             result = fetch_chesscom_month(conn, username, year, month, max_games=None, **options)
             result = _resolve_cached_response(conn, result, f"chess.com/player/{username}/games/{unit}")
@@ -155,7 +155,7 @@ def _chesscom(conn, job, params, cursor, username, mode, batch_size, fingerprint
         processed += 1
         with transaction(conn):
             store.record_coverage(
-                conn, provider=job.provider, username=username, unit=unit, state="complete",
+                conn, provider=source_provider(job), username=username, unit=unit, state="complete",
                 raw_payload_id=raw.id, parser_version=raw.parser_version, sealed=sealed, now=now,
             )
             store.save_checkpoint(conn, job.id, cursor, now=now)
@@ -345,7 +345,7 @@ def _use_local_payload(conn, job, raw_id, options) -> tuple[int, ...]:
         captured = latest_job_payload(conn, job.id, endpoint_type=raw.endpoint_type,
                                       source_key=raw.canonical_source_key)
         enqueue_payload_normalization(
-            conn, provider=job.provider, raw_payload_id=raw.id, max_games=None,
+            conn, provider=source_provider(job), raw_payload_id=raw.id, max_games=None,
             fetch_log_id=captured[1] if captured is not None else observation_id(conn, raw.id),
             crawl_run_id=job.crawl_run_id, parent_job_id=job.id, parser_version=PARSER_VERSION,
         )
@@ -390,7 +390,7 @@ def _raw_id(result: IngestResult) -> int:
 
 def _failure(conn, job, username, unit, result, now, processed=0, ids=()) -> CollectionResult:
     store.record_coverage(
-        conn, provider=job.provider, username=username, unit=unit,
+        conn, provider=source_provider(job), username=username, unit=unit,
         state="missing" if result.status_code in {404, 410} else "error",
         raw_payload_id=result.raw_payload_id, error=result.message, now=now,
     )

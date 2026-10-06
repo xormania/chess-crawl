@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import json
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from chess_crawl.jobs.budget import BudgetExceeded, BudgetPolicy, QuotaExceeded
+from chess_crawl.jobs.models import ARCHIVE_JOB_KINDS
 from chess_crawl.storage.db import Connection, atomic, operation_lock, require_row
 from chess_crawl.storage.workspaces import validate_workspace
 
@@ -114,7 +116,7 @@ def admit_run_budget(
 ) -> dict[str, Any]:
     timestamp = int(time.time()) if now is None else now
     operation_lock(conn, "workspace-budget", workspace_id)
-    run = require_row(conn.execute("SELECT workspace_id,work_budget_id FROM crawl_runs WHERE id=%s FOR UPDATE", (run_id,)))
+    run = require_row(conn.execute("SELECT workspace_id,work_budget_id,provider,params_json FROM crawl_runs WHERE id=%s FOR UPDATE", (run_id,)))
     if run["workspace_id"] != workspace_id:
         raise ValueError("Work budget owner does not match the run")
     if run["work_budget_id"] is not None:
@@ -122,7 +124,9 @@ def admit_run_budget(
     workspace_policy = _workspace_policy(conn, workspace_id, policy, timestamp, tighten=True)
     policy, policy_version = _admission_policy(conn, workspace_id, policy)
     usage = _period(conn, workspace_id, timestamp)
-    for dimension in ("games", "normalization_units", "remote_bytes", "remote_requests"):
+    archive_only = run["provider"] is None and json.loads(run["params_json"]).get("strategy") in ARCHIVE_JOB_KINDS
+    dimensions = ("normalization_units",) if archive_only else ("games", "normalization_units", "remote_bytes", "remote_requests")
+    for dimension in dimensions:
         remaining = getattr(workspace_policy, "workspace_max_" + dimension) - int(usage[dimension])
         if remaining <= 0:
             raise QuotaExceeded(dimension, remaining=0, reset_at=int(usage["period_end"]))
@@ -232,13 +236,13 @@ def _locked_budget(conn: Connection, budget_id: int, now: int):
     return budget, policy, _period(conn, workspace_id, now), workspace_policy
 
 
-def _remaining(budget, policy: BudgetPolicy, usage, workspace_policy: BudgetPolicy, dimension: str) -> int:
+def _remaining(budget, policy: BudgetPolicy, usage, workspace_policy: BudgetPolicy, dimension: str, *, requested: int = 1) -> int:
     job_remaining = getattr(policy, "job_max_" + dimension) - int(budget[dimension])
-    if job_remaining <= 0:
-        raise BudgetExceeded(dimension, budget_id=int(budget["id"]))
+    if job_remaining < requested:
+        raise BudgetExceeded(dimension, remaining=max(0,job_remaining), budget_id=int(budget["id"]))
     workspace_remaining = getattr(workspace_policy, "workspace_max_" + dimension) - int(usage[dimension])
-    if workspace_remaining <= 0:
-        raise QuotaExceeded(dimension, reset_at=int(usage["period_end"]), budget_id=int(budget["id"]))
+    if workspace_remaining < requested:
+        raise QuotaExceeded(dimension, remaining=max(0,workspace_remaining), reset_at=int(usage["period_end"]), budget_id=int(budget["id"]))
     return min(job_remaining, workspace_remaining)
 
 
@@ -301,11 +305,21 @@ def settle_request(conn: Connection, reservation_id: int, consumed_bytes: int) -
 
 
 @atomic
+def normalization_allowance(conn: Connection, budget_id: int) -> int:
+    """Bound a read-only processing snapshot before reserving its completed work."""
+    budget, policy, usage, workspace_policy = _locked_budget(conn, budget_id, int(time.time()))
+    return max(0, min(policy.job_max_normalization_units - int(budget["normalization_units"]),
+                      workspace_policy.workspace_max_normalization_units - int(usage["normalization_units"])))
+
+
+@atomic
 def reserve_normalization(
-    conn: Connection, budget_id: int, *, game_key: str | None = None, now: int | None = None,
+    conn: Connection, budget_id: int, *, game_key: str | None = None, now: int | None = None, units: int = 1,
 ) -> bool:
     """Bill interpretation and return whether this budget acquired a new game."""
-    return _reserve_processing_work(conn, budget_id, game_key=game_key, interpretation_units=1, now=now)
+    if type(units) is not int or units < 1:
+        raise ValueError("Normalization reservation must contain positive integer units")
+    return _reserve_processing_work(conn, budget_id, game_key=game_key, interpretation_units=units, now=now)
 
 
 @atomic
@@ -324,7 +338,7 @@ def _reserve_processing_work(
     timestamp = int(time.time()) if now is None else now
     budget, policy, usage, workspace_policy = _locked_budget(conn, budget_id, timestamp)
     if interpretation_units:
-        _remaining(budget, policy, usage, workspace_policy, "normalization_units")
+        _remaining(budget, policy, usage, workspace_policy, "normalization_units", requested=interpretation_units)
     game_units = 0
     if game_key is not None and conn.execute(
         "SELECT 1 FROM budget_game_items WHERE budget_id=%s AND game_key=%s", (budget_id, game_key),

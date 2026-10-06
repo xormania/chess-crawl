@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from chess_crawl.jobs.models import DiscoveryJob, EnqueueResult, JOB_KINDS, JobKind, JobState, PROCESSING_JOB_KINDS
+from chess_crawl.jobs.models import ARCHIVE_JOB_KINDS, DiscoveryJob, EnqueueResult, JOB_KINDS, JobKind, JobState, PROCESSING_JOB_KINDS, source_provider
 from chess_crawl.jobs.locking import ExecutorLease, parallel_executor_lock
 from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.jobs.budget import BudgetPolicy
@@ -44,7 +44,7 @@ def load_params(params_json: str | None) -> dict[str, Any]:
 
 def make_dedup_key(
     *,
-    provider: str,
+    provider: str | None,
     kind: str,
     target: str,
     params: Mapping[str, Any] | None = None,
@@ -65,7 +65,7 @@ def make_dedup_key(
 def enqueue_job(
     conn: Connection,
     *,
-    provider: str,
+    provider: str | None,
     kind: JobKind,
     target: str,
     params: Mapping[str, Any] | None = None,
@@ -165,11 +165,12 @@ def enqueue_opponent_expansion(
     """A new shallower frontier reuses capture and has its own durable identity."""
     if parent.id is None or parent.crawl_run_id is None or parent.kind != "crawl_opponents":
         raise ValueError("Opponent expansion requires a persisted acquisition parent")
+    provider = source_provider(parent)
     effective = known_crawl_depth(conn, crawl_run_id=parent.crawl_run_id,
-                                 provider=parent.provider, username=parent.target)
+                                 provider=provider, username=parent.target)
     depth = min(parent.depth if depth is None else depth, effective if effective is not None else parent.depth)
     return enqueue_job(
-        conn, provider=parent.provider, kind="expand_opponents", target=str(parent.id),
+        conn, provider=provider, kind="expand_opponents", target=str(parent.id),
         params={"discovery_depth": depth}, crawl_run_id=parent.crawl_run_id,
         parent_job_id=parent.id, depth=depth, priority=20, reuse_terminal=True,
     )
@@ -216,9 +217,11 @@ def acquisition_job_count(conn: Connection, crawl_run_id: int) -> int:
         (crawl_run_id, list(PROCESSING_JOB_KINDS)),
     ))[0])
 
-def _validate_schedulable_job(*, provider: str, kind: str) -> None:
+def _validate_schedulable_job(*, provider: str | None, kind: str) -> None:
     if kind not in JOB_KINDS:
         raise ValueError(f"unsupported job kind: {kind}")
+    if (kind in ARCHIVE_JOB_KINDS) != (provider is None):
+        raise ValueError("Only internal archive jobs have no provider")
     if kind == "fetch_user_stats" and provider != "chess.com":
         raise ValueError("fetch_user_stats jobs are supported only for chess.com")
     if kind == "fetch_game_by_id" and provider != "lichess":
@@ -448,11 +451,13 @@ def unblock_jobs(conn: Connection, *, crawl_run_id: int | None = None, now: floa
 def create_crawl_run(
     conn: Connection,
     *,
-    provider: str,
+    provider: str | None,
     seed_spec: str,
     params: Mapping[str, Any],
     now: int | None = None,
 ) -> int:
+    if provider is None and params.get("strategy") not in ARCHIVE_JOB_KINDS:
+        raise ValueError("Only internal archive runs have no provider")
     timestamp = int(time.time()) if now is None else now
     cursor = conn.execute(
         """
@@ -619,7 +624,7 @@ def finish_attempt(
         # Persist provider-wide backoff even when this job exhausts its retries.
         # Another job or a restarted executor must not evade the same deadline.
         delay = max(delay, minimum_delay, retry_after or 0)
-        if row["kind"] not in PROCESSING_JOB_KINDS:
+        if row["kind"] not in PROCESSING_JOB_KINDS and row["provider"] is not None:
             defer_provider(conn, row["provider"], not_before=timestamp + delay, reason=reason, now=timestamp)
         if retries < policy.job_max_retries:
             conn.execute(
@@ -638,7 +643,7 @@ def finish_attempt(
         parent = get_job(conn, job_id)
         if parent is not None:
             depth = known_crawl_depth(conn, crawl_run_id=int(row["crawl_run_id"]),
-                                      provider=parent.provider, username=parent.target)
+                                      provider=source_provider(parent), username=parent.target)
             if depth is not None:
                 conn.execute("UPDATE discovery_jobs SET depth=LEAST(depth,%s),priority=LEAST(priority,%s) WHERE id=%s",
                              (depth, 10 + depth, job_id))

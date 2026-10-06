@@ -25,7 +25,7 @@ from chess_crawl.jobs.acquisition import execute_bounded_acquisition
 from chess_crawl.normalize.games import NormalizationStopped
 from chess_crawl.jobs.collection import execute_collection
 from chess_crawl.jobs.budget import BudgetExceeded, BudgetPolicy
-from chess_crawl.jobs.models import DiscoveryJob, JobState, PROCESSING_JOB_KINDS
+from chess_crawl.jobs.models import source_provider, DiscoveryJob, JobState, PROCESSING_JOB_KINDS
 from chess_crawl.jobs.locking import ExecutorLease, ExecutorLeaseLost, parallel_executor_lock
 from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.providers.registry import ProviderSession, get_provider_info
@@ -183,10 +183,10 @@ class JobRunner:
                 lease.require(self.conn)
                 outcome = self._execute(job)
                 lease.require(self.conn)
-                minimum_delay = (self.config.provider(job.provider).min_delay_s
+                minimum_delay = (self.config.provider(source_provider(job)).min_delay_s
                                  if job.kind not in PROCESSING_JOB_KINDS else 0)
                 if outcome.status_code == 429:
-                    minimum_delay = max(minimum_delay, get_provider_info(job.provider).policy.next_delay(429, outcome.retry_after))
+                    minimum_delay = max(minimum_delay, get_provider_info(source_provider(job)).policy.next_delay(429, outcome.retry_after))
                 completed = state.finish_attempt(
                     self.conn, job.id, outcome.state, reason=outcome.reason,
                     transient=outcome.transient, retry_after=outcome.retry_after,
@@ -215,6 +215,13 @@ class JobRunner:
             self.conn._work_budget_id = work_budgets.ensure_job_budget(
                 self.conn, job.id, self.budget_policy, now=int(self.clock()),
             )
+            from chess_crawl.jobs.internal import handler_for
+            handler = handler_for(job.kind)
+            if handler is not None:
+                return ExecutionOutcome(**handler(
+                    self.conn, job, stop_requested=lambda: self.stop_requested() or self._cancelled(job),
+                    interruption_requested=self.stop_requested,
+                ))
             if job.kind == "normalize_payload":
                 params = state.load_params(job.params_json)
                 result = replay_raw_payload(self.conn, int(params.get("raw_payload_id", job.target)),
@@ -236,7 +243,7 @@ class JobRunner:
                 from chess_crawl import ingest
                 params = state.load_params(job.params_json)
                 fetch = getattr(ingest, "fetch_user_resource")
-                result = fetch(self.conn, job.provider, job.target, params["resource_key"],
+                result = fetch(self.conn, source_provider(job), job.target, params["resource_key"],
                                parameters=params.get("parameters"), config=self.config,
                                session=self._active_session, job_id=job.id,
                                crawl_run_id=job.crawl_run_id, owner_scope=params.get("owner_scope", "public"))
@@ -244,7 +251,7 @@ class JobRunner:
             if job.kind == "fetch_user_profile":
                 result = fetch_user_profile(
                     self.conn,
-                    job.provider,
+                    source_provider(job),
                     job.target,
                     config=self.config,
                     transport=self.transport,
@@ -284,7 +291,7 @@ class JobRunner:
                 params = state.load_params(job.params_json)
                 fail_upgrade(
                     self.conn, str(params.get("upgrade_id", job.target)), job_id=job.id,
-                    provider=job.provider, owner_scope=str(params.get("owner_scope", "public")),
+                    provider=source_provider(job), owner_scope=str(params.get("owner_scope", "public")),
                     error=str(exc),
                 )
             insert_error(
@@ -334,7 +341,7 @@ class JobRunner:
         self._request_reservation = None
 
     def _fetch_stats(self, job: DiscoveryJob) -> IngestResult:
-        if job.provider == "chess.com":
+        if source_provider(job) == "chess.com":
             return fetch_chesscom_stats(
                 self.conn,
                 job.target,
@@ -346,7 +353,7 @@ class JobRunner:
                 crawl_run_id=job.crawl_run_id,
             )
         return IngestResult(
-            job.provider,
+            source_provider(job),
             "user_stats",
             400,
             None,
@@ -363,11 +370,11 @@ class JobRunner:
             return ExecutionOutcome("error", failure)
         if self.game_fetcher is not None:
             remaining = discovery.remaining_game_budget(
-                self.conn, crawl_run_id=job.crawl_run_id, provider=job.provider, params=params,
+                self.conn, crawl_run_id=job.crawl_run_id, provider=source_provider(job), params=params,
             )
             if remaining == 0:
                 return ExecutionOutcome("done", "max-games cap already reached")
-            result = self.game_fetcher(self.conn, job.provider, job.target, params, remaining)
+            result = self.game_fetcher(self.conn, source_provider(job), job.target, params, remaining)
             if job.crawl_run_id is not None:
                 with transaction(self.conn):
                     for game_id in result.normalized_ids:
@@ -382,7 +389,7 @@ class JobRunner:
         )
         if collected.status_code not in {200, 304}:
             return _outcome_from_ingest(IngestResult(
-                job.provider, "collection", collected.status_code, None,
+                source_provider(job), "collection", collected.status_code, None,
                 collected.normalized_ids, collected.message, collected.retry_after,
             ))
         return ExecutionOutcome("done" if collected.done else "pending", collected.message)
@@ -395,7 +402,7 @@ class JobRunner:
         if not 1 <= size <= 100:
             raise ValueError("Upgrade batch_size must be between one and one hundred")
         upgrade_id = str(params.get("upgrade_id", job.target))
-        upgrade = start_upgrade(self.conn, upgrade_id=upgrade_id, provider=job.provider,
+        upgrade = start_upgrade(self.conn, upgrade_id=upgrade_id, provider=source_provider(job),
                                 parser_version=installed_parser_target(str(params.get("parser_version", "current"))),
                                 job_id=job.id,
                                 owner_scope=str(params.get("owner_scope", "public")))
@@ -418,9 +425,9 @@ class JobRunner:
         return run is not None and run["status"] == "cancelled"
 
     def _fetch_game_by_id(self, job: DiscoveryJob) -> IngestResult:
-        if job.provider != "lichess":
+        if source_provider(job) != "lichess":
             return IngestResult(
-                job.provider,
+                source_provider(job),
                 "game",
                 400,
                 None,
@@ -455,7 +462,7 @@ class JobRunner:
     def _expand_opponents(self, job: DiscoveryJob, *, depth: int | None = None) -> ExecutionOutcome:
         if job.crawl_run_id is not None:
             effective = state.known_crawl_depth(self.conn, crawl_run_id=job.crawl_run_id,
-                                               provider=job.provider, username=job.target)
+                                               provider=source_provider(job), username=job.target)
             job = replace(job, depth=min(job.depth if depth is None else depth,
                                          effective if effective is not None else job.depth))
         return ExecutionOutcome("done", discovery.expand_opponent_frontier(self.conn, job))

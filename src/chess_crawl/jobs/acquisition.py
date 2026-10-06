@@ -12,7 +12,7 @@ import httpx
 from chess_crawl.config import Config
 from chess_crawl.ingest import fetch_chesscom_month, fetch_lichess_games
 from chess_crawl.jobs import discovery, state
-from chess_crawl.jobs.models import CollectionResult, DiscoveryJob
+from chess_crawl.jobs.models import source_provider, CollectionResult, DiscoveryJob
 from chess_crawl.providers.registry import ProviderSession
 from chess_crawl.storage.db import Connection
 
@@ -34,13 +34,13 @@ def execute_bounded_acquisition(
     if stop_requested is not None and stop_requested():
         return CollectionResult(False, 0, (), "Acquisition stopped; checkpoint retained")
     remaining = discovery.remaining_game_budget(
-        conn, crawl_run_id=job.crawl_run_id, provider=job.provider, params=params,
+        conn, crawl_run_id=job.crawl_run_id, provider=source_provider(job), params=params,
     )
     if remaining == 0 or params.get("bounded_capture_complete"):
         return CollectionResult(True, 0, (), "bounded selection complete")
     options = dict(config=config, transport=transport, sleeper=sleeper,
                    session=session, job_id=job.id, crawl_run_id=job.crawl_run_id)
-    if job.provider == "chess.com":
+    if source_provider(job) == "chess.com":
         since, until = params.get("since"), params.get("until")
         if type(since) is not int or type(until) is not int:
             raise ValueError("Chess.com jobs require since/until")
@@ -51,7 +51,7 @@ def execute_bounded_acquisition(
         year, month = months[index]
         result = fetch_chesscom_month(conn, job.target, year, month, max_games=remaining, **options)
         state.checkpoint_job(conn, job.id, params, cursor_index=index + 1, status_code=result.status_code)
-    elif job.provider == "lichess":
+    elif source_provider(job) == "lichess":
         limit = int(params.get("limit") or remaining or params.get("max_games") or 0)
         if limit <= 0:
             raise ValueError("Lichess jobs require a positive limit")
@@ -63,7 +63,7 @@ def execute_bounded_acquisition(
         if result.status_code in {200, 304}:
             state.update_job_params(conn, job.id, {**params, "bounded_capture_complete": True})
     else:
-        raise ValueError(f"unsupported collection provider: {job.provider}")
+        raise ValueError(f"unsupported collection provider: {source_provider(job)}")
     return CollectionResult(
         False, 1 if result.status_code in {200, 304} else 0, result.normalized_ids,
         result.message, result.status_code, result.retry_after,
