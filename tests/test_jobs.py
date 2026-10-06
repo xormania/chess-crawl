@@ -9,6 +9,7 @@ import pytest
 from support import seed_game
 from chess_crawl.ingest import IngestResult
 import chess_crawl.jobs.runner as runner_module
+import chess_crawl.jobs.acquisition as acquisition_module
 from chess_crawl.jobs.models import DiscoveryJob, JobKind, JobState
 from chess_crawl.jobs.discovery import (
     CrawlBounds,
@@ -288,7 +289,7 @@ def test_runner_fetch_user_games_chesscom_advances_month_cursor(
         calls.append((username, year, month))
         return IngestResult("chess.com", "monthly_archive", 200, 10 + month, (month,), "ok")
 
-    monkeypatch.setattr(runner_module, "fetch_chesscom_month", fake_month)
+    monkeypatch.setattr(acquisition_module, "fetch_chesscom_month", fake_month)
     job_id = state.enqueue_job(
         conn,
         provider="chess.com",
@@ -300,10 +301,16 @@ def test_runner_fetch_user_games_chesscom_advances_month_cursor(
     result = JobRunner(conn).run(max_jobs=1)
     job = state.get_job(conn, job_id)
 
-    assert result.done == 1
+    assert result.claimed == 1 and result.done == 0
+    assert calls == [("SameName", 2024, 1)]
+    assert job is not None and job.state == "pending"
+    assert state.load_params(job.params_json)["cursor_index"] == 1
+    assert JobRunner(conn).run(max_jobs=1).claimed == 1
     assert calls == [("SameName", 2024, 1), ("SameName", 2024, 2)]
-    assert job is not None
-    assert state.load_params(job.params_json)["cursor_index"] == 2
+    assert JobRunner(conn).run(max_jobs=1).done == 1
+    completed = state.get_job(conn, job_id)
+    assert completed is not None
+    assert state.load_params(completed.params_json)["cursor_index"] == 2
 
 
 def test_runner_resume_retries_failed_month_before_advancing_checkpoint(
@@ -318,7 +325,7 @@ def test_runner_resume_retries_failed_month_before_advancing_checkpoint(
         calls.append((year, month))
         return IngestResult("chess.com", "monthly_archive", next(statuses), None, (), "fixture")
 
-    monkeypatch.setattr(runner_module, "fetch_chesscom_month", fake_month)
+    monkeypatch.setattr(acquisition_module, "fetch_chesscom_month", fake_month)
     job_id = state.enqueue_job(
         conn,
         provider="chess.com",
@@ -328,6 +335,7 @@ def test_runner_resume_retries_failed_month_before_advancing_checkpoint(
     ).job_id
     now = [100.0]
     runner = JobRunner(conn, clock=lambda: now[0])
+    assert runner.run(max_jobs=1).claimed == 1
     result = runner.run(max_jobs=1)
     blocked = state.get_job(conn, job_id)
 
@@ -339,8 +347,9 @@ def test_runner_resume_retries_failed_month_before_advancing_checkpoint(
     assert runner.run(max_jobs=1, unblock=True).claimed == 0
     now[0] = blocked.next_attempt_at
     result = runner.run(max_jobs=1, unblock=True)
+    assert result.claimed == 1 and result.done == 0
+    assert runner.run(max_jobs=1).done == 1
     completed = state.get_job(conn, job_id)
-    assert result.done == 1
     assert completed is not None
     assert completed.state == "done"
     assert state.load_params(completed.params_json)["cursor_index"] == 2

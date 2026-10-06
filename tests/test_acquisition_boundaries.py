@@ -42,7 +42,7 @@ def test_last_supported_day_is_acquired_and_preserved(initialized_conn, fixtures
         initialized_conn, config=Config(chesscom_delay_s=0, lichess_delay_s=0, max_retries=0),
         transport=httpx.MockTransport(handler),
     ).run(crawl_run_id=submission["run_id"])
-    assert result.done == 2 and result.errors == 0
+    assert result.done == 3 and result.errors == 0
     assert len(requested) == 2
     raw_id = require_row(initialized_conn.execute(
         "SELECT id FROM raw_payloads WHERE endpoint_type IN ('monthly_archive', 'user_games_stream')"

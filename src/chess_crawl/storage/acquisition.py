@@ -15,6 +15,18 @@ def run_game_ids(conn: Connection, crawl_run_id: int) -> set[int]:
     }
 
 
+def work_budget_game_count(conn: Connection, budget_id: int) -> int:
+    row = conn.execute("SELECT games FROM work_budgets WHERE id=%s", (budget_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"Work budget not found: {budget_id}")
+    return int(row[0])
+
+
+def work_budget_has_game(conn: Connection, budget_id: int, game_key: str) -> bool:
+    return conn.execute("SELECT 1 FROM budget_game_items WHERE budget_id=%s AND game_key=%s",
+                        (budget_id, game_key)).fetchone() is not None
+
+
 def run_has_game(conn: Connection, crawl_run_id: int, game_id: int) -> bool:
     return conn.execute("SELECT 1 FROM run_games WHERE crawl_run_id=%s AND game_id=%s", (crawl_run_id, game_id)).fetchone() is not None
 

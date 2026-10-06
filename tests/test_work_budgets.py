@@ -296,10 +296,12 @@ def test_bounded_partial_game_budget_resumes_original_response_without_http(init
     run_id, job_id, _ = _run(initialized_conn, "alpha", policy, kind="fetch_user_games", target="target", params=params)
     runner = JobRunner(initialized_conn, config=Config(lichess_delay_s=0,max_retries=0),
                        transport=httpx.MockTransport(transport), clock=lambda: NOW)
-    assert runner.run(max_jobs=1).blocked == 1
+    assert runner.run(max_jobs=1).claimed == 1  # Capture only.
+    assert runner.run(max_jobs=1).blocked == 1  # Processing preserves its per-game checkpoint.
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM run_games WHERE crawl_run_id=%s", (run_id,)))[0] == 1
     resume_run_budget(initialized_conn, run_id, "alpha", replace(policy, job_max_games=3))
     assert runner.run(max_jobs=1).done == 1
+    assert runner.run(max_jobs=1).done == 1  # Acquisition completes without another request.
     assert calls == [3]  # Remaining run allowance is now 2, but source remains the original max=3 response.
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM fetch_logs WHERE job_id=%s", (job_id,)))[0] == 1
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM run_games WHERE crawl_run_id=%s", (run_id,)))[0] == 2
@@ -454,12 +456,15 @@ def test_atomic_graph_fanout_rejection_keeps_games_and_resumes_without_fetch(ini
     run_id, job_id, _ = _run(initialized_conn, "alpha", policy, kind="crawl_opponents", target="target", params=params)
     runner = JobRunner(initialized_conn, config=Config(lichess_delay_s=0,max_retries=0),
                        transport=httpx.MockTransport(provider), clock=lambda: NOW)
-    assert runner.run(max_jobs=1).blocked == 1
+    assert runner.run(max_jobs=1).claimed == 1  # Capture.
+    assert runner.run(max_jobs=1).done == 1  # Normalize.
+    assert runner.run(max_jobs=1).done == 1  # Complete acquisition and enqueue expansion.
+    assert runner.run(max_jobs=1).blocked == 1  # Fanout is atomic processing.
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM run_games WHERE crawl_run_id=%s", (run_id,)))[0] == 2
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM discovery_edges WHERE crawl_run_id=%s", (run_id,)))[0] == 0
-    assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM discovery_jobs WHERE crawl_run_id=%s", (run_id,)))[0] == 1
+    assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM discovery_jobs WHERE crawl_run_id=%s", (run_id,)))[0] == 3
     resume_run_budget(initialized_conn, run_id, "alpha", replace(policy, workspace_max_queued_jobs=3))
     assert runner.run(max_jobs=1).done == 1
     assert calls == [1]
     assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM discovery_edges WHERE crawl_run_id=%s", (run_id,)))[0] == 2
-    assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM discovery_jobs WHERE parent_job_id=%s", (job_id,)))[0] == 2
+    assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM discovery_jobs WHERE parent_job_id=%s AND kind='crawl_opponents'", (job_id,)))[0] == 2

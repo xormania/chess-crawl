@@ -20,6 +20,29 @@ that separate result. Collection settings are recorded in the original job;
 checkpoints cannot be reused with different providers, players, or selection
 filters. Capacity settings may be increased while resuming.
 
+## Bounded collection
+
+Bounded imports and opponent crawls preserve complete responses and defer game
+interpretation to processing workers. A Chess.com acquisition claim captures
+one month, then yields its provider permit. A Lichess bounded selection captures
+one stream with its original requested limit. After normalization commits, the
+parent's next claim recomputes the shared remaining allowance, captures another
+month if needed, or completes. Concurrent processing cannot exceed the persisted
+run/game cap. Standalone bounded jobs also count games already processed under
+their shared work budget across monthly source units.
+
+A captured occurrence has one normalization job per parser version even if its parent crashes
+before advancing its cursor. Retry reuses that occurrence's original source and
+fetch observation, including when normalization already completed. A failed
+processing child stops further acquisition; budget-blocked children retain the
+parent's checkpoint for explicit resume. A source selection may be complete
+while the full raw payload remains partially normalized because the requested
+cap or date window excluded other games.
+
+Opponent-frontier expansion is an independent processing job. It uses retained
+run games after acquisition completes and can progress during provider cooldowns.
+Its discovery job/user limits are admitted atomically across processing workers.
+
 ## Chess.com
 
 The collector fetches the archives index once per job, inventories its monthly

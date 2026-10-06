@@ -18,6 +18,7 @@ from chess_crawl.storage.db import (
     acquire_lock_key, release_lock_key, owns_lock_key,
 )
 from chess_crawl.storage.discovery import discovery_edge_count
+from chess_crawl.storage.job_admission import PROCESSING_READY_SQL, RUN_ALLOWS_WORK_SQL, claim_admission
 
 
 LIVE_STATES = ("pending", "in_progress", "blocked")
@@ -25,13 +26,7 @@ TERMINAL_STATES = ("done", "error", "skipped")
 WORKER_HISTORY_SECONDS = 86400
 WORKER_SNAPSHOT_LIMIT = 128
 WORKER_PRUNE_LIMIT = 256
-_RUN_ALLOWS_WORK = """
-    NOT EXISTS (
-        SELECT 1 FROM crawl_runs
-         WHERE crawl_runs.id = discovery_jobs.crawl_run_id
-           AND crawl_runs.status = 'cancelled'
-    )
-"""
+_RUN_ALLOWS_WORK = RUN_ALLOWS_WORK_SQL
 
 
 def canonical_params(params: Mapping[str, Any] | None) -> str:
@@ -80,6 +75,7 @@ def enqueue_job(
     priority: int = 100,
     now: int | None = None,
     dedup_key: str | None = None,
+    reuse_terminal: bool = False,
 ) -> EnqueueResult:
     _validate_schedulable_job(provider=provider, kind=kind)
     timestamp = int(time.time()) if now is None else now
@@ -95,10 +91,10 @@ def enqueue_job(
     existing = conn.execute(
         """
         SELECT id FROM discovery_jobs
-         WHERE dedup_key = %s AND state IN ('pending','in_progress','blocked')
+         WHERE dedup_key = %s AND (%s OR state IN ('pending','in_progress','blocked'))
          ORDER BY id LIMIT 1
         """,
-        (dedup,),
+        (dedup, reuse_terminal),
     ).fetchone()
     if existing is not None:
         return EnqueueResult(job_id=int(existing["id"]), inserted=False)
@@ -142,6 +138,84 @@ def enqueue_job(
     return EnqueueResult(job_id=int(row["id"]), inserted=True)
 
 
+
+def enqueue_payload_normalization(
+    conn: Connection, *, provider: str, raw_payload_id: int, fetch_log_id: int | None,
+    max_games: int | None, parent_job_id: int | None, crawl_run_id: int | None,
+    parser_version: str,
+) -> EnqueueResult:
+    """One processing job per captured occurrence/parser, including parent crash replay."""
+    params = {"raw_payload_id": raw_payload_id, "fetch_log_id": fetch_log_id,
+              "max_games": max_games, "parser_version": parser_version}
+    dedup = make_dedup_key(
+        provider=provider, kind="normalize_payload", target=str(raw_payload_id),
+        params={"fetch_log_id": fetch_log_id, "parent_job_id": parent_job_id, "parser_version": parser_version},
+        crawl_run_id=crawl_run_id,
+    )
+    return enqueue_job(
+        conn, provider=provider, kind="normalize_payload", target=str(raw_payload_id), params=params,
+        parent_job_id=parent_job_id, crawl_run_id=crawl_run_id, priority=20,
+        dedup_key=dedup, reuse_terminal=True,
+    )
+
+
+def enqueue_opponent_expansion(
+    conn: Connection, parent: DiscoveryJob, *, depth: int | None = None,
+) -> EnqueueResult:
+    """A new shallower frontier reuses capture and has its own durable identity."""
+    if parent.id is None or parent.crawl_run_id is None or parent.kind != "crawl_opponents":
+        raise ValueError("Opponent expansion requires a persisted acquisition parent")
+    effective = known_crawl_depth(conn, crawl_run_id=parent.crawl_run_id,
+                                 provider=parent.provider, username=parent.target)
+    depth = min(parent.depth if depth is None else depth, effective if effective is not None else parent.depth)
+    return enqueue_job(
+        conn, provider=parent.provider, kind="expand_opponents", target=str(parent.id),
+        params={"discovery_depth": depth}, crawl_run_id=parent.crawl_run_id,
+        parent_job_id=parent.id, depth=depth, priority=20, reuse_terminal=True,
+    )
+
+
+@atomic
+def promote_crawl_depth(
+    conn: Connection, *, crawl_run_id: int, provider: str, username: str, depth: int,
+) -> None:
+    """Promote existing work without refetching or writing another executor's row."""
+    operation_lock(conn, "run-discovery-budget", crawl_run_id)
+    parents = conn.execute(
+        """SELECT * FROM discovery_jobs WHERE crawl_run_id=%s AND provider=%s
+             AND kind='crawl_opponents' AND lower(target)=lower(%s) ORDER BY id""",
+        (crawl_run_id, provider, username),
+    ).fetchall()
+    # An active executor takes a shared row lock at mutation boundaries. Updating
+    # its row while holding the discovery lock could deadlock that executor.
+    # The processing child persists its promoted depth until its owner finishes.
+    conn.execute(
+        """UPDATE discovery_jobs SET depth=LEAST(depth,%s),priority=LEAST(priority,%s)
+             WHERE crawl_run_id=%s AND provider=%s AND kind='crawl_opponents'
+               AND lower(target)=lower(%s) AND state<>'in_progress' AND depth>%s""",
+        (depth, 10 + depth, crawl_run_id, provider, username, depth),
+    )
+    for row in parents:
+        if row["state"] not in {"error", "skipped"}:
+            enqueue_opponent_expansion(conn, row_to_job(row), depth=depth)
+
+
+def processing_failure(conn: Connection, parent_job_id: int) -> str | None:
+    """A failed source must not be silently skipped by the next acquisition unit."""
+    row = conn.execute(
+        """SELECT id,reason FROM discovery_jobs WHERE parent_job_id=%s AND kind='normalize_payload'
+             AND state IN ('error','skipped') ORDER BY id LIMIT 1""", (parent_job_id,),
+    ).fetchone()
+    return f"Processing job #{row['id']} failed: {row['reason']}" if row is not None else None
+
+
+def acquisition_job_count(conn: Connection, crawl_run_id: int) -> int:
+    """Discovery's max_jobs bounds acquisition; internal processing is separately admitted."""
+    return int(require_row(conn.execute(
+        "SELECT COUNT(*) FROM discovery_jobs WHERE crawl_run_id=%s AND NOT kind=ANY(%s)",
+        (crawl_run_id, list(PROCESSING_JOB_KINDS)),
+    ))[0])
+
 def _validate_schedulable_job(*, provider: str, kind: str) -> None:
     if kind not in JOB_KINDS:
         raise ValueError(f"unsupported job kind: {kind}")
@@ -168,32 +242,26 @@ def claim_next_job(
     # This short gate makes active limits and workspace turns race-safe.
     operation_lock(conn, "workspace-scheduler", "claim")
     processing = PROCESSING_JOB_KINDS
+    admission_sql, admission_parameters = claim_admission(
+        now=timestamp, workspace_max_active_jobs=policy.workspace_max_active_jobs,
+    )
     excluded_providers: list[str] = []
     while True:
         exclusions_before = len(excluded_providers)
         candidates = conn.execute(
             f"""SELECT id,provider,kind,workspace_id FROM discovery_jobs
-                 WHERE (state='pending' OR (state='blocked' AND next_attempt_at IS NOT NULL))
-                   AND (next_attempt_at IS NULL OR next_attempt_at<=%s)
+                 WHERE {admission_sql}
                    AND (%s::bigint IS NULL OR crawl_run_id=%s)
                    AND (%s::bigint IS NULL OR id=%s)
                    AND (%s='all' OR (%s='processing' AND kind=ANY(%s))
                         OR (%s='acquisition' AND NOT kind=ANY(%s)))
-                   AND (kind=ANY(%s) OR NOT EXISTS(SELECT 1 FROM provider_cooldowns p
-                           WHERE p.provider=discovery_jobs.provider AND p.not_before>%s))
                    AND (kind=ANY(%s) OR NOT provider=ANY(%s))
-                   AND (SELECT COUNT(*) FROM discovery_jobs active
-                         WHERE active.workspace_id=discovery_jobs.workspace_id AND active.state='in_progress')
-                       < COALESCE((SELECT (p.policy->>'workspace_max_active_jobs')::bigint
-                           FROM workspace_budget_policies p WHERE p.workspace_id=discovery_jobs.workspace_id),%s)
-                   AND {_RUN_ALLOWS_WORK}
                  ORDER BY COALESCE((SELECT t.turn FROM workspace_claim_turns t
                      WHERE t.workspace_id=discovery_jobs.workspace_id AND t.stage=%s),0),
                      priority,depth,enqueued_at NULLS FIRST,id
                  LIMIT 100 FOR UPDATE SKIP LOCKED""",  # nosec B608 # Fixed cancellation SQL only.
-            (timestamp, crawl_run_id, crawl_run_id, None if respect_fairness else job_id, None if respect_fairness else job_id,
-             stage, stage, list(processing), stage, list(processing), list(processing), timestamp, list(processing), excluded_providers,
-             policy.workspace_max_active_jobs, stage),
+            (*admission_parameters, crawl_run_id, crawl_run_id, None if respect_fairness else job_id, None if respect_fairness else job_id,
+             stage, stage, list(processing), stage, list(processing), list(processing), excluded_providers, stage),
         ).fetchall()
         if not candidates:
             return None
@@ -495,7 +563,11 @@ def refresh_run_status(conn: Connection, crawl_run_id: int) -> None:
     if run is None or run["status"] == "cancelled":
         return
     counts = {row["state"]: int(row["count"]) for row in job_state_counts(conn, crawl_run_id=crawl_run_id)}
-    if counts.get("pending", 0) or counts.get("in_progress", 0):
+    pending_ready = counts.get("pending", 0) and require_row(conn.execute(
+        f"SELECT EXISTS(SELECT 1 FROM discovery_jobs WHERE crawl_run_id=%s AND state='pending' AND {PROCESSING_READY_SQL})",  # nosec B608 # Shared fixed dependency predicate.
+        (crawl_run_id,),
+    ))[0]
+    if pending_ready or counts.get("in_progress", 0):
         status = "running"
     elif counts.get("blocked", 0):
         status = "paused"
@@ -537,7 +609,7 @@ def finish_attempt(
     """Finish an attempt and atomically publish its run's current snapshot."""
     policy = settings or WorkerSettings()
     timestamp = time.time() if now is None else now
-    row = conn.execute("SELECT crawl_run_id, retry_count, provider FROM discovery_jobs WHERE id = %s", (job_id,)).fetchone()
+    row = conn.execute("SELECT crawl_run_id, retry_count, provider, kind FROM discovery_jobs WHERE id = %s", (job_id,)).fetchone()
     if row is None:
         raise KeyError(f"Job not found: {job_id}")
     result = outcome
@@ -547,7 +619,8 @@ def finish_attempt(
         # Persist provider-wide backoff even when this job exhausts its retries.
         # Another job or a restarted executor must not evade the same deadline.
         delay = max(delay, minimum_delay, retry_after or 0)
-        defer_provider(conn, row["provider"], not_before=timestamp + delay, reason=reason, now=timestamp)
+        if row["kind"] not in PROCESSING_JOB_KINDS:
+            defer_provider(conn, row["provider"], not_before=timestamp + delay, reason=reason, now=timestamp)
         if retries < policy.job_max_retries:
             conn.execute(
                 """UPDATE discovery_jobs SET state = 'blocked', done_at = NULL,
@@ -561,6 +634,14 @@ def finish_attempt(
             mark_job(conn, job_id, result, reason=f"Retry limit reached: {reason}", now=int(timestamp))
     else:
         mark_job(conn, job_id, result, reason=reason, now=int(timestamp))
+    if row["kind"] == "crawl_opponents" and row["crawl_run_id"] is not None:
+        parent = get_job(conn, job_id)
+        if parent is not None:
+            depth = known_crawl_depth(conn, crawl_run_id=int(row["crawl_run_id"]),
+                                      provider=parent.provider, username=parent.target)
+            if depth is not None:
+                conn.execute("UPDATE discovery_jobs SET depth=LEAST(depth,%s),priority=LEAST(priority,%s) WHERE id=%s",
+                             (depth, 10 + depth, job_id))
     if row["crawl_run_id"] is not None:
         refresh_run_status(conn, int(row["crawl_run_id"]))
     return result
@@ -790,12 +871,15 @@ def known_crawl_depth(
 ) -> int | None:
     row = conn.execute(
         """
-        SELECT MIN(depth) AS depth
-          FROM discovery_jobs
-         WHERE crawl_run_id = %s
-           AND provider = %s
-           AND kind = 'crawl_opponents'
-           AND lower(target) = lower(%s)
+        SELECT MIN(LEAST(parent.depth, COALESCE((
+                   SELECT MIN(child.depth) FROM discovery_jobs child
+                    WHERE child.parent_job_id=parent.id AND child.kind='expand_opponents'
+                 ),parent.depth))) AS depth
+          FROM discovery_jobs parent
+         WHERE parent.crawl_run_id = %s
+           AND parent.provider = %s
+           AND parent.kind = 'crawl_opponents'
+           AND lower(parent.target) = lower(%s)
         """,
         (crawl_run_id, provider, username),
     ).fetchone()

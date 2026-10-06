@@ -94,7 +94,7 @@ def record_discovery_edges(
 ) -> int:
     now = int(time.time())
     inserted_or_updated = 0
-    for edge in edges:
+    for edge in sorted(edges, key=lambda edge: edge.opponent_user_id):
         row = conn.execute(
             """
             INSERT INTO discovery_edges(

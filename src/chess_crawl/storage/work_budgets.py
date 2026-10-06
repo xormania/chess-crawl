@@ -303,7 +303,8 @@ def settle_request(conn: Connection, reservation_id: int, consumed_bytes: int) -
 @atomic
 def reserve_normalization(
     conn: Connection, budget_id: int, *, game_key: str | None = None, now: int | None = None,
-) -> None:
+) -> bool:
+    """Bill interpretation and return whether this budget acquired a new game."""
     timestamp = int(time.time()) if now is None else now
     budget, policy, usage, workspace_policy = _locked_budget(conn, budget_id, timestamp)
     _remaining(budget, policy, usage, workspace_policy, "normalization_units")
@@ -322,6 +323,7 @@ def reserve_normalization(
         """UPDATE workspace_budget_periods SET normalization_units=normalization_units+1,games=games+%s
              WHERE workspace_id=%s AND period_start=%s""", (game_units, budget["workspace_id"], usage["period_start"]),
     )
+    return game_units == 1
 
 
 @atomic

@@ -5,6 +5,16 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ## Unreleased
 
+### Fixed
+
+- Preserve shallower opponent rediscovery across pending, active, and completed
+  acquisitions without refetching players or consuming another discovery slot.
+  Depth-specific local expansion reuses retained evidence after a deeper frontier
+  has completed, and active ownership remains intact. Standalone multi-month
+  collection counts unique budget games instead of duplicate encounters, while
+  still refreshing captured duplicate evidence. Queued normalization rejects an
+  unavailable endpoint parser pin before charging processing work.
+
 ### Security
 
 - Runtime database roles can append workspace policy history but cannot rewrite
@@ -34,6 +44,14 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   deployment roles offline and reports effective settings with credentials
   redacted. Existing environment names and programmatic settings remain supported;
   optional files use `CHESS_CRAWL_CONFIG_FILE`. See [configuration](docs/configuration.md).
+- Bounded imports, single-game collection, and opponent crawls now capture game
+  sources independently of interpretation. Monthly acquisition yields between
+  source units and waits for committed processing before extending its exact
+  game allowance. Processing-only opponent expansion preserves frontier limits
+  across replicas; captured-occurrence deduplication and per-game shutdown/cancel
+  checkpoints preserve recovery without duplicate normalization or refetches.
+  Apply migration `0018` after draining older workers; see
+  [execution](docs/execution.md#local-execution-and-stages).
 
 - A bounded, cursor-based operational transfer for referenced local/S3 archive
   objects. It verifies and copies exact compressed evidence before atomically
