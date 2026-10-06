@@ -34,7 +34,8 @@ def render_compose(
     certificate.write_text("Public certificate fixture for Compose configuration only\n")
     certificate.chmod(0o444)
 
-    def render(*, external: bool = False, url: bool = True, ca: bool = True) -> subprocess.CompletedProcess[str]:
+    def render(*, external: bool = False, url: bool = True, ca: bool = True,
+               polling: bool = False) -> subprocess.CompletedProcess[str]:
         environment = dict(os.environ)
         if external:
             if url:
@@ -44,6 +45,8 @@ def render_compose(
         arguments = [docker, "compose", "--env-file", os.devnull, "--file", str(ROOT / "compose.yaml")]
         if external:
             arguments.extend(("--file", str(ROOT / "compose.external.yaml")))
+        if polling:
+            arguments.extend(("--file", str(ROOT / "compose.polling.yaml")))
         return subprocess.run(
             [*arguments, "config", "--format", "json"], cwd=ROOT,
             env=environment, text=True, capture_output=True, timeout=30,
@@ -256,3 +259,68 @@ def test_external_compose_requires_explicit_target_and_ca_without_bundled_fallba
     result = render_compose(external=True, url=url, ca=ca)
     assert result.returncode != 0
     assert missing in result.stderr
+
+
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize(("configured", "enabled"), [(None, True), ("off", False), ("yes", True)])
+def test_compose_passes_event_delivery_setting_to_every_database_client(
+    render_compose: Callable[..., subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch,
+    external: bool, configured: str | None, enabled: bool,
+) -> None:
+    from chess_crawl.events.settings import EventSettings
+    if configured is not None:
+        monkeypatch.setenv("CHESS_CRAWL_EVENTS_ENABLED", configured)
+    services = parsed(render_compose(external=external))["services"]
+    monkeypatch.delenv("CHESS_CRAWL_EVENTS_ENABLED", raising=False)
+    for role in PYTHON_SERVICES:
+        value = services[role]["environment"]["CHESS_CRAWL_EVENTS_ENABLED"]
+        assert value == (configured or "true")
+        monkeypatch.setenv("CHESS_CRAWL_EVENTS_ENABLED", value)
+        assert EventSettings.from_env().enabled is enabled
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_polling_overlay_disables_writers_and_omits_the_streaming_profile(
+    render_compose: Callable[..., subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch,
+    external: bool,
+) -> None:
+    from chess_crawl.events.settings import EventSettings
+    # The selected overlay owns polling mode even if the host enables streaming.
+    monkeypatch.setenv("CHESS_CRAWL_EVENTS_ENABLED", "true")
+    services = parsed(render_compose(external=external, polling=True))["services"]
+    assert "events" not in services and "mercure" not in services
+    monkeypatch.delenv("CHESS_CRAWL_EVENTS_ENABLED")
+    for role in ("api", "worker"):
+        environment = services[role]["environment"]
+        monkeypatch.setenv("CHESS_CRAWL_EVENTS_ENABLED", environment["CHESS_CRAWL_EVENTS_ENABLED"])
+        assert EventSettings.from_env().enabled is False
+        assert services[role]["depends_on"]["init"]["condition"] == "service_completed_successfully"
+        assert services[role]["depends_on"]["archive-init"]["condition"] == "service_completed_successfully"
+        assert "events" not in services[role]["depends_on"]
+        assert "mercure" not in services[role]["depends_on"]
+        assert environment["CHESS_CRAWL_DATABASE_TRANSPORT"] == ("verified" if external else "local")
+    assert ("postgres" in services) is (not external)
+
+
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("custom", [False, True])
+def test_compose_publisher_retention_uses_the_configured_settings(
+    render_compose: Callable[..., subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch,
+    external: bool, custom: bool,
+) -> None:
+    from chess_crawl.events.settings import EventSettings
+    expected = EventSettings(retention_seconds=0.25, cleanup_batch_size=17) if custom else EventSettings()
+    configured = {
+        "CHESS_CRAWL_EVENTS_RETENTION_SECONDS": str(expected.retention_seconds),
+        "CHESS_CRAWL_EVENTS_CLEANUP_BATCH_SIZE": str(expected.cleanup_batch_size),
+    }
+    if custom:
+        for name, value in configured.items():
+            monkeypatch.setenv(name, value)
+    services = parsed(render_compose(external=external))["services"]
+    for name in configured:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(name, services["events"]["environment"][name])
+        for role in ("api", "worker", "init"):
+            assert name not in services[role]["environment"]
+    assert EventSettings.from_env() == expected

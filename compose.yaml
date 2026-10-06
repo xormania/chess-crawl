@@ -23,6 +23,7 @@ x-database-env: &database-env
   CHESS_CRAWL_DATABASE_TRUSTED_HOST: postgres
   CHESS_CRAWL_ARCHIVE_BACKEND: local
   CHESS_CRAWL_ARCHIVE_DIRECTORY: /var/lib/chess-crawl/archive
+  CHESS_CRAWL_EVENTS_ENABLED: ${CHESS_CRAWL_EVENTS_ENABLED:-true}
 
 x-budget-env: &budget-env
   CHESS_CRAWL_JOB_MAX_GAMES: ${CHESS_CRAWL_JOB_MAX_GAMES:-100000}
@@ -180,6 +181,8 @@ services:
       CHESS_CRAWL_MERCURE_URL: http://mercure/.well-known/mercure
       CHESS_CRAWL_MERCURE_PUBLISHER_JWT_FILE: /run/secrets/mercure_publisher_jwt
       CHESS_CRAWL_MERCURE_TOPIC_PREFIX: ${CHESS_CRAWL_MERCURE_TOPIC_PREFIX:-https://chess-crawl.local}
+      CHESS_CRAWL_EVENTS_RETENTION_SECONDS: ${CHESS_CRAWL_EVENTS_RETENTION_SECONDS:-86400}
+      CHESS_CRAWL_EVENTS_CLEANUP_BATCH_SIZE: ${CHESS_CRAWL_EVENTS_CLEANUP_BATCH_SIZE:-256}
     secrets:
       - postgres_password
       - mercure_publisher_jwt

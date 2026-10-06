@@ -15,12 +15,26 @@ or explicitly discarded. Turning delivery on creates notifications for future
 updates; it does not reconstruct updates made while delivery was off. Consumers
 must refresh current API state when establishing or recovering a subscription.
 
+For Compose, append the polling overlay when disabling delivery. It sets the API
+and worker to `false` and puts the publisher and hub in an inactive profile:
+
+```bash
+docker compose -f compose.yaml -f compose.polling.yaml up --build --detach --wait --wait-timeout 120
+```
+
+For an external database, put `-f compose.external.yaml` before the polling
+overlay. If replacing a running streaming stack, first stop its `events` and
+`mercure` services. Setting only `CHESS_CRAWL_EVENTS_ENABLED=false` in `.env`
+does not omit those services; the disabled publisher cannot start. Use the same
+overlay for subsequent Compose commands and leave `streaming-events` inactive.
+
 The publisher retains delivered notifications for 24 hours by default and
 deletes at most 256 per batch. Configure those limits with
 `CHESS_CRAWL_EVENTS_RETENTION_SECONDS` and
 `CHESS_CRAWL_EVENTS_CLEANUP_BATCH_SIZE`. Undelivered events survive automatic
 cleanup, preserving retry ordering and stable event IDs. Failed delivery still
 does not stop acquisition or processing. Monitor oldest pending-event age.
+Compose forwards `.env` overrides for both retention settings to the publisher.
 
 Trusted operators can prune a bounded batch independently of the publisher:
 

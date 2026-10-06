@@ -58,6 +58,8 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   revisions and work dispatch. Migration `0019` adds the delivery guard and
   retention indexes. The publisher prunes delivered history in bounded batches;
   trusted `prune-events` explicitly expires old pending notifications when chosen.
+  Compose forwards delivery and retention settings; its polling overlay omits
+  the publisher and Mercure hub while preserving API and worker startup.
   See [event delivery](docs/event-delivery.md) for replica settings and recovery.
 
 - A bounded, cursor-based operational transfer for referenced local/S3 archive
