@@ -17,6 +17,12 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- Trusted workspace provisioning, credential issue/rotation/revocation, and
+  versioned managed workspace policy through `chess-crawl-admin workspaces`.
+  Optional database authentication uses hashed opaque credentials and observes
+  revocation across API replicas without restarting. Managed policy controls
+  admission independently of startup defaults while preserving run ceilings,
+  ownership, and consumed usage. See [workspace administration](docs/workspace-administration.md).
 - One shared environment/TOML configuration source with typed domain validation,
   explicit worker CLI precedence, provider pacing/retry settings, and consistent
   worker environment defaults. `chess-crawl-admin config validate/show` checks

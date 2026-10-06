@@ -57,13 +57,12 @@ def inspect_configuration(role: str = "settings") -> dict[str, Any]:
     if role != "settings" or source.get("CHESS_CRAWL_DATABASE_URL") is not None:
         database = validate_database_settings()
     if role == "api":
-        if source.get("CHESS_CRAWL_API_AUTH_MODE", "static") != "static":
-            raise ValueError("Only static API authentication is supported by this deployment")
-        try:
-            from chess_crawl.api.app import create_app
-        except ModuleNotFoundError:
-            raise ValueError("API configuration validation requires the chess-crawl[api] extra") from None
-        create_app(database_url=database)
+        if importlib.util.find_spec("fastapi") is None:
+            raise ValueError("API configuration validation requires the chess-crawl[api] extra")
+        from chess_crawl.api.auth import configured_authenticator
+        if database is None:
+            raise ValueError("The HTTP API requires PostgreSQL connection settings")
+        configured_authenticator(database, None, None, None)
     if role == "events":
         from chess_crawl.events.mercure import MercureSettings
         mercure = MercureSettings.from_env()

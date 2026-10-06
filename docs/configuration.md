@@ -100,6 +100,13 @@ query parameters, or fragments. Provider configuration representations also omit
 Neither command opens network connections, database sessions, or SDK clients.
 Validation may read configured local configuration and secret files.
 
+API validation checks the installed API extra and the shared authentication
+configuration without constructing the HTTP application. It accepts static
+credentials or `CHESS_CRAWL_API_AUTH_MODE=database`; database mode rejects static
+credential settings and does not query issued credentials. Provision credentials
+through [workspace administration](workspace-administration.md) before serving
+authenticated requests.
+
 Use `--role` to add deployment requirements:
 
 | Role | Additional checks |

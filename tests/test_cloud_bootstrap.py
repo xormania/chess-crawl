@@ -41,6 +41,15 @@ def test_runtime_role_is_idempotent_and_has_data_privileges_only(database_url) -
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     with conn.transaction():
                         conn.execute("UPDATE schema_migrations SET applied_at=0")
+                assert require_row(conn.execute("SELECT COUNT(*) FROM workspace_credentials"))[0] == 0
+                for mutation in (
+                    "INSERT INTO workspace_credentials(id,workspace_id,token_digest,created_at) VALUES('forbidden','local',repeat('a',64),1)",
+                    "UPDATE workspace_credentials SET revoked_at=1",
+                    "DELETE FROM workspace_credentials",
+                ):
+                    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                        with conn.transaction():
+                            conn.execute(mutation)
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     with conn.transaction():
                         conn.execute("CREATE ROLE forbidden_role")

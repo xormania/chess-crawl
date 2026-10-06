@@ -72,6 +72,11 @@ def bootstrap_runtime_role(conn: Connection, *, username: str, password: str) ->
         conn.execute(sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}").format(role))
         conn.execute(sql.SQL("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}").format(role))
         conn.execute(sql.SQL("REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM {}").format(role))
+        # Service replicas can read credentials and shared operating policy;
+        # operators own their mutation. The guards also support older schemas.
+        for table in ("workspace_credentials", "provider_operating_policies", "provider_operating_policy_history"):
+            if require_row(conn.execute("SELECT to_regclass(%s) IS NOT NULL", ("public." + table,)))[0]:
+                conn.execute(sql.SQL("REVOKE INSERT, UPDATE, DELETE ON {} FROM {}").format(sql.Identifier(table), role))
 
 
 def main() -> int:
