@@ -108,6 +108,25 @@ poll_interval = 3.0
     assert "provider-secret" not in repr(Config.from_env())
 
 
+@pytest.mark.parametrize("origin", ["file", "environment"])
+def test_file_backed_mercure_credential_reports_its_configured_source(origin, tmp_path, monkeypatch, capsys) -> None:
+    secret = tmp_path / "publisher-jwt"
+    secret.write_text("private-publisher-secret", encoding="utf-8")
+    configure_file(tmp_path, monkeypatch, '''
+database_url = "postgresql://postgres@localhost/chess_crawl"
+mercure_url = "https://hub.example/.well-known/mercure"
+mercure_topic_prefix = "https://archive.example"
+''' + (f'mercure_publisher_jwt_file = "{secret}"\n' if origin == "file" else ""))
+    if origin == "environment":
+        monkeypatch.setenv("CHESS_CRAWL_MERCURE_PUBLISHER_JWT_FILE", str(secret))
+    assert operations.main(["config", "show", "--role", "events"]) == 0
+    output = capsys.readouterr().out
+    assert "private-publisher-secret" not in output
+    result = json.loads(output)
+    assert result["sources"]["mercure_publisher_jwt"] == origin
+    assert result["settings"]["mercure_publisher_jwt"] == "<redacted>"
+
+
 def test_role_validation_checks_database_policy_without_connecting(monkeypatch, capsys) -> None:
     monkeypatch.setenv("CHESS_CRAWL_DATABASE_URL", "postgresql://postgres@external.example/chess_crawl")
     monkeypatch.setenv("CHESS_CRAWL_DATABASE_TRANSPORT", "local")
@@ -123,6 +142,16 @@ def test_stage_queue_configuration_is_checked_before_sdk_or_database_access(monk
     monkeypatch.setenv("CHESS_CRAWL_SQS_QUEUE_URL", "https://sqs.example/general")
     assert operations.main(["config", "validate", "--role", "processing"]) == 2
     assert "stage queue" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("role", ["acquisition", "processing"])
+def test_independent_stage_role_accepts_only_its_own_queue(role, monkeypatch, capsys) -> None:
+    from chess_crawl import configuration
+    monkeypatch.setenv("CHESS_CRAWL_DATABASE_URL", "postgresql://postgres@localhost/chess_crawl")
+    monkeypatch.setenv(f"CHESS_CRAWL_SQS_{role.upper()}_QUEUE_URL", f"https://sqs.example/{role}")
+    monkeypatch.setattr(configuration.importlib.util, "find_spec", lambda name: object())
+    assert operations.main(["config", "validate", "--role", role]) == 0
+    assert json.loads(capsys.readouterr().out)["valid"] is True
 
 
 def test_settings_source_snapshot_is_stable_and_file_changes_are_seen_on_reload(tmp_path, monkeypatch) -> None:

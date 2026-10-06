@@ -72,7 +72,7 @@ def inspect_configuration(role: str = "settings") -> dict[str, Any]:
         raise ValueError("Set CHESS_CRAWL_SQS_QUEUE_URL for the dispatcher")
     acquisition = source.get("CHESS_CRAWL_SQS_ACQUISITION_QUEUE_URL")
     processing = source.get("CHESS_CRAWL_SQS_PROCESSING_QUEUE_URL")
-    if bool(acquisition) != bool(processing):
+    if role not in {"acquisition", "processing"} and bool(acquisition) != bool(processing):
         raise ValueError("Configure both acquisition and processing queues for stage routing")
     if role in {"acquisition", "processing"} and source.get("CHESS_CRAWL_SQS_QUEUE_URL"):
         if not source.get(f"CHESS_CRAWL_SQS_{role.upper()}_QUEUE_URL"):
@@ -84,10 +84,14 @@ def inspect_configuration(role: str = "settings") -> dict[str, Any]:
     )
     if (archive.backend == "s3" or uses_sqs) and importlib.util.find_spec("boto3") is None:
         raise ValueError("S3 or SQS configuration requires the chess-crawl[s3] extra")
+    origins = {key: source.origin("CHESS_CRAWL_" + key.upper()) for key in sorted(values)}
+    jwt_file = "CHESS_CRAWL_MERCURE_PUBLISHER_JWT_FILE"
+    if role == "events" and source.get(jwt_file):
+        origins["mercure_publisher_jwt"] = source.origin(jwt_file)
     return {
         "version": 1, "role": role, "valid": True,
         "settings": {key: redacted(key, values[key]) for key in sorted(values)},
-        "sources": {key: source.origin("CHESS_CRAWL_" + key.upper()) for key in sorted(values)},
+        "sources": origins,
     }
 
 

@@ -91,7 +91,8 @@ retains its declared defaults; environment-aware execution uses
 ## Offline validation and inspection
 
 `config validate` checks setting types, bounds, cross-field relationships,
-archive destinations, and paired stage queues. `config show` runs the same
+archive destinations, and paired stage queues for combined routing. Acquisition
+and processing roles accept their own isolated queue URL. `config show` runs the same
 validation and returns effective values plus their `default`, `file`, or
 `environment` origins. Credentials and the PostgreSQL connection string are
 redacted. Other configured URLs are redacted when they contain credentials,
