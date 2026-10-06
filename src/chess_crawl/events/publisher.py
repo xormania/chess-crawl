@@ -9,9 +9,10 @@ import time
 from collections.abc import Callable, Sequence
 
 from chess_crawl.events.mercure import MercurePublisher, MercureSettings
+from chess_crawl.events.settings import EventSettings
 from chess_crawl.jobs.locking import ExecutorLease, executor_lock
 from chess_crawl.storage.db import Connection, DatabaseError, connection, database_url
-from chess_crawl.storage.events import acknowledge_event, defer_event, next_pending_event
+from chess_crawl.storage.events import acknowledge_event, defer_event, next_pending_event, prune_events
 from chess_crawl.storage.migrations import initialize
 
 
@@ -67,6 +68,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--poll-interval must be finite and positive")
     try:
         target = database_url(args.database_url)
+        events = EventSettings.from_env()
+        if not events.enabled:
+            raise ValueError("Event delivery is disabled by CHESS_CRAWL_EVENTS_ENABLED")
         settings = MercureSettings.from_env()
         # Separate from the crawl executor lock: hub outages cannot stop crawls.
         with connection(target, mode="rw") as conn, executor_lock(conn, purpose="events") as lease:
@@ -74,6 +78,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             with MercurePublisher(settings) as publisher:
                 while True:
                     publish_pending(conn, publisher, lease=lease)
+                    prune_events(conn, delivered_before=max(0.0, time.time()-events.retention_seconds),
+                                 limit=events.cleanup_batch_size)
                     if args.once:
                         return 0
                     time.sleep(args.poll_interval)

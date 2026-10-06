@@ -12,6 +12,7 @@ from typing import Any
 from chess_crawl.application.export_limits import ExportLimits
 from chess_crawl.application.models import Limits
 from chess_crawl.config import Config
+from chess_crawl.events.settings import EventSettings
 from chess_crawl.jobs.budget import BudgetPolicy
 from chess_crawl.jobs.dispatch import DispatchMaintenance
 from chess_crawl.jobs.settings import WorkerSettings
@@ -41,6 +42,8 @@ def inspect_configuration(role: str = "settings") -> dict[str, Any]:
     include(Limits.from_env())
     include(BudgetPolicy.from_env())
     include(ExportLimits.from_env(), prefix="export_")
+    events = EventSettings.from_env()
+    include(events, prefix="events_")
     archive = ArchiveSettings.from_env()
     include(archive, prefix="archive_")
     maintenance = DispatchMaintenance.from_env()
@@ -64,6 +67,8 @@ def inspect_configuration(role: str = "settings") -> dict[str, Any]:
             raise ValueError("The HTTP API requires PostgreSQL connection settings")
         configured_authenticator(database, None, None, None)
     if role == "events":
+        if not events.enabled:
+            raise ValueError("Event delivery is disabled by CHESS_CRAWL_EVENTS_ENABLED")
         from chess_crawl.events.mercure import MercureSettings
         mercure = MercureSettings.from_env()
         include(mercure, prefix="mercure_", aliases={"hub_url": "url"})

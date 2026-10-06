@@ -28,6 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
     relocate = commands.add_parser("relocate", help="Move one resumable batch of inline backup bodies to configured storage")
     budgets = commands.add_parser("budgets", help="Inspect or resume run budgets using trusted operator access")
     budgets.add_argument("arguments", nargs=argparse.REMAINDER)
+    events = commands.add_parser("prune-events", help="Prune notifications with trusted operator access")
+    events.add_argument("arguments", nargs=argparse.REMAINDER)
     prune = commands.add_parser("prune-results", help="Delete one workspace's old analysis results in a bounded batch")
     prune.add_argument("--workspace-id", required=True)
     prune.add_argument("--before", required=True, type=int, help="Exclusive creation-time cutoff, as Unix seconds")
@@ -50,6 +52,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if values and values[0] == "budgets":
         from chess_crawl.jobs.budget import main as budget_main
         return budget_main(values[1:])
+    if values and values[0] == "prune-events":
+        from chess_crawl.events.maintenance import main as events_main
+        return events_main(values[1:])
     args = build_parser().parse_args(values)
     try:
         target = database_url(args.database_url)

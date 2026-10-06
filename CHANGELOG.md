@@ -54,6 +54,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   checkpoints preserve recovery without duplicate normalization or refetches.
   Apply migration `0018` after draining older workers; see
   [execution](docs/execution.md#local-execution-and-stages).
+- Optional event delivery can suppress new notifications while preserving job/run
+  revisions and work dispatch. Migration `0019` adds the delivery guard and
+  retention indexes. The publisher prunes delivered history in bounded batches;
+  trusted `prune-events` explicitly expires old pending notifications when chosen.
+  See [event delivery](docs/event-delivery.md) for replica settings and recovery.
 
 - A bounded, cursor-based operational transfer for referenced local/S3 archive
   objects. It verifies and copies exact compressed evidence before atomically
