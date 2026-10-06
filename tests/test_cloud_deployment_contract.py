@@ -167,8 +167,8 @@ def test_local_archive_shared_volume_gates_workers_and_is_readonly_for_api() -> 
         service = services[name]
         assert service["environment"]["CHESS_CRAWL_ARCHIVE_BACKEND"] == "${CHESS_CRAWL_ARCHIVE_BACKEND:-local}"
         assert service["depends_on"]["archive-init"]["condition"] == "service_completed_successfully"
-    assert services["api"]["volumes"] == ["archive_data:/var/lib/chess-crawl/archive:ro"]
-    assert services["worker"]["volumes"] == ["archive_data:/var/lib/chess-crawl/archive"]
+    assert "archive_data:/var/lib/chess-crawl/archive:ro" in services["api"]["volumes"]
+    assert "archive_data:/var/lib/chess-crawl/archive" in services["worker"]["volumes"]
 
 
 def test_archive_initializer_changes_only_mount_root(tmp_path, monkeypatch) -> None:
@@ -184,6 +184,24 @@ def test_archive_initializer_changes_only_mount_root(tmp_path, monkeypatch) -> N
     assert observed == [(tmp_path, 10001, 10001)]
     assert archived.read_bytes() == b"unchanged evidence"
     assert tmp_path.stat().st_mode & 0o777 == 0o700
+
+
+def test_storage_initializer_accepts_an_artifact_mount_and_rejects_symlinks(tmp_path, monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location("archive_init", ROOT / "docker/archive_init.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    observed: list[Path] = []
+    monkeypatch.setattr(module, "prepare_archive", observed.append)
+    module.main([str(tmp_path / "artifact mount")])
+    module.main([])
+    assert observed == [tmp_path / "artifact mount", module.ARCHIVE_DIRECTORY]
+    # Use a fresh module so its real preparation function is restored.
+    spec.loader.exec_module(module)
+    link = tmp_path / "linked"
+    link.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(ValueError, match="real storage directory"):
+        module.prepare_archive(link)
 
 
 def test_rds_ca_bundle_is_pinned_and_loads_as_trust_roots() -> None:
@@ -212,7 +230,7 @@ def test_stage_tasks_route_hints_and_cannot_consume_each_others_queues() -> None
         assert environment[f"CHESS_CRAWL_SQS_{stage.upper()}_QUEUE_URL"] == {"Ref": f"{stage}Queue"}
         assert "CHESS_CRAWL_SQS_QUEUE_URL" not in environment
         statements = resources[f"{stage}Role"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
-        queue_permissions = [item for item in statements if "sqs:ReceiveMessage" in item["Action"]]
+        queue_permissions = [item for item in statements if "sqs:ReceiveMessage" in item.get("Action", [])]
         assert len(queue_permissions) == 1
         assert queue_permissions[0]["Resource"] == {"Fn::GetAtt": [f"{stage}Queue", "Arn"]}
         assert container["StopTimeout"] == 90
@@ -221,7 +239,8 @@ def test_stage_tasks_route_hints_and_cannot_consume_each_others_queues() -> None
     for stage in ("Acquisition", "Processing"):
         assert environment[f"CHESS_CRAWL_SQS_{stage.upper()}_QUEUE_URL"] == {"Ref": f"{stage}Queue"}
     processing = resources["ProcessingRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
-    assert not any("s3:PutObject" in item["Action"] for item in processing)
+    assert all("s3:PutObject" not in item["Action"] for item in processing
+               if item["Resource"] == {"Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"})
     permissions = resources["DispatcherRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
     assert permissions[0]["Action"] == ["sqs:SendMessage"]
     assert permissions[0]["Resource"] == [{"Fn::GetAtt": [f"{stage}Queue", "Arn"]} for stage in ("Acquisition", "Processing")]
@@ -246,6 +265,61 @@ def test_runtime_roles_share_budget_parameters_but_have_independent_sizes() -> N
     for role in ("Api", "Acquisition", "Processing", "Dispatcher"):
         assert environments[role]["CHESS_CRAWL_EVENTS_ENABLED"] == {"Ref": "EventsEnabled"}
     assert value["Parameters"]["EventsEnabled"]["Default"] == "false"
+
+
+def test_async_artifact_grants_allow_draining_with_admission_off_and_cannot_write_sources() -> None:
+    value = template()
+    assert value["Parameters"]["ArchiveJobsEnabled"]["Default"] == "false"
+    assert "ArchiveJobsEnabled" not in value["Conditions"]
+    for role in ("Api", "Acquisition", "Processing", "Dispatcher"):
+        statements = value["Resources"][f"{role}Role"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
+        # IAM remains available after admission is disabled, so existing jobs and
+        # retained downloads can finish. No runtime condition wraps these grants.
+        assert all("Fn::If" not in statement for statement in statements)
+        objects = [item for item in statements if any(action.startswith("s3:") for action in item["Action"])]
+        artifacts = [item for item in objects if item["Resource"] == {"Fn::Sub": "${ArchiveBucket.Arn}/artifacts/*"}]
+        assert len(artifacts) == int(role in ("Api", "Processing"))
+        if artifacts:
+            assert artifacts[0]["Action"] == (["s3:GetObject"] if role == "Api" else
+                                             ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"])
+        for item in objects:
+            assert item["Resource"] in (
+                {"Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"},
+                {"Fn::Sub": "${ArchiveBucket.Arn}/artifacts/*"},
+            )
+            if role == "Processing" and item["Resource"] == {"Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"}:
+                assert item["Action"] == ["s3:GetObject"]
+
+
+def test_async_artifact_settings_share_runtime_roles_and_validator_bounds() -> None:
+    value = template()
+    parameters = {
+        name: parameter for name, parameter in value["Parameters"].items()
+        if parameter.get("Description", "").startswith(("CHESS_CRAWL_ASYNC_", "CHESS_CRAWL_ARTIFACT_", "CHESS_CRAWL_ARCHIVE_JOBS_"))
+    }
+    assert len(parameters) == 8
+    maximums = {
+        "AsyncMaxWorkingSetMembers": 10000000, "AsyncExportMaxRows": 10000000,
+        "AsyncExportMaxBytes": 4294967296, "AsyncExportPrepareSeconds": 3600,
+        "ArtifactMaxCount": 10000, "ArtifactMaxBytes": 1125899906842624,
+        "ArtifactTtlSeconds": 31536000,
+    }
+    for name, maximum in maximums.items():
+        assert parameters[name]["MinValue"] == 1
+        assert parameters[name]["MaxValue"] == maximum
+    for role in ("Api", "Processing", "Acquisition", "Dispatcher", "Migration"):
+        environment = {item["Name"]: item["Value"] for item in
+                       value["Resources"][f"{role}Task"]["Properties"]["ContainerDefinitions"][0]["Environment"]}
+        for name, parameter in parameters.items():
+            if role in ("Api", "Processing"):
+                assert environment[parameter["Description"]] == {"Ref": name}
+            else:
+                assert parameter["Description"] not in environment
+        if role in ("Api", "Processing"):
+            assert environment["CHESS_CRAWL_ARTIFACT_BACKEND"] == "s3"
+            assert environment["CHESS_CRAWL_ARTIFACT_S3_BUCKET"] == {"Ref": "ArchiveBucket"}
+        else:
+            assert "CHESS_CRAWL_ARTIFACT_BACKEND" not in environment
 
 
 def test_database_auth_uses_provisioned_readiness_credential_without_static_bypass() -> None:

@@ -448,6 +448,64 @@
         "database"
       ],
       "Description": "Static local/bootstrap auth or provisioned and revocable PostgreSQL workspace credentials"
+    },
+    "ArchiveJobsEnabled": {
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": [
+        "true",
+        "false"
+      ],
+      "Description": "CHESS_CRAWL_ARCHIVE_JOBS_ENABLED"
+    },
+    "AsyncMaxWorkingSetMembers": {
+      "Type": "Number",
+      "Default": 1000000,
+      "MinValue": 1,
+      "MaxValue": 10000000,
+      "Description": "CHESS_CRAWL_ASYNC_MAX_WORKING_SET_MEMBERS"
+    },
+    "AsyncExportMaxRows": {
+      "Type": "Number",
+      "Default": 1000000,
+      "MinValue": 1,
+      "MaxValue": 10000000,
+      "Description": "CHESS_CRAWL_ASYNC_EXPORT_MAX_ROWS"
+    },
+    "AsyncExportMaxBytes": {
+      "Type": "Number",
+      "Default": 268435456,
+      "MinValue": 1,
+      "MaxValue": 4294967296,
+      "Description": "CHESS_CRAWL_ASYNC_EXPORT_MAX_BYTES"
+    },
+    "AsyncExportPrepareSeconds": {
+      "Type": "Number",
+      "Default": 600,
+      "MinValue": 1,
+      "MaxValue": 3600,
+      "Description": "CHESS_CRAWL_ASYNC_EXPORT_PREPARE_SECONDS"
+    },
+    "ArtifactMaxCount": {
+      "Type": "Number",
+      "Default": 32,
+      "MinValue": 1,
+      "MaxValue": 10000,
+      "Description": "CHESS_CRAWL_ARTIFACT_MAX_COUNT"
+    },
+    "ArtifactMaxBytes": {
+      "Type": "Number",
+      "Default": 1073741824,
+      "MinValue": 1,
+      "MaxValue": 1125899906842624,
+      "Description": "CHESS_CRAWL_ARTIFACT_MAX_BYTES"
+    },
+    "ArtifactTtlSeconds": {
+      "Type": "Number",
+      "Default": 86400,
+      "MinValue": 1,
+      "MaxValue": 31536000,
+      "Description": "CHESS_CRAWL_ARTIFACT_TTL_SECONDS"
     }
   },
   "Conditions": {
@@ -1122,6 +1180,15 @@
                   "Resource": {
                     "Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"
                   }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${ArchiveBucket.Arn}/artifacts/*"
+                  }
                 }
               ]
             }
@@ -1420,6 +1487,64 @@
                 "Name": "CHESS_CRAWL_API_AUTH_MODE",
                 "Value": {
                   "Ref": "ApiAuthMode"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_JOBS_ENABLED",
+                "Value": {
+                  "Ref": "ArchiveJobsEnabled"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_MAX_WORKING_SET_MEMBERS",
+                "Value": {
+                  "Ref": "AsyncMaxWorkingSetMembers"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_MAX_ROWS",
+                "Value": {
+                  "Ref": "AsyncExportMaxRows"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_MAX_BYTES",
+                "Value": {
+                  "Ref": "AsyncExportMaxBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_PREPARE_SECONDS",
+                "Value": {
+                  "Ref": "AsyncExportPrepareSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_MAX_COUNT",
+                "Value": {
+                  "Ref": "ArtifactMaxCount"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_MAX_BYTES",
+                "Value": {
+                  "Ref": "ArtifactMaxBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_TTL_SECONDS",
+                "Value": {
+                  "Ref": "ArtifactTtlSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_BACKEND",
+                "Value": "s3"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_S3_BUCKET",
+                "Value": {
+                  "Ref": "ArchiveBucket"
                 }
               }
             ],
@@ -2093,6 +2218,17 @@
                       "Arn"
                     ]
                   }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${ArchiveBucket.Arn}/artifacts/*"
+                  }
                 }
               ]
             }
@@ -2653,6 +2789,64 @@
                 "Name": "CHESS_CRAWL_SQS_PROCESSING_QUEUE_URL",
                 "Value": {
                   "Ref": "ProcessingQueue"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_JOBS_ENABLED",
+                "Value": {
+                  "Ref": "ArchiveJobsEnabled"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_MAX_WORKING_SET_MEMBERS",
+                "Value": {
+                  "Ref": "AsyncMaxWorkingSetMembers"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_MAX_ROWS",
+                "Value": {
+                  "Ref": "AsyncExportMaxRows"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_MAX_BYTES",
+                "Value": {
+                  "Ref": "AsyncExportMaxBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_PREPARE_SECONDS",
+                "Value": {
+                  "Ref": "AsyncExportPrepareSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_MAX_COUNT",
+                "Value": {
+                  "Ref": "ArtifactMaxCount"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_MAX_BYTES",
+                "Value": {
+                  "Ref": "ArtifactMaxBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_TTL_SECONDS",
+                "Value": {
+                  "Ref": "ArtifactTtlSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_BACKEND",
+                "Value": "s3"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_S3_BUCKET",
+                "Value": {
+                  "Ref": "ArchiveBucket"
                 }
               }
             ],

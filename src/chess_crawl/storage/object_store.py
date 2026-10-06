@@ -99,6 +99,12 @@ class LocalObjectStore:
             raise ValueError("Archive object size mismatch")
         return body
 
+    def delete(self, key: str) -> None:
+        path = self._path(key)
+        if path.is_symlink():
+            raise ValueError("Archive objects must not be symbolic links")
+        path.unlink(missing_ok=True)
+
 
 class S3ObjectStore:
     backend = "s3"
@@ -146,6 +152,10 @@ class S3ObjectStore:
             raise ValueError("Archive object size mismatch")
         return bytes(body)
 
+    def delete(self, key: str) -> None:
+        _validate_key(key)
+        self.client.delete_object(Bucket=self.location, Key=key)
+
 
 @dataclass(frozen=True)
 class ArchiveSettings:
@@ -178,7 +188,7 @@ def configured_store() -> ObjectStore | None:
 
 
 @lru_cache(maxsize=16)
-def store_for_reference(backend: str, location: str) -> ObjectStore:
+def store_for_reference(backend: str, location: str) -> LocalObjectStore | S3ObjectStore:
     if backend == "local":
         return LocalObjectStore(location)
     if backend == "s3":

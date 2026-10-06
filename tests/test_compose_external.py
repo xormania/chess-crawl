@@ -200,7 +200,7 @@ def test_compose_scratch_is_private_and_owned_by_the_runtime_user(
     render_compose: Callable[..., subprocess.CompletedProcess[str]], external: bool,
 ) -> None:
     services = parsed(render_compose(external=external))["services"]
-    for name in (*PYTHON_SERVICES, "archive-init"):
+    for name in (*PYTHON_SERVICES, "archive-init", "artifacts-init"):
         assert services[name]["tmpfs"] == ["/tmp:uid=10001,gid=10001,mode=0700"]
         assert services[name]["read_only"] is True
     for name in PYTHON_SERVICES:
@@ -211,7 +211,7 @@ def test_external_compose_excludes_unused_database_and_preserves_migration_and_h
     render_compose: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
     services = parsed(render_compose(external=True))["services"]
-    assert set(services) == {"archive-init", "init", "api", "worker", "events", "mercure"}
+    assert set(services) == {"archive-init", "artifacts-init", "init", "api", "worker", "events", "mercure"}
     assert services["init"].get("depends_on", {}) == {}
     for name in ("api", "worker", "events"):
         assert services[name]["depends_on"]["init"] == {"condition": "service_completed_successfully", "required": True}
@@ -384,3 +384,67 @@ def test_compose_publisher_retention_uses_the_configured_settings(
             assert name not in services[role]["environment"]
     assert EventSettings.from_env() == expected
 
+
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("scalable", [False, True])
+@pytest.mark.parametrize("polling", [False, True])
+@pytest.mark.parametrize("managed_auth", [False, True])
+@pytest.mark.parametrize("custom", [False, True])
+def test_async_artifacts_keep_role_permissions_through_combined_overlays(
+    render_compose: Callable[..., subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch,
+    external: bool, scalable: bool, polling: bool, managed_auth: bool, custom: bool,
+) -> None:
+    defaults = {
+        "ARCHIVE_JOBS_ENABLED": "false", "ARTIFACT_BACKEND": "local",
+        "ARTIFACT_DIRECTORY": "/var/lib/chess-crawl/artifacts", "ARTIFACT_S3_BUCKET": "",
+        "ASYNC_MAX_WORKING_SET_MEMBERS": "1000000", "ASYNC_EXPORT_MAX_ROWS": "1000000",
+        "ASYNC_EXPORT_MAX_BYTES": "268435456", "ASYNC_EXPORT_PREPARE_SECONDS": "600",
+        "ARTIFACT_MAX_COUNT": "32", "ARTIFACT_MAX_BYTES": "1073741824", "ARTIFACT_TTL_SECONDS": "86400",
+    }
+    overrides = {
+        "ARCHIVE_JOBS_ENABLED": "true", "ARTIFACT_BACKEND": "s3",
+        "ARTIFACT_DIRECTORY": "/var/lib/chess-crawl/artifacts custom", "ARTIFACT_S3_BUCKET": "fixture-artifacts",
+        "ASYNC_MAX_WORKING_SET_MEMBERS": "17", "ASYNC_EXPORT_MAX_ROWS": "19",
+        "ASYNC_EXPORT_MAX_BYTES": "8192", "ASYNC_EXPORT_PREPARE_SECONDS": "7",
+        "ARTIFACT_MAX_COUNT": "3", "ARTIFACT_MAX_BYTES": "32768", "ARTIFACT_TTL_SECONDS": "300",
+    }
+    expected = {f"CHESS_CRAWL_{key}": value for key, value in (overrides if custom else defaults).items()}
+    for key, value in expected.items():
+        if custom:
+            monkeypatch.setenv(key, value)
+        else:
+            monkeypatch.delenv(key, raising=False)
+    services = parsed(render_compose(
+        external=external, scalable=scalable, polling=polling, managed_auth=managed_auth,
+    ))["services"]
+    directory = expected["CHESS_CRAWL_ARTIFACT_DIRECTORY"]
+    writer = "processing" if scalable else "worker"
+    initializer = services["artifacts-init"]
+    assert initializer["command"] == ["python", "/app/docker/archive_init.py", directory]
+    assert initializer["volumes"][0]["target"] == directory
+    assert initializer["user"] == "0:0" and initializer["cap_add"] == ["CHOWN", "FOWNER"]
+    assert initializer["read_only"] is True and initializer.get("depends_on", {}) == {}
+    for role in ("api", writer):
+        service = services[role]
+        assert expected.items() <= service["environment"].items()
+        assert service["depends_on"]["artifacts-init"]["condition"] == "service_completed_successfully"
+        mounts = {mount["target"]: mount for mount in service["volumes"]}
+        assert mounts[directory]["source"] == "artifacts_data"
+        assert mounts[directory].get("read_only", False) is (role == "api")
+        assert mounts["/var/lib/chess-crawl/archive"].get("read_only", False) is (role == "api" or scalable)
+        assert service["environment"]["CHESS_CRAWL_DATABASE_TRANSPORT"] == ("verified" if external else "local")
+        if external:
+            assert any(secret["source"] == "postgres_ca" for secret in service["secrets"])
+    for role in ("init", "events", "acquisition"):
+        if role in services:
+            assert not expected.keys() & services[role]["environment"].keys()
+            assert not any(mount["source"] == "artifacts_data" for mount in services[role].get("volumes", []))
+    assert ("events" in services) is (not polling)
+    assert ("mercure" in services) is (not polling)
+    if managed_auth:
+        assert services["api"]["environment"]["CHESS_CRAWL_API_AUTH_MODE"] == "database"
+        assert services["api"]["environment"]["CHESS_CRAWL_API_TOKEN_FILE"] == ""
+    if scalable:
+        assert "worker" not in services and "ports" not in services["api"]
+        assert services["processing"]["environment"]["CHESS_CRAWL_LICHESS_TOKEN"] == ""
+        assert "artifacts-init" not in services["acquisition"]["depends_on"]

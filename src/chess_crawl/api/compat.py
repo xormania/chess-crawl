@@ -1,9 +1,6 @@
 """Product API coverage for former archive-query and export commands."""
 from __future__ import annotations
 
-import csv
-import io
-import json
 import tempfile
 import time
 from collections.abc import Generator
@@ -12,7 +9,7 @@ from dataclasses import asdict
 from typing import Annotated, Any, Literal, TextIO
 
 import anyio
-from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from starlette.concurrency import run_in_threadpool
@@ -20,7 +17,7 @@ from starlette.types import Receive, Scope, Send
 
 from chess_crawl import application
 from chess_crawl.jobs.budget import BudgetPolicy
-from chess_crawl.api.exports import ExportLimits, ExportSpool, check_export_bounds, export_capacity
+from chess_crawl.api.exports import ExportChunks, ExportLimits, ExportSpool, check_export_bounds, export_capacity
 from chess_crawl.application.services import submit_game_collection, submit_player_refresh
 from chess_crawl.application.validation import (
     validate_game_collection, validate_idempotency_key, validate_page,
@@ -45,8 +42,8 @@ class GameCollectionBody(BaseModel):
 class ArchiveExportResponse(StreamingResponse):
     """Close export storage even when ASGI send/cancellation interrupts it."""
 
-    def __init__(self,chunks:Generator[str,None,None]|ExportSpool,*,media_type:str,headers:dict[str,str],
-                 download_seconds:int = 300) -> None:
+    def __init__(self,chunks:ExportChunks,*,media_type:str,headers:dict[str,str],
+                 download_seconds:float = 300) -> None:
         self.chunks = chunks
         self.download_seconds = download_seconds
         super().__init__(chunks,media_type=media_type,headers=headers)
@@ -202,48 +199,6 @@ def _prepare_export(archive: str, kind: str, provider: str|None, workspace_id: s
 
 def _write_export(archive: str, kind: str, provider: str|None, workspace_id: str, *,
                   spool: TextIO, limits: ExportLimits, deadline: float) -> None:
-    rows_written = bytes_written = 0
-
-    def write(chunk: str, *, record: bool) -> None:
-        nonlocal rows_written,bytes_written
-        rows_written += int(record)
-        bytes_written += len(chunk.encode("utf-8"))
-        check_export_bounds(limits=limits,rows=rows_written,bytes_written=bytes_written,deadline=deadline)
-        spool.write(chunk)
-
-    with connection(archive) as conn,transaction(conn,write=False):
-        remaining_ms = max(1,int((deadline-time.monotonic())*1000))
-        if not api_views.admit_export_snapshot(conn,workspace_id=workspace_id,
-                                              slots=limits.workspace_slots,timeout_ms=remaining_ms):
-            raise HTTPException(status_code=429,detail="This workspace already has the maximum concurrent export preparations",
-                                headers={"Retry-After":"5"})
-        api_views.check_export_schema(conn)
-        check_export_bounds(limits=limits,rows=0,bytes_written=0,deadline=deadline)
-        api_views.set_export_timeout(conn,max(1,int((deadline-time.monotonic())*1000)))
-        rows = queries.iter_games(conn,provider=provider) if kind=="games" else (
-            queries.iter_users(conn,provider=provider) if kind=="users" else
-            api_views.iter_owned_graph(conn,workspace_id=workspace_id,provider=provider)
-        )
-        with closing(rows):
-            if kind!="graph":
-                for row in rows:
-                    write(json.dumps(dict(row),sort_keys=True,separators=(",",":"))+"\n",record=True)
-                return
-            buffer = io.StringIO(newline="")
-            writer = csv.DictWriter(buffer,fieldnames=(
-                "provider","crawl_run_id","from_username","to_username","from_user_id","to_user_id",
-                "via_game_id","game_count","depth","edge_kind",
-            ))
-            writer.writeheader()
-            write(buffer.getvalue(),record=False)
-            for row in rows:
-                buffer.seek(0)
-                buffer.truncate(0)
-                values = dict(row)
-                # Provider-native usernames must not become spreadsheet formulas.
-                for key in ("from_username","to_username"):
-                    value = values[key]
-                    if isinstance(value,str) and value.startswith(("=","+","-","@","\t","\r")):
-                        values[key] = "'"+value
-                writer.writerow(values)
-                write(buffer.getvalue(),record=True)
+    from chess_crawl.application.archive_exports import write_export_snapshot
+    write_export_snapshot(archive, kind, provider, workspace_id, spool=spool, limits=limits,
+                          deadline=deadline, connect=connection, clock=time.monotonic)

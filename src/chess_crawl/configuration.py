@@ -10,6 +10,7 @@ from dataclasses import fields
 from typing import Any
 
 from chess_crawl.application.export_limits import ExportLimits
+from chess_crawl.application.archive_jobs import ArchiveJobSettings
 from chess_crawl.application.models import Limits
 from chess_crawl.config import Config
 from chess_crawl.events.settings import EventSettings
@@ -44,6 +45,8 @@ def inspect_configuration(role: str = "settings") -> dict[str, Any]:
     include(ExportLimits.from_env(), prefix="export_")
     events = EventSettings.from_env()
     include(events, prefix="events_")
+    archive_jobs = ArchiveJobSettings.from_env()
+    include(archive_jobs)
     archive = ArchiveSettings.from_env()
     include(archive, prefix="archive_")
     maintenance = DispatchMaintenance.from_env()
@@ -86,7 +89,7 @@ def inspect_configuration(role: str = "settings") -> dict[str, Any]:
             "CHESS_CRAWL_SQS_QUEUE_URL", "CHESS_CRAWL_SQS_ACQUISITION_QUEUE_URL", "CHESS_CRAWL_SQS_PROCESSING_QUEUE_URL",
         )
     )
-    if (archive.backend == "s3" or uses_sqs) and importlib.util.find_spec("boto3") is None:
+    if (archive.backend == "s3" or archive_jobs.artifact_backend == "s3" or uses_sqs) and importlib.util.find_spec("boto3") is None:
         raise ValueError("S3 or SQS configuration requires the chess-crawl[s3] extra")
     origins = {key: source.origin("CHESS_CRAWL_" + key.upper()) for key in sorted(values)}
     jwt_file = "CHESS_CRAWL_MERCURE_PUBLISHER_JWT_FILE"

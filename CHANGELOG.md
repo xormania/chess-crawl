@@ -7,6 +7,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Fixed
 
+- Offline configuration validation checks the S3 dependency when private
+  artifacts use S3 independently of the source archive backend.
+
 - Preserve shallower opponent rediscovery across pending, active, and completed
   acquisitions without refetching players or consuming another discovery slot.
   Depth-specific local expansion reuses retained evidence after a deeper frontier
@@ -43,6 +46,16 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   ownership, and consumed usage. AWS API tasks can select database authentication
   with a separately provisioned readiness credential. See
   [workspace administration](docs/workspace-administration.md).
+- Optional durable working-set construction and export preparation return small
+  202 responses and run only in processing workers. Migration `0020` adds explicit
+  providerless archive jobs and workspace-owned, immutable export manifests;
+  existing selection/serialization services serve immediate and queued requests.
+  Shared local/S3 artifacts support downloads from any API replica, with bounded
+  chunks, checksums, retention, artifact quotas and download leases. Trusted
+  `prune-artifacts` releases quota after resumable private-object deletion. Existing
+  work budgets, fair scheduling and idempotency remain authoritative; see
+  [queued archive operations](docs/archive-jobs.md).
+
 - One shared environment/TOML configuration source with typed domain validation,
   explicit worker CLI precedence, provider pacing/retry settings, and consistent
   worker environment defaults. `chess-crawl-admin config validate/show` checks
@@ -64,6 +77,11 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   Compose forwards delivery and retention settings; its polling overlay omits
   the publisher and Mercure hub while preserving API and worker startup.
   See [event delivery](docs/event-delivery.md) for replica settings and recovery.
+- Deployment wiring for optional durable archive jobs shares async and artifact
+  ceilings between API and processing. Compose isolates writable artifacts from
+  read-only source evidence; cloud processing can publish and clean up artifact
+  objects under a separate prefix, while API artifact access remains read-only.
+  Admission defaults off. See [deployment](docs/aws-deployment.md).
 - Opt-in Compose overlays separate acquisition and processing workers, route API
   replicas through one DNS-aware proxy, and support polling-only or managed-workspace
   authentication. Managed mode separates readiness credentials from static auth.

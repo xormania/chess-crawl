@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from chess_crawl.jobs import state
-from chess_crawl.jobs.models import DiscoveryJob
+from chess_crawl.jobs.models import source_provider, DiscoveryJob
 from chess_crawl.storage.db import Connection, atomic, operation_lock, transaction
 from chess_crawl.storage.discovery import OpponentEdge, game_count_for_run, opponents_of_user, record_discovery_edges
 from chess_crawl.storage.repository import upsert_provider_user
@@ -151,7 +151,7 @@ def expand_opponent_frontier(conn: Connection, job: DiscoveryJob) -> str:
     if job.id is None or job.crawl_run_id is None:
         raise ValueError("Opponent expansion requires a persisted crawl run")
     params = state.load_params(job.params_json)
-    user_id = ensure_local_user(conn, provider=job.provider, username=job.target)
+    user_id = ensure_local_user(conn, provider=source_provider(job), username=job.target)
     child_params = dict(params)
     child_params.pop("cursor_index", None)
     child_params.pop("bounded_capture_complete", None)
@@ -163,7 +163,7 @@ def expand_opponent_frontier(conn: Connection, job: DiscoveryJob) -> str:
 
     edges = opponents_of_user(
         conn,
-        provider=job.provider,
+        provider=source_provider(job),
         user_id=user_id,
         crawl_run_id=job.crawl_run_id,
         since=_int_or_none(params.get("since")),
@@ -174,14 +174,14 @@ def expand_opponent_frontier(conn: Connection, job: DiscoveryJob) -> str:
         frontier_edges = [
             edge for edge in edges
             if not _known_at_or_before_current_depth(
-                conn, crawl_run_id=job.crawl_run_id, provider=job.provider,
+                conn, crawl_run_id=job.crawl_run_id, provider=source_provider(job),
                 username=edge.opponent_username, current_depth=job.depth,
             )
         ]
         edge_count = record_discovery_edges(
             conn,
             crawl_run_id=job.crawl_run_id,
-            provider=job.provider,
+            provider=source_provider(job),
             from_user_id=user_id,
             depth=next_depth,
             edges=frontier_edges,
@@ -190,7 +190,7 @@ def expand_opponent_frontier(conn: Connection, job: DiscoveryJob) -> str:
             conn,
             crawl_run_id=job.crawl_run_id,
             parent_job_id=job.id,
-            provider=job.provider,
+            provider=source_provider(job),
             params=child_params,
             next_depth=next_depth,
             edges=frontier_edges,
