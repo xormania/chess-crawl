@@ -5,8 +5,6 @@ verify job ownership; read views use repeatable-read snapshots.
 """
 from __future__ import annotations
 
-from chess_crawl.settings import setting
-
 import os
 import hashlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -19,6 +17,8 @@ from typing import Any, Concatenate, Literal, ParamSpec, TypeVar, overload
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.pq import TransactionStatus
+
+from chess_crawl.settings import boolean, setting
 
 DatabaseError = psycopg.Error
 DbTarget = str
@@ -198,6 +198,9 @@ def connect(target: str, *, mode: AccessMode = "rwc") -> Connection:
         kwargs["password"] = password
     conn = Connection.connect(conninfo, **kwargs)
     try:
+        events_enabled = boolean(setting("CHESS_CRAWL_EVENTS_ENABLED", "true"), "CHESS_CRAWL_EVENTS_ENABLED")
+        conn.execute("SELECT set_config('chess_crawl.events_enabled',%s,false)",
+                     ("true" if events_enabled else "false",))
         conn.execute("SET TIME ZONE 'UTC'")
         conn.execute("SET lock_timeout = '5s'")
         if mode == "ro":

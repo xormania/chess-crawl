@@ -266,6 +266,34 @@ def test_configuration_snapshot_mappings_cannot_be_mutated() -> None:
         source.environment["CHESS_CRAWL_CONTACT"] = "second@example.test"  # type: ignore[index]
 
 
+def test_inspection_reports_event_policy_defaults(capsys) -> None:
+    from chess_crawl.events.settings import EventSettings
+    assert operations.main(["config", "show"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["settings"]["events_enabled"] is EventSettings().enabled
+    assert result["settings"]["events_retention_seconds"] == EventSettings().retention_seconds
+    assert result["sources"]["events_cleanup_batch_size"] == "default"
+
+
+@pytest.mark.parametrize("body", [
+    'events_enabled = "invalid-private-secret"\n',
+    'events_retention_seconds = 0\n',
+    'events_cleanup_batch_size = 10001\n',
+])
+def test_offline_inspection_validates_event_policy(body, tmp_path, monkeypatch, capsys) -> None:
+    configure_file(tmp_path, monkeypatch, body)
+    assert operations.main(["config", "validate"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err and "private-secret" not in captured.err
+
+
+def test_disabled_event_role_fails_before_mercure_configuration(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("CHESS_CRAWL_DATABASE_URL", "postgresql://postgres@localhost/chess_crawl")
+    monkeypatch.setenv("CHESS_CRAWL_EVENTS_ENABLED", "false")
+    assert operations.main(["config", "validate", "--role", "events"]) == 2
+    assert "Event delivery is disabled" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("enabled", ["yes", "on", "TRUE", "1"])
 def test_usage_logging_uses_the_same_boolean_contract(enabled, monkeypatch, capsys) -> None:
     from chess_crawl.costs import UsageSample, emit_sample

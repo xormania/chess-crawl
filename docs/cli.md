@@ -57,6 +57,11 @@ operator steps needed before raising a ceiling.
 
 ## Retain analysis results
 
+For notification retention, use trusted `chess-crawl-admin prune-events`;
+see [event delivery](event-delivery.md) for delivered and explicitly discarded
+pending batches. Retention shares the publisher lock and never removes work
+dispatch or source evidence.
+
 Stored calculation results have workspace count and byte ceilings. They are not
 automatically expired. After backing up any results you need, use trusted
 operator database access to remove one workspace's older results:
