@@ -121,9 +121,10 @@ def test_workers_reject_a_cap_that_cannot_preserve_heartbeat_session(database_ur
 
 @pytest.mark.parametrize("role", ["acquisition", "processing"])
 def test_role_validation_accepts_its_isolated_queue_only(role, database_url, monkeypatch, capsys) -> None:
-    from chess_crawl import operations
+    from chess_crawl import configuration, operations
     monkeypatch.setenv("CHESS_CRAWL_DATABASE_URL", database_url)
     monkeypatch.setenv(f"CHESS_CRAWL_SQS_{role.upper()}_QUEUE_URL", f"https://sqs.example/{role}")
+    monkeypatch.setattr(configuration.importlib.util, "find_spec", lambda name: object())
     assert operations.main(["config", "validate", "--role", role]) == 0
     assert '"valid": true' in capsys.readouterr().out
 
