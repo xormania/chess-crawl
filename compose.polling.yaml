@@ -1,5 +1,5 @@
 # Optional polling-only deployment: retain durable job status without collecting
-# an undeliverable Mercure outbox. Can be combined with the external DB overlay.
+# an undeliverable Mercure outbox. Can be combined with the other overlays.
 x-polling-env: &polling-env
   CHESS_CRAWL_EVENTS_ENABLED: "false"
 
@@ -7,6 +7,10 @@ services:
   api:
     environment: *polling-env
   worker:
+    environment: *polling-env
+  acquisition:
+    environment: *polling-env
+  processing:
     environment: *polling-env
   events:
     profiles: [streaming-events]

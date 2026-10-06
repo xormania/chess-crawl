@@ -1,0 +1,32 @@
+# Independent stage workers and one published API proxy. Compose >=2.24.4.
+# Apply after compose.external.yaml when using an external database.
+services:
+  api:
+    ports: !reset []
+  worker:
+    # Retained for one-off administration; omitted from the normal scalable graph.
+    profiles: [combined-worker]
+  acquisition:
+    profiles: !reset []
+  processing:
+    profiles: !reset []
+  proxy:
+    image: haproxy:3.2-alpine
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./docker/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "${CHESS_CRAWL_BIND_ADDRESS:-127.0.0.1}:${CHESS_CRAWL_API_PORT:-8000}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

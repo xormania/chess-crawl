@@ -22,6 +22,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 - Runtime database roles can append workspace policy history but cannot rewrite
   or delete existing quota revisions. Rerun cloud role bootstrap after upgrading.
 
+- Managed-auth Compose deployments explicitly clear the static token file after
+  external database and polling environment merges. The mounted readiness secret
+  stays separate from workspace authentication in every overlay combination.
 - Bound cumulative stored analysis results by workspace count and logical payload
   bytes, with atomic admission across working sets and API replicas. Exact-result
   replay remains available at capacity; new excess results return 429. Migration
@@ -61,6 +64,20 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   Compose forwards delivery and retention settings; its polling overlay omits
   the publisher and Mercure hub while preserving API and worker startup.
   See [event delivery](docs/event-delivery.md) for replica settings and recovery.
+- Opt-in Compose overlays separate acquisition and processing workers, route API
+  replicas through one DNS-aware proxy, and support polling-only or managed-workspace
+  authentication. Managed mode separates readiness credentials from static auth.
+  Shared worker configuration avoids divergent stage settings; external database
+  TLS and source-storage settings apply to every active role. Compose now forwards
+  archive backend, provider pacing/retries, worker settings, publisher retention,
+  and workload logging.
+- AWS acquisition and processing have separate queues, dead-letter queues, IAM
+  permissions, task sizes, and replica counts. Shared budget parameters apply to
+  admission and execution; optional event generation defaults off without a hub.
+  Replace legacy combined-worker and shared-size parameters when updating an
+  existing stack, and inventory retained old queues. Deployment and recovery
+  verification remain operator steps. The [hosted-service guide](docs/saas-integration.md)
+  documents public backend and private product boundaries.
 
 - A bounded, cursor-based operational transfer for referenced local/S3 archive
   objects. It verifies and copies exact compressed evidence before atomically

@@ -35,7 +35,7 @@ def render_compose(
     certificate.chmod(0o444)
 
     def render(*, external: bool = False, url: bool = True, ca: bool = True,
-               polling: bool = False) -> subprocess.CompletedProcess[str]:
+               scalable: bool = False, polling: bool = False, managed_auth: bool = False) -> subprocess.CompletedProcess[str]:
         environment = dict(os.environ)
         if external:
             if url:
@@ -45,8 +45,10 @@ def render_compose(
         arguments = [docker, "compose", "--env-file", os.devnull, "--file", str(ROOT / "compose.yaml")]
         if external:
             arguments.extend(("--file", str(ROOT / "compose.external.yaml")))
-        if polling:
-            arguments.extend(("--file", str(ROOT / "compose.polling.yaml")))
+        for enabled, filename in ((scalable, "compose.scalable.yaml"), (polling, "compose.polling.yaml"),
+                                  (managed_auth, "compose.managed-auth.yaml")):
+            if enabled:
+                arguments.extend(("--file", str(ROOT / filename)))
         return subprocess.run(
             [*arguments, "config", "--format", "json"], cwd=ROOT,
             env=environment, text=True, capture_output=True, timeout=30,
@@ -262,6 +264,63 @@ def test_external_compose_requires_explicit_target_and_ca_without_bundled_fallba
 
 
 @pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("polling", [False, True])
+def test_scalable_compose_reuses_policy_and_routes_replicas_through_one_proxy(
+    render_compose: Callable[..., subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch,
+    external: bool, polling: bool,
+) -> None:
+    monkeypatch.setenv("CHESS_CRAWL_WORKSPACE_MAX_ACTIVE_JOBS", "7")
+    monkeypatch.setenv("CHESS_CRAWL_JOB_MAX_REMOTE_REQUESTS", "19")
+    monkeypatch.setenv("CHESS_CRAWL_PROVIDER_MAX_RETRIES", "2")
+    monkeypatch.setenv("CHESS_CRAWL_USER_AGENT", "fixture-agent/contact")
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_BACKEND", "s3")
+    monkeypatch.setenv("CHESS_CRAWL_ARCHIVE_S3_BUCKET", "fixture-shared-bucket")
+    services = parsed(render_compose(external=external, scalable=True, polling=polling))["services"]
+    assert "worker" not in services
+    assert "ports" not in services["api"]
+    assert len(services["proxy"]["ports"]) == 1
+    for stage in ("acquisition", "processing"):
+        service = services[stage]
+        assert service["command"][-2:] == ["--stage", stage]
+        assert service["read_only"] is True
+        assert service["depends_on"]["init"]["condition"] == "service_completed_successfully"
+        assert service["healthcheck"]["test"][-1] == "worker"
+        settings = service["environment"]
+        assert settings["CHESS_CRAWL_PROVIDER_MAX_RETRIES"] == "2"
+        assert settings["CHESS_CRAWL_USER_AGENT"] == "fixture-agent/contact"
+        assert settings["CHESS_CRAWL_DATABASE_TRANSPORT"] == ("verified" if external else "local")
+        if external:
+            assert any(secret["source"] == "postgres_ca" for secret in service["secrets"])
+    for role in ("api", "acquisition", "processing"):
+        settings = services[role]["environment"]
+        assert settings["CHESS_CRAWL_WORKSPACE_MAX_ACTIVE_JOBS"] == "7"
+        assert settings["CHESS_CRAWL_JOB_MAX_REMOTE_REQUESTS"] == "19"
+        assert settings["CHESS_CRAWL_ARCHIVE_BACKEND"] == "s3"
+        assert settings["CHESS_CRAWL_ARCHIVE_S3_BUCKET"] == "fixture-shared-bucket"
+        assert settings["CHESS_CRAWL_EVENTS_ENABLED"] == ("false" if polling else "true")
+    assert services["acquisition"]["volumes"][0].get("read_only", False) is False
+    assert services["processing"]["volumes"][0]["read_only"] is True
+    assert services["processing"]["environment"]["CHESS_CRAWL_LICHESS_TOKEN"] == ""
+    assert ("events" in services) is (not polling)
+    assert ("mercure" in services) is (not polling)
+
+
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("scalable", [False, True])
+@pytest.mark.parametrize("polling", [False, True])
+def test_managed_auth_removes_static_bypass_and_supplies_a_distinct_readiness_credential(
+    render_compose: Callable[..., subprocess.CompletedProcess[str]], external: bool, scalable: bool, polling: bool,
+) -> None:
+    services = parsed(render_compose(external=external, scalable=scalable, polling=polling, managed_auth=True))["services"]
+    environment = services["api"]["environment"]
+    assert environment["CHESS_CRAWL_API_AUTH_MODE"] == "database"
+    assert environment["CHESS_CRAWL_API_TOKEN_FILE"] == ""
+    assert "CHESS_CRAWL_API_TOKEN" not in environment
+    assert environment["CHESS_CRAWL_HEALTHCHECK_TOKEN_FILE"] == "/run/secrets/api_token"
+    assert any(secret["source"] == "api_token" for secret in services["api"]["secrets"])
+
+
+@pytest.mark.parametrize("external", [False, True])
 @pytest.mark.parametrize(("configured", "enabled"), [(None, True), ("off", False), ("yes", True)])
 def test_compose_passes_event_delivery_setting_to_every_database_client(
     render_compose: Callable[..., subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch,
@@ -324,3 +383,4 @@ def test_compose_publisher_retention_uses_the_configured_settings(
         for role in ("api", "worker", "init"):
             assert name not in services[role]["environment"]
     assert EventSettings.from_env() == expected
+
