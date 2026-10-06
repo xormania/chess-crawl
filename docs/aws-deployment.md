@@ -385,3 +385,14 @@ per 1,000 imported games/positions and idle infrastructure before scaling.
 - [ALB idle timeout](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-load-balancer-attributes.html)
 - [SQS queue CloudFormation properties](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-sqs-queue.html)
 - [AWS Pricing Calculator](https://calculator.aws/)
+## Database session admission
+
+`DatabaseMaxConnections` (default 32) and
+`DatabaseAdmissionTimeoutSeconds` (default 5.0) are forwarded to every task that
+opens PostgreSQL sessions, including migration, API, acquisition, processing,
+and dispatch. Workers retain dedicated execution and heartbeat
+sessions, so this deployment requires at least two slots per process. Configure
+replica counts and these caps against the RDS connection budget; idle admission
+slots do not open database sessions. Existing processes require a restart to
+change their cap. See [operating policy](operating-policy.md) for live provider
+policy updates and overload behavior.

@@ -11,7 +11,8 @@ from typing import Any
 
 import httpx
 
-from chess_crawl.config import Config
+from chess_crawl.config import Config, ProviderSettings
+from chess_crawl.storage.operating_policy import effective_provider_settings
 from chess_crawl.ingest import (
     IngestResult,
     fetch_chesscom_stats,
@@ -138,6 +139,7 @@ class JobRunner:
             with sessions as session:
                 self._active_session = session
                 if session is not None:
+                    session.policy_resolver = self._provider_settings
                     session.before_request = self._before_provider_request
                     session.persist_deadline = self._persist_provider_deadline
                     session.reserve_request = self._reserve_request
@@ -183,7 +185,7 @@ class JobRunner:
                 lease.require(self.conn)
                 outcome = self._execute(job)
                 lease.require(self.conn)
-                minimum_delay = (self.config.provider(source_provider(job)).min_delay_s
+                minimum_delay = (self._provider_settings(source_provider(job)).min_delay_s
                                  if job.kind not in PROCESSING_JOB_KINDS else 0)
                 if outcome.status_code == 429:
                     minimum_delay = max(minimum_delay, get_provider_info(source_provider(job)).policy.next_delay(429, outcome.retry_after))
@@ -306,20 +308,25 @@ class JobRunner:
         finally:
             self.conn._defer_normalization = previous
 
+    def _provider_settings(self, provider: str) -> ProviderSettings:
+        return effective_provider_settings(self.conn, provider, self.config.provider(provider))
+
     def _before_provider_request(self, provider: str) -> None:
-        # Verify fencing immediately before network work, including each retry.
-        with transaction(self.conn):
-            ready = state.provider_ready_at(self.conn, provider)
-        delay = (ready or 0) - self.clock()
-        if delay > 0:
-            (self.sleeper or time.sleep)(delay)
+        # A policy update can extend pacing while this replica waits. Recheck
+        # the shared deadline and fencing after every wait before network work.
+        while not self.stop_requested():
             with transaction(self.conn):
-                pass  # Recheck ownership after waiting, immediately before HTTP.
-        if self.stop_requested():
-            raise ProviderRequestStopped("Provider request stopped before acquisition")
+                ready = state.provider_ready_at(self.conn, provider)
+            delay = (ready or 0) - self.clock()
+            if delay <= 0:
+                return
+            (self.sleeper or time.sleep)(delay)
+        raise ProviderRequestStopped("Provider request stopped before acquisition")
 
     def _persist_provider_deadline(self, provider: str, deadline: float, reason: str) -> None:
-        state.defer_provider(self.conn, provider, not_before=deadline, reason=reason, now=self.clock())
+        timestamp = self.clock()
+        deadline = max(deadline, timestamp + self._provider_settings(provider).min_delay_s)
+        state.defer_provider(self.conn, provider, not_before=deadline, reason=reason, now=timestamp)
 
     def _reserve_request(self, provider: str) -> int:
         if self.conn._work_budget_id is None:

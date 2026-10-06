@@ -60,7 +60,10 @@ ECS task environment settings override file values. Do not place container-only
 paths into host-run profiles. Configure independent instances with the same
 provider settings, workspace allowances, and archive destination.
 
-Settings are deployment configuration; restart services after changing them.
+Settings from files/environment are deployment configuration; restart services
+when changing them. Trusted provider operating policy is separately versioned in
+PostgreSQL and takes effect across running acquisition replicas. See
+[shared operating policy](operating-policy.md).
 Shared workspace/run budget records retain their existing durable authority and
 resume behavior. Updating configuration is not an instruction to reset spent
 work or rewrite previously admitted budgets.

@@ -168,3 +168,12 @@ is inclusive and never removes artifacts that have not yet expired. Active jobs
 and live download leases defer cleanup. Processing/source evidence and immutable
 working sets are retained. See [queued archive operations](archive-jobs.md#retention)
 for batch bounds, storage permissions, and retry behavior.
+
+## Shared operating policy
+
+`chess-crawl-admin operating-policy show/set/history --provider lichess` manages
+versioned pacing and HTTP retry policy using trusted operator database access.
+Updates require `--expected-version`; acquisition workers refresh values at
+request boundaries while retaining global provider cooldowns. See
+[operating policy](operating-policy.md) for administration and per-process
+PostgreSQL session admission.

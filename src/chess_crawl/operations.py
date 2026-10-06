@@ -19,6 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Maintain a Chess-Crawl archive. Product features are available through the authenticated API.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    policy = commands.add_parser("operating-policy", help="Administer versioned acquisition policy across replicas")
+    policy.add_argument("arguments", nargs=argparse.REMAINDER)
     configuration = commands.add_parser("config", help="Validate or inspect effective settings without service access")
     configuration.add_argument("arguments", nargs=argparse.REMAINDER)
     workspaces = commands.add_parser("workspaces", help="Provision workspace access and quotas using trusted operator access")
@@ -49,6 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
+    if values and values[0] == "operating-policy":
+        from chess_crawl.operating_policy import main as operating_policy_main
+        return operating_policy_main(values[1:])
     if values and values[0] == "config":
         from chess_crawl.configuration import main as configuration_main
         return configuration_main(values[1:])

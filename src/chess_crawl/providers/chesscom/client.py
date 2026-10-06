@@ -61,7 +61,7 @@ class ChessComClient:
         return self.settings.user_agent
 
     def policy(self) -> FetchPolicy:
-        return self._policy
+        return self.http.policy
 
     def get_user_profile(
         self,

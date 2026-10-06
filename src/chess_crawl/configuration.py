@@ -20,6 +20,7 @@ from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.settings import SETTING_KEYS, SettingsSource, boolean, redacted
 from chess_crawl.storage.db import DatabaseError, validate_database_settings
 from chess_crawl.storage.object_store import ArchiveSettings
+from chess_crawl.storage.session_admission import DatabaseAdmissionSettings
 
 
 ROLES = ("settings", "admin", "api", "worker", "acquisition", "processing", "dispatcher", "events")
@@ -36,6 +37,10 @@ def inspect_configuration(role: str = "settings") -> dict[str, Any]:
             key = prefix + (aliases or {}).get(field.name, field.name)
             values[key] = getattr(owner, field.name)
 
+    admission = DatabaseAdmissionSettings.from_env()
+    include(admission, prefix="database_")
+    if role in {"worker", "acquisition", "processing"}:
+        admission.require_worker_capacity()
     include(Config.from_env(source=source), aliases={"max_retries": "provider_max_retries"})
     include(WorkerSettings.from_env(source=source), aliases={
         "job_retry_base_s": "retry_base", "job_retry_max_s": "retry_max",

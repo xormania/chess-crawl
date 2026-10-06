@@ -10,6 +10,10 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 - Offline configuration validation checks the S3 dependency when private
   artifacts use S3 independently of the source archive backend.
 
+- Recheck provider pacing and shutdown after shared request-budget reservation,
+  so a policy update or stop received while waiting for admission cannot permit
+  an early HTTP request. Interrupted attempts return unused reserved bytes.
+
 - Preserve shallower opponent rediscovery across pending, active, and completed
   acquisitions without refetching players or consuming another discovery slot.
   Depth-specific local expansion reuses retained evidence after a deeper frontier
@@ -55,6 +59,14 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   `prune-artifacts` releases quota after resumable private-object deletion. Existing
   work budgets, fair scheduling and idempotency remain authoritative; see
   [queued archive operations](docs/archive-jobs.md).
+
+- Trusted versioned provider operating policies now propagate to running
+  acquisition replicas at HTTP request boundaries and preserve shared cooldown
+  floors. Migration `0021` retains append-only history; operator commands require
+  an observed policy version. Dedicated PostgreSQL sessions also have one
+  configurable per-process admission cap and bounded wait, with safe permit
+  recovery and the existing HTTP 503 response at capacity. See
+  [operating policy](docs/operating-policy.md).
 
 - One shared environment/TOML configuration source with typed domain validation,
   explicit worker CLI precedence, provider pacing/retry settings, and consistent

@@ -506,6 +506,19 @@
       "MinValue": 1,
       "MaxValue": 31536000,
       "Description": "CHESS_CRAWL_ARTIFACT_TTL_SECONDS"
+    },
+    "DatabaseMaxConnections": {
+      "Type": "String",
+      "Default": "32",
+      "AllowedPattern": "(?:[2-9]|[1-9][0-9]+)",
+      "Description": "Maximum admitted PostgreSQL sessions per process, at least 2. Budget the sum across all runtime replicas."
+    },
+    "DatabaseAdmissionTimeoutSeconds": {
+      "Type": "Number",
+      "Default": 5.0,
+      "MinValue": 5e-324,
+      "MaxValue": 9223372036.0,
+      "Description": "Finite positive session admission wait seconds, within the Linux threading timer range. Restart processes to change their admission settings."
     }
   },
   "Conditions": {
@@ -1546,6 +1559,18 @@
                 "Value": {
                   "Ref": "ArchiveBucket"
                 }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_MAX_CONNECTIONS",
+                "Value": {
+                  "Ref": "DatabaseMaxConnections"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S",
+                "Value": {
+                  "Ref": "DatabaseAdmissionTimeoutSeconds"
+                }
               }
             ],
             "Secrets": [
@@ -1741,6 +1766,18 @@
                 "Value": {
                   "Ref": "ProcessingQueue"
                 }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_MAX_CONNECTIONS",
+                "Value": {
+                  "Ref": "DatabaseMaxConnections"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S",
+                "Value": {
+                  "Ref": "DatabaseAdmissionTimeoutSeconds"
+                }
               }
             ],
             "Secrets": [
@@ -1879,6 +1916,18 @@
                 "Name": "AWS_DEFAULT_REGION",
                 "Value": {
                   "Ref": "AWS::Region"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_MAX_CONNECTIONS",
+                "Value": {
+                  "Ref": "DatabaseMaxConnections"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S",
+                "Value": {
+                  "Ref": "DatabaseAdmissionTimeoutSeconds"
                 }
               }
             ],
@@ -2473,6 +2522,18 @@
                 "Value": {
                   "Ref": "ProviderMaxRetries"
                 }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_MAX_CONNECTIONS",
+                "Value": {
+                  "Ref": "DatabaseMaxConnections"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S",
+                "Value": {
+                  "Ref": "DatabaseAdmissionTimeoutSeconds"
+                }
               }
             ],
             "Secrets": [
@@ -2847,6 +2908,18 @@
                 "Name": "CHESS_CRAWL_ARTIFACT_S3_BUCKET",
                 "Value": {
                   "Ref": "ArchiveBucket"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_MAX_CONNECTIONS",
+                "Value": {
+                  "Ref": "DatabaseMaxConnections"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S",
+                "Value": {
+                  "Ref": "DatabaseAdmissionTimeoutSeconds"
                 }
               }
             ],

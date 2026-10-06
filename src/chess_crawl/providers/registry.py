@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager, ExitStack
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import httpx
 
-from chess_crawl.config import Config
+from chess_crawl.config import Config, ProviderSettings
 from chess_crawl.providers.base import FetchPolicy
 from chess_crawl.providers.chesscom.client import ChessComClient
 from chess_crawl.providers.lichess.client import LichessClient
@@ -126,6 +126,7 @@ class ProviderSession(AbstractContextManager["ProviderSession"]):
         self._budgeted_providers: set[str] = set()
         self._resources = ExitStack()
         self._closed = False
+        self.policy_resolver: Callable[[str], ProviderSettings] | None = None
         self.before_request: Callable[[str], None] | None = None
         self.persist_deadline: Callable[[str, float, str], None] | None = None
         self.reserve_request: Callable[[str], int] | None = None
@@ -142,6 +143,11 @@ class ProviderSession(AbstractContextManager["ProviderSession"]):
             self._resources.callback(client.close)
             self._clients[provider] = client
         client = self._clients[provider]
+        def resolve_policy() -> FetchPolicy:
+            settings = (self.policy_resolver(provider) if self.policy_resolver is not None
+                        else self.config.provider(provider))
+            return replace(client.http.policy, min_delay_s=settings.min_delay_s, max_retries=settings.max_retries)
+        client.http.resolve_policy = resolve_policy
         if self.before_request is not None:
             client.http.before_request = lambda: self.before_request(provider) if self.before_request is not None else None
         if self.persist_deadline is not None:

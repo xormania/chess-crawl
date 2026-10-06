@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import wraps
@@ -19,6 +20,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.pq import TransactionStatus
 
 from chess_crawl.settings import boolean, setting
+from chess_crawl.storage.session_admission import DatabaseAdmissionSettings, SessionPermit, process_session_admission
 
 DatabaseError = psycopg.Error
 DbTarget = str
@@ -69,6 +71,20 @@ class Connection(psycopg.Connection[Row]):
     _defer_normalization: bool = False
     _work_budget_id: int | None = None
     _work_payload_read_credits: int = 0
+    _session_permit: SessionPermit | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._session_close_lock = threading.Lock()
+
+    def close(self) -> None:
+        # Another caller cannot return admission before the native session closes.
+        with self._session_close_lock:
+            try:
+                super().close()
+            finally:
+                if self._session_permit is not None:
+                    self._session_permit.release()
 
     @property
     def in_transaction(self) -> bool:
@@ -87,6 +103,7 @@ def require_row(cursor: psycopg.Cursor[Row]) -> Row:
 
 def database_url(value: str | None = None) -> str:
     """Resolve and validate PostgreSQL settings without including credentials."""
+    DatabaseAdmissionSettings.from_env()
     target = value if value is not None else setting("CHESS_CRAWL_DATABASE_URL")
     if not isinstance(target, str) or not target.strip():
         raise ValueError("Set CHESS_CRAWL_DATABASE_URL or --database-url to a PostgreSQL connection string")
@@ -196,7 +213,14 @@ def connect(target: str, *, mode: AccessMode = "rwc") -> Connection:
         if "password" in conninfo_to_dict(conninfo):
             raise ValueError("Configure the PostgreSQL password in either the URL or a password setting")
         kwargs["password"] = password
-    conn = Connection.connect(conninfo, **kwargs)
+    admission = process_session_admission()
+    permit = admission.acquire()
+    try:
+        conn = Connection.connect(conninfo, **kwargs)
+    except BaseException:
+        permit.release()
+        raise
+    conn._session_permit = permit
     try:
         events_enabled = boolean(setting("CHESS_CRAWL_EVENTS_ENABLED", "true"), "CHESS_CRAWL_EVENTS_ENABLED")
         conn.execute("SELECT set_config('chess_crawl.events_enabled',%s,false)",
