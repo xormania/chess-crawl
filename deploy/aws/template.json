@@ -187,6 +187,15 @@
         "true",
         "false"
       ]
+    },
+    "ApiAuthMode": {
+      "Type": "String",
+      "Default": "static",
+      "AllowedValues": [
+        "static",
+        "database"
+      ],
+      "Description": "Static local/bootstrap auth or provisioned and revocable PostgreSQL workspace credentials"
     }
   },
   "Conditions": {
@@ -224,6 +233,14 @@
           "Ref": "LoadBalancerDeletionProtection"
         },
         "true"
+      ]
+    },
+    "DatabaseApiAuth": {
+      "Fn::Equals": [
+        {
+          "Ref": "ApiAuthMode"
+        },
+        "database"
       ]
     }
   },
@@ -1149,6 +1166,12 @@
                 "Value": {
                   "Ref": "AWS::Region"
                 }
+              },
+              {
+                "Name": "CHESS_CRAWL_API_AUTH_MODE",
+                "Value": {
+                  "Ref": "ApiAuthMode"
+                }
               }
             ],
             "Secrets": [
@@ -1159,7 +1182,13 @@
                 }
               },
               {
-                "Name": "CHESS_CRAWL_API_TOKEN",
+                "Name": {
+                  "Fn::If": [
+                    "DatabaseApiAuth",
+                    "CHESS_CRAWL_HEALTHCHECK_TOKEN",
+                    "CHESS_CRAWL_API_TOKEN"
+                  ]
+                },
                 "ValueFrom": {
                   "Ref": "ApiTokenSecretArn"
                 }

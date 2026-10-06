@@ -77,6 +77,10 @@ def bootstrap_runtime_role(conn: Connection, *, username: str, password: str) ->
         for table in ("workspace_credentials", "provider_operating_policies", "provider_operating_policy_history"):
             if require_row(conn.execute("SELECT to_regclass(%s) IS NOT NULL", ("public." + table,)))[0]:
                 conn.execute(sql.SQL("REVOKE INSERT, UPDATE, DELETE ON {} FROM {}").format(sql.Identifier(table), role))
+        # Admission may append quota revisions, but existing audit records are
+        # immutable to replicas even though current policy/accounting stays writable.
+        if require_row(conn.execute("SELECT to_regclass('public.workspace_policy_history') IS NOT NULL"))[0]:
+            conn.execute(sql.SQL("REVOKE UPDATE, DELETE ON workspace_policy_history FROM {}").format(role))
 
 
 def main() -> int:

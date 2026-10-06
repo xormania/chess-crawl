@@ -31,6 +31,8 @@ digests but cannot insert, update, or delete credentials. Provision and rotate
 using operator/migration-owner access, and rerun the role bootstrap after this
 migration to install that privilege boundary. Workspace budget tables retain
 runtime write access for legacy admission and usage accounting.
+Runtime roles can append policy-history records but cannot update or delete
+existing revisions. Rerun bootstrap to install this protection on existing roles.
 
 Create a JSON policy file containing `BudgetPolicy` fields, for example:
 

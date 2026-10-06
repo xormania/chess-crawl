@@ -7,6 +7,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Security
 
+- Runtime database roles can append workspace policy history but cannot rewrite
+  or delete existing quota revisions. Rerun cloud role bootstrap after upgrading.
+
 - Bound cumulative stored analysis results by workspace count and logical payload
   bytes, with atomic admission across working sets and API replicas. Exact-result
   replay remains available at capacity; new excess results return 429. Migration
@@ -22,7 +25,9 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   Optional database authentication uses hashed opaque credentials and observes
   revocation across API replicas without restarting. Managed policy controls
   admission independently of startup defaults while preserving run ceilings,
-  ownership, and consumed usage. See [workspace administration](docs/workspace-administration.md).
+  ownership, and consumed usage. AWS API tasks can select database authentication
+  with a separately provisioned readiness credential. See
+  [workspace administration](docs/workspace-administration.md).
 - One shared environment/TOML configuration source with typed domain validation,
   explicit worker CLI precedence, provider pacing/retry settings, and consistent
   worker environment defaults. `chess-crawl-admin config validate/show` checks

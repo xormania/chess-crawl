@@ -115,9 +115,22 @@ Supply ARNs, not secret values, in parameters:
 
 - `ApplicationDatabaseSecretArn`: existing JSON secret with a `password` field
   containing at least 32 characters. `ApplicationDatabaseUser` defines its role.
-- `ApiTokenSecretArn`: existing plaintext bearer service-token secret.
+- `ApiTokenSecretArn`: plaintext bearer credential. In default `ApiAuthMode=static`
+  this is the local/bootstrap API token. In `ApiAuthMode=database` it must contain
+  an independently provisioned, active workspace credential for readiness probes.
+  Database mode injects `CHESS_CRAWL_HEALTHCHECK_TOKEN` and removes the static API
+  token variable; it cannot bypass database credential revocation.
 - `ApplicationSecretKmsKeyArn`: the optional customer-managed key for these
   application secrets; omit it for AWS-managed encryption.
+
+For hosted multi-workspace use, choose `ApiAuthMode=database`. Provision the
+readiness workspace and credential with the trusted workspace administration
+commands after migrations and before raising `ApiDesiredCount`. Place that token
+in `ApiTokenSecretArn`; supply customer credentials separately through the SaaS.
+Health probes must use an active credential, and task-secret rotation requires
+recreating tasks. See [workspace administration](workspace-administration.md) for
+provisioning and revocation. Switching modes without provisioning a readiness
+credential correctly leaves the API unhealthy.
 
 Use one customer-managed key for both application secrets when supplying that
 parameter, or extend the execution policy explicitly for additional keys.
