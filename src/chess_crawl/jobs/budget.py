@@ -1,9 +1,10 @@
 """Trusted operator policy and explicit resumable work-budget failures."""
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass, fields
+
+from chess_crawl.settings import dataclass_settings
 
 
 @dataclass(frozen=True)
@@ -28,15 +29,7 @@ class BudgetPolicy:
 
     @classmethod
     def from_env(cls) -> BudgetPolicy:
-        values: dict[str, int] = {}
-        for field in fields(cls):
-            name = "CHESS_CRAWL_" + field.name.upper()
-            if name in os.environ:
-                try:
-                    values[field.name] = int(os.environ[name])
-                except ValueError as exc:
-                    raise ValueError(f"{name} must be an integer") from exc
-        return cls(**values)
+        return dataclass_settings(cls)
 
 
 class BudgetExceeded(RuntimeError):

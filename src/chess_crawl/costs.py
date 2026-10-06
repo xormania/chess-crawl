@@ -5,10 +5,11 @@ the estimator never assumes CPU utilization equals allocated Fargate capacity.
 """
 from __future__ import annotations
 
+from chess_crawl.settings import setting, boolean
+
 import argparse
 import json
 import math
-import os
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -71,10 +72,7 @@ class UsageCounters:
 
 
 def emit_sample(sample: UsageSample) -> None:
-    enabled = os.getenv("CHESS_CRAWL_USAGE_LOG", "false").strip().lower()
-    if enabled not in {"false", "0", "true", "1"}:
-        raise ValueError("CHESS_CRAWL_USAGE_LOG must be true or false")
-    if enabled in {"true", "1"}:
+    if boolean(setting("CHESS_CRAWL_USAGE_LOG", "false"), "CHESS_CRAWL_USAGE_LOG"):
         # No source body, identity, credential, URL, key, or exception text.
         print(json.dumps(asdict(sample), sort_keys=True, separators=(",", ":")), flush=True)
 

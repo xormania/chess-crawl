@@ -137,3 +137,13 @@ All product reads reuse stored data. HTTP submissions enqueue durable work;
 workers perform acquisition separately. API tokens determine workspace access.
 A database migration is not permission to reload games or run provider requests.
 See the [backend guide](backend.md) for exact route schemas and event contracts.
+
+
+## Validate configuration
+
+`chess-crawl-admin config validate --role worker` checks effective configuration
+without opening network connections. `config show` also prints defaults and
+source origins with credentials redacted. Optional TOML configuration uses
+`CHESS_CRAWL_CONFIG_FILE`; environment values and explicit worker flags override
+it. See [runtime configuration](configuration.md) for supported roles, worker
+settings, and source precedence.

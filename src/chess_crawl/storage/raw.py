@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from chess_crawl.settings import setting
+
 import gzip
 import hashlib
 import json
-import os
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -112,7 +113,7 @@ def prepare_raw_payload(
 ) -> PreparedRawPayload:
     """Avoid duplicate object I/O and publish new bodies before taking write locks."""
     body_hash = _body_hash(record)
-    external_expected = store is not None or os.getenv("CHESS_CRAWL_ARCHIVE_BACKEND", "database") != "database"
+    external_expected = store is not None or setting("CHESS_CRAWL_ARCHIVE_BACKEND", "database") != "database"
     if not external_expected:
         # Inline sources need no speculative lookup: the locked write checks once.
         return PreparedRawPayload(record, body_hash, None, False)

@@ -17,6 +17,13 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ### Added
 
+- One shared environment/TOML configuration source with typed domain validation,
+  explicit worker CLI precedence, provider pacing/retry settings, and consistent
+  worker environment defaults. `chess-crawl-admin config validate/show` checks
+  deployment roles offline and reports effective settings with credentials
+  redacted. Existing environment names and programmatic settings remain supported;
+  optional files use `CHESS_CRAWL_CONFIG_FILE`. See [configuration](docs/configuration.md).
+
 - A bounded, cursor-based operational transfer for referenced local/S3 archive
   objects. It verifies and copies exact compressed evidence before atomically
   repointing raw/import references, retains source backups and IDs, resumes after

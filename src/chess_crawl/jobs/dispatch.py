@@ -1,12 +1,13 @@
 """Local polling and SQS delivery are hints; PostgreSQL owns execution rights."""
 from __future__ import annotations
 
+from chess_crawl.settings import setting, integer, number
+
 import json
 import math
 import time
 import argparse
 import importlib
-import os
 import signal
 import threading
 from collections.abc import Callable
@@ -38,9 +39,9 @@ class DispatchMaintenance:
     @classmethod
     def from_env(cls, *, clock: Callable[[], float] = time.time) -> DispatchMaintenance:
         return cls(
-            retention_seconds=float(os.getenv("CHESS_CRAWL_DISPATCH_RETENTION_SECONDS", "86400")),
-            interval_seconds=float(os.getenv("CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS", "60")),
-            batch_size=int(os.getenv("CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE", "256")), clock=clock,
+            retention_seconds=number(setting("CHESS_CRAWL_DISPATCH_RETENTION_SECONDS", "86400"), "CHESS_CRAWL_DISPATCH_RETENTION_SECONDS"),
+            interval_seconds=number(setting("CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS", "60"), "CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS"),
+            batch_size=integer(setting("CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE", "256"), "CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE"), clock=clock,
         )
 
     def run_due(self, conn: Connection) -> None:
@@ -146,9 +147,9 @@ class SqsConsumer:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Publish durable job dispatch requests to SQS")
     parser.add_argument("--database-url")
-    parser.add_argument("--queue-url", default=os.getenv("CHESS_CRAWL_SQS_QUEUE_URL"))
-    parser.add_argument("--acquisition-queue-url", default=os.getenv("CHESS_CRAWL_SQS_ACQUISITION_QUEUE_URL"))
-    parser.add_argument("--processing-queue-url", default=os.getenv("CHESS_CRAWL_SQS_PROCESSING_QUEUE_URL"))
+    parser.add_argument("--queue-url", default=setting("CHESS_CRAWL_SQS_QUEUE_URL"))
+    parser.add_argument("--acquisition-queue-url", default=setting("CHESS_CRAWL_SQS_ACQUISITION_QUEUE_URL"))
+    parser.add_argument("--processing-queue-url", default=setting("CHESS_CRAWL_SQS_PROCESSING_QUEUE_URL"))
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     if not args.queue_url:

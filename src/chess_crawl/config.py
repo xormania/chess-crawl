@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 
 from chess_crawl import __version__
+from chess_crawl.settings import SettingsSource, dataclass_settings
 
 
 DEFAULT_CONTACT = "set-me@example.invalid"
@@ -16,7 +17,7 @@ class ProviderSettings:
     key: str
     min_delay_s: float
     user_agent: str
-    oauth_token: str | None = None
+    oauth_token: str | None = field(default=None, repr=False)
     max_retries: int = 3
     include_clocks: bool = True
     include_evals: bool = True
@@ -24,6 +25,8 @@ class ProviderSettings:
     oauth_owner_scope: str = "local"
 
     def __post_init__(self) -> None:
+        _validate_delay(self.min_delay_s, "min_delay_s")
+        _validate_retries(self.max_retries)
         for name in ("include_clocks", "include_evals", "include_accuracy"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be a boolean")
@@ -33,7 +36,7 @@ class ProviderSettings:
 class Config:
     contact: str = DEFAULT_CONTACT
     user_agent: str | None = None
-    lichess_token: str | None = None
+    lichess_token: str | None = field(default=None, repr=False)
     chesscom_delay_s: float = 1.0
     lichess_delay_s: float = 1.5
     max_retries: int = 3
@@ -43,21 +46,16 @@ class Config:
     lichess_token_owner_scope: str = "local"
 
     def __post_init__(self) -> None:
+        _validate_delay(self.chesscom_delay_s, "chesscom_delay_s")
+        _validate_delay(self.lichess_delay_s, "lichess_delay_s")
+        _validate_retries(self.max_retries)
         for name in ("lichess_clocks", "lichess_evals", "lichess_accuracy"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be a boolean")
 
     @classmethod
-    def from_env(cls) -> "Config":
-        return cls(
-            contact=os.getenv("CHESS_CRAWL_CONTACT", DEFAULT_CONTACT),
-            user_agent=os.getenv("CHESS_CRAWL_USER_AGENT"),
-            lichess_token=os.getenv("CHESS_CRAWL_LICHESS_TOKEN"),
-            lichess_token_owner_scope=os.getenv("CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE", "local"),
-            lichess_clocks=_boolean_from_env("CHESS_CRAWL_LICHESS_CLOCKS", default=True),
-            lichess_evals=_boolean_from_env("CHESS_CRAWL_LICHESS_EVALS", default=True),
-            lichess_accuracy=_boolean_from_env("CHESS_CRAWL_LICHESS_ACCURACY", default=True),
-        )
+    def from_env(cls, *, source: SettingsSource | None = None) -> "Config":
+        return dataclass_settings(cls, source=source, aliases={"max_retries": "PROVIDER_MAX_RETRIES"})
 
     def provider(self, key: str) -> ProviderSettings:
         if key == "chess.com":
@@ -86,13 +84,11 @@ def build_user_agent(contact: str = DEFAULT_CONTACT) -> str:
     return f"chess-crawl/{__version__} (+contact: {contact})"
 
 
-def _boolean_from_env(name: str, *, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    normalized = value.strip().lower()
-    if normalized in {"true", "1", "yes", "on"}:
-        return True
-    if normalized in {"false", "0", "no", "off"}:
-        return False
-    raise ValueError(f"{name} must be true/false, 1/0, yes/no, or on/off")
+def _validate_delay(value: float, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be finite and nonnegative")
+
+
+def _validate_retries(value: int) -> None:
+    if type(value) is not int or value < 0:
+        raise ValueError("max_retries must be a nonnegative integer")
