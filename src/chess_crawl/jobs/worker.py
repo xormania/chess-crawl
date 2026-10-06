@@ -24,6 +24,7 @@ from chess_crawl.jobs.worker_identity import write_worker_identity
 from chess_crawl.providers.registry import ProviderSession
 from chess_crawl.storage.db import DatabaseError, connection, database_url
 from chess_crawl.storage.migrations import initialize
+from chess_crawl.storage.session_admission import DatabaseAdmissionSettings, process_session_admission
 from psycopg.errors import DeadlockDetected, LockNotAvailable, SerializationFailure
 
 
@@ -44,6 +45,8 @@ class Worker:
         queue_consumer=None,
         identity_path: str | Path | None = None,
     ) -> None:
+        DatabaseAdmissionSettings.from_env().require_worker_capacity()
+        process_session_admission().settings.require_worker_capacity()
         self.db_path = database_url(db_path)
         self.settings = settings or WorkerSettings.from_env()
         self.config = config or Config.from_env()

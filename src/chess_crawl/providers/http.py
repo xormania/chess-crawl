@@ -70,6 +70,7 @@ class HttpClient:
         self._stop_requested = stop_requested or (lambda: False)
         self._last_request_at: float | None = None
         self._not_before: float = 0
+        self.resolve_policy: Callable[[], FetchPolicy] | None = None
         self.before_request: Callable[[], None] | None = None
         self.persist_deadline: Callable[[float, str], None] | None = None
         self.reserve_request: Callable[[], int] | None = None
@@ -94,6 +95,8 @@ class HttpClient:
         params: Mapping[str, Any] | None = None,
         content: bytes | str | None = None,
     ) -> HttpFetchResult:
+        if self.resolve_policy is not None:
+            self.policy = self.resolve_policy()
         attempts: list[FetchAttempt] = []
         max_attempts = self.policy.max_retries + 1
         request_headers = self._outbound_request_headers(headers)
@@ -108,8 +111,6 @@ class HttpClient:
 
         last_result: HttpFetchResult | None = None
         for attempt_number in range(1, max_attempts + 1):
-            if self.before_request is not None:
-                self.before_request()
             if not self._stop_requested():
                 self._respect_serial_delay()
             if self._stop_requested():
@@ -124,6 +125,17 @@ class HttpClient:
             response: httpx.Response | None = None
 
             try:
+                # Reservation may wait on shared budget locks. Read the current
+                # provider deadline and fence after every blocking preparation.
+                if self.before_request is not None:
+                    self.before_request()
+                if self._stop_requested():
+                    if last_result is not None:
+                        return last_result
+                    raise ProviderRequestStopped("Provider request stopped before network acquisition")
+                attempted_at = int(self._clock())
+                started = self._clock()
+                self._last_request_at = started
                 if reserve_request is None:
                     response = self._client.request(
                         method_upper, url, headers=request_headers, params=params, content=content,
@@ -179,6 +191,10 @@ class HttpClient:
                     body_hash=compute_body_hash(body) if body is not None else None,
                     fetched_at=attempted_at, attempts=tuple(attempts),
                 )
+            except ProviderRequestStopped:
+                if last_result is not None:
+                    return last_result
+                raise
             except httpx.RequestError as exc:
                 if reserve_request is not None and self._clock() - started >= self.timeout_s:
                     raise ProviderResponseDeadlineExceeded(

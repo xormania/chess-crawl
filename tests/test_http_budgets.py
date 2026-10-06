@@ -266,6 +266,26 @@ def test_stopped_attempt_does_not_reserve_or_contact_provider() -> None:
             acquire(client)
 
 
+def test_stop_during_reservation_settles_zero_without_contacting_provider() -> None:
+    stopped = []
+    settled: list[int] = []
+
+    def reserve() -> int:
+        stopped.append(True)
+        return 10
+
+    def forbidden(*args):
+        pytest.fail("Acquisition contacted a provider after stopping during its reservation")
+
+    with client_for(forbidden) as client:
+        client._stop_requested = lambda: bool(stopped)
+        client.reserve_request = reserve
+        client.finish_request = settled.append
+        with pytest.raises(ProviderRequestStopped):
+            acquire(client)
+    assert settled == [0]
+
+
 def test_stop_during_serial_delay_leaves_next_attempt_unreserved() -> None:
     clock = Clock(0)
     stopped = []
