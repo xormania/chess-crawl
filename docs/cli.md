@@ -39,6 +39,10 @@ docker compose exec api chess-crawl-admin info
 
 ## Inspect and resume work budgets
 
+Read anonymous scheduling, delivery and usage measurements with
+`chess-crawl-admin metrics`. It uses trusted PostgreSQL access and a bounded
+read-only snapshot; see [operations metrics](operations-metrics.md).
+
 Use trusted operator PostgreSQL access; HTTP bearer credentials cannot extend
 work ceilings. Inspect a run's stored usage and retained progress, then resume it
 with the same trusted ceiling configuration used by the API and workers:
@@ -56,6 +60,11 @@ See [work budgets](work-budgets.md) for finite defaults, monthly quotas, and the
 operator steps needed before raising a ceiling.
 
 ## Retain analysis results
+
+For notification retention, use trusted `chess-crawl-admin prune-events`;
+see [event delivery](event-delivery.md) for delivered and explicitly discarded
+pending batches. Retention shares the publisher lock and never removes work
+dispatch or source evidence.
 
 Stored calculation results have workspace count and byte ceilings. They are not
 automatically expired. After backing up any results you need, use trusted
@@ -131,9 +140,40 @@ for configuration, verification, and backup steps.
 | Schema migration, readiness, backup relocation | `chess-crawl-admin migrate`, `info`, `relocate` |
 | Trusted budget inspection and checkpoint resume | `chess-crawl-admin budgets show`, `budgets resume` |
 | Scoped retention of stored analysis results | `chess-crawl-admin prune-results` |
+| Scoped retention of expired private exports | `chess-crawl-admin prune-artifacts` |
 | Verified transfer of existing external objects | `python -m chess_crawl.storage.archive_transfer` |
 
 All product reads reuse stored data. HTTP submissions enqueue durable work;
 workers perform acquisition separately. API tokens determine workspace access.
 A database migration is not permission to reload games or run provider requests.
 See the [backend guide](backend.md) for exact route schemas and event contracts.
+
+
+## Validate configuration
+
+`chess-crawl-admin config validate --role worker` checks effective configuration
+without opening network connections. `config show` also prints defaults and
+source origins with credentials redacted. Optional TOML configuration uses
+`CHESS_CRAWL_CONFIG_FILE`; environment values and explicit worker flags override
+it. See [runtime configuration](configuration.md) for supported roles, worker
+settings, and source precedence.
+
+
+## Retain private exports
+
+`chess-crawl-admin prune-artifacts --workspace-id example --before 1791244800
+--batch-size 10` deletes one resumable batch of expired private export objects and
+releases retained quota only after their tracked chunks are removed. The cutoff
+is inclusive and never removes artifacts that have not yet expired. Active jobs
+and live download leases defer cleanup. Processing/source evidence and immutable
+working sets are retained. See [queued archive operations](archive-jobs.md#retention)
+for batch bounds, storage permissions, and retry behavior.
+
+## Shared operating policy
+
+`chess-crawl-admin operating-policy show/set/history --provider lichess` manages
+versioned pacing and HTTP retry policy using trusted operator database access.
+Updates require `--expected-version`; acquisition workers refresh values at
+request boundaries while retaining global provider cooldowns. See
+[operating policy](operating-policy.md) for administration and per-process
+PostgreSQL session admission.

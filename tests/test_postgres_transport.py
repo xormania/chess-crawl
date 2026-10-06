@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -15,14 +16,19 @@ PASSWORD = "transport-test:password@with spaces"
 
 class Session:
     def __init__(self) -> None:
-        self.statements: list[str] = []
+        self.statements: list[tuple[str, tuple[Any, ...] | None]] = []
         self.closed = False
 
-    def execute(self, query: str) -> None:
-        self.statements.append(query)
+    def execute(self, query: str, parameters: tuple[Any, ...] | None = None) -> None:
+        self.statements.append((query, parameters))
 
     def close(self) -> None:
+        if self.closed:
+            return
         self.closed = True
+        permit = getattr(self, "_session_permit", None)
+        if permit is not None:
+            permit.release()
 
 
 class Backend:
@@ -36,7 +42,7 @@ class Backend:
 
 
 @pytest.fixture
-def backend(monkeypatch: pytest.MonkeyPatch) -> Backend:
+def backend(monkeypatch: pytest.MonkeyPatch) -> Iterator[Backend]:
     # libpq inherits these independently of the application's settings. Each
     # case explicitly selects its environment rather than using the host's.
     for name in (
@@ -49,7 +55,10 @@ def backend(monkeypatch: pytest.MonkeyPatch) -> Backend:
         monkeypatch.delenv(name, raising=False)
     boundary = Backend()
     monkeypatch.setattr(db.Connection, "connect", staticmethod(boundary.connect))
-    return boundary
+    try:
+        yield boundary
+    finally:
+        boundary.session.close()
 
 
 @pytest.mark.parametrize("mode", ["ro", "rw", "rwc"])
@@ -75,7 +84,21 @@ def test_verified_default_overrides_weaker_url_environment_and_service_options_f
     assert options["gssencmode"] == "disable"
     assert options["autocommit"] is True
     assert 0 < options["connect_timeout"] <= 5
-    assert ("SET default_transaction_read_only = on" in backend.session.statements) is (mode == "ro")
+    assert backend.session.statements[0] == (
+        "SELECT set_config('chess_crawl.events_enabled',%s,false)", ("true",),
+    )
+    assert (("SET default_transaction_read_only = on", None) in backend.session.statements) is (mode == "ro")
+
+
+@pytest.mark.parametrize(("configured", "canonical"), [("off", "false"), ("yes", "true")])
+def test_connection_applies_canonical_event_setting_to_its_session(
+    backend: Backend, monkeypatch: pytest.MonkeyPatch, configured: str, canonical: str,
+) -> None:
+    monkeypatch.setenv("CHESS_CRAWL_EVENTS_ENABLED", configured)
+    db.connect("dbname=archive host=database.example")
+    assert backend.session.statements[0] == (
+        "SELECT set_config('chess_crawl.events_enabled',%s,false)", (canonical,),
+    )
 
 
 def test_verified_root_certificate_setting_overrides_other_ca_selections(
@@ -119,7 +142,11 @@ def test_explicit_local_transport_accepts_only_effective_unix_or_loopback_routes
     monkeypatch.setenv("CHESS_CRAWL_DATABASE_TRANSPORT", "local")
     db.connect(target)
     assert len(backend.calls) == 1
-    assert backend.session.statements[:2] == ["SET TIME ZONE 'UTC'", "SET lock_timeout = '5s'"]
+    assert backend.session.statements[:3] == [
+        ("SELECT set_config('chess_crawl.events_enabled',%s,false)", ("true",)),
+        ("SET TIME ZONE 'UTC'", None),
+        ("SET lock_timeout = '5s'", None),
+    ]
 
 
 @pytest.mark.parametrize("host", ["localhost", "LOCALHOST"])

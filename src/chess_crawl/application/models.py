@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, fields
+
+from chess_crawl.settings import dataclass_settings
 from typing import Literal
 
 
@@ -53,13 +54,4 @@ class Limits:
 
     @classmethod
     def from_env(cls) -> "Limits":
-        values = {}
-        for field in fields(cls):
-            name = f"CHESS_CRAWL_{field.name.upper()}"
-            value = os.getenv(name)
-            if value is not None:
-                try:
-                    values[field.name] = int(value)
-                except ValueError as exc:
-                    raise ValueError(f"{name} must be an integer") from exc
-        return cls(**values)
+        return dataclass_settings(cls)

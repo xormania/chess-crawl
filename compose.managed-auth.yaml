@@ -1,0 +1,10 @@
+# Provision workspace credentials first. The api_token secret then contains the
+# independently issued readiness credential; it is not a static API bypass.
+services:
+  api:
+    environment:
+      CHESS_CRAWL_API_AUTH_MODE: database
+      # An explicit empty override stays cleared after every environment merge.
+      # Compose can retain !reset null when external/polling overlays also merge it.
+      CHESS_CRAWL_API_TOKEN_FILE: ""
+      CHESS_CRAWL_HEALTHCHECK_TOKEN_FILE: /run/secrets/api_token

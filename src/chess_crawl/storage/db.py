@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import wraps
@@ -17,6 +18,9 @@ from typing import Any, Concatenate, Literal, ParamSpec, TypeVar, overload
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.pq import TransactionStatus
+
+from chess_crawl.settings import boolean, setting
+from chess_crawl.storage.session_admission import DatabaseAdmissionSettings, SessionPermit, process_session_admission
 
 DatabaseError = psycopg.Error
 DbTarget = str
@@ -67,6 +71,20 @@ class Connection(psycopg.Connection[Row]):
     _defer_normalization: bool = False
     _work_budget_id: int | None = None
     _work_payload_read_credits: int = 0
+    _session_permit: SessionPermit | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._session_close_lock = threading.Lock()
+
+    def close(self) -> None:
+        # Another caller cannot return admission before the native session closes.
+        with self._session_close_lock:
+            try:
+                super().close()
+            finally:
+                if self._session_permit is not None:
+                    self._session_permit.release()
 
     @property
     def in_transaction(self) -> bool:
@@ -85,7 +103,8 @@ def require_row(cursor: psycopg.Cursor[Row]) -> Row:
 
 def database_url(value: str | None = None) -> str:
     """Resolve and validate PostgreSQL settings without including credentials."""
-    target = value if value is not None else os.getenv("CHESS_CRAWL_DATABASE_URL")
+    DatabaseAdmissionSettings.from_env()
+    target = value if value is not None else setting("CHESS_CRAWL_DATABASE_URL")
     if not isinstance(target, str) or not target.strip():
         raise ValueError("Set CHESS_CRAWL_DATABASE_URL or --database-url to a PostgreSQL connection string")
     if "://" in target and not target.startswith(("postgresql://", "postgres://")):
@@ -106,8 +125,8 @@ def database_label(target: str) -> str:
 
 
 def _password() -> str | None:
-    value = os.getenv("CHESS_CRAWL_DATABASE_PASSWORD")
-    password_file = os.getenv("CHESS_CRAWL_DATABASE_PASSWORD_FILE")
+    value = setting("CHESS_CRAWL_DATABASE_PASSWORD")
+    password_file = setting("CHESS_CRAWL_DATABASE_PASSWORD_FILE")
     if value is not None and password_file:
         raise ValueError("Set either CHESS_CRAWL_DATABASE_PASSWORD or CHESS_CRAWL_DATABASE_PASSWORD_FILE")
     if password_file:
@@ -122,7 +141,7 @@ def _password() -> str | None:
 
 def _transport_options(settings: Mapping[str, str | int | None]) -> dict[str, str]:
     """Require verified TLS unless an operator selects a confined local route."""
-    transport = os.getenv("CHESS_CRAWL_DATABASE_TRANSPORT", "verified")
+    transport = setting("CHESS_CRAWL_DATABASE_TRANSPORT", "verified")
     if transport not in {"verified", "local"}:
         raise ValueError("CHESS_CRAWL_DATABASE_TRANSPORT must be verified or local")
     options: dict[str, str] = {}
@@ -137,7 +156,7 @@ def _transport_options(settings: Mapping[str, str | int | None]) -> dict[str, st
         address = str(settings.get("hostaddr") or os.getenv("PGHOSTADDR") or "")
         if "," in host or "," in address:
             raise ValueError("Local PostgreSQL transport requires a single local host")
-        trusted = os.getenv("CHESS_CRAWL_DATABASE_TRUSTED_HOST", "")
+        trusted = setting("CHESS_CRAWL_DATABASE_TRUSTED_HOST", "")
         if address:
             allowed = _is_loopback(address)
         else:
@@ -157,10 +176,20 @@ def _transport_options(settings: Mapping[str, str | int | None]) -> dict[str, st
         elif not host and os.name == "nt":
             # Native Windows defaults to localhost rather than a Unix socket.
             options["hostaddr"] = "127.0.0.1"
-    root_cert = os.getenv("CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE")
+    root_cert = setting("CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE")
     if root_cert:
         options["sslrootcert"] = root_cert
     return options
+
+
+def validate_database_settings(target: str | None = None) -> str:
+    """Validate connection policy and secret-file readability without connecting."""
+    conninfo = database_url(target)
+    password = _password()
+    if password is not None and "password" in conninfo_to_dict(conninfo):
+        raise ValueError("Configure the PostgreSQL password in either the URL or a password setting")
+    _transport_options(conninfo_to_dict(conninfo))
+    return conninfo
 
 
 def _is_loopback(value: str) -> bool:
@@ -184,8 +213,18 @@ def connect(target: str, *, mode: AccessMode = "rwc") -> Connection:
         if "password" in conninfo_to_dict(conninfo):
             raise ValueError("Configure the PostgreSQL password in either the URL or a password setting")
         kwargs["password"] = password
-    conn = Connection.connect(conninfo, **kwargs)
+    admission = process_session_admission()
+    permit = admission.acquire()
     try:
+        conn = Connection.connect(conninfo, **kwargs)
+    except BaseException:
+        permit.release()
+        raise
+    conn._session_permit = permit
+    try:
+        events_enabled = boolean(setting("CHESS_CRAWL_EVENTS_ENABLED", "true"), "CHESS_CRAWL_EVENTS_ENABLED")
+        conn.execute("SELECT set_config('chess_crawl.events_enabled',%s,false)",
+                     ("true" if events_enabled else "false",))
         conn.execute("SET TIME ZONE 'UTC'")
         conn.execute("SET lock_timeout = '5s'")
         if mode == "ro":

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
-from chess_crawl.storage.db import Connection, atomic, require_row
+from chess_crawl.storage.db import Connection, atomic, owns_session_lock, require_row
 
 
 @dataclass(frozen=True)
@@ -98,3 +99,43 @@ def delivery_health(conn: Connection) -> dict[str, Any]:
              FROM event_outbox WHERE delivered_at IS NULL"""
     ))
     return dict(row)
+
+
+@atomic
+def prune_events(
+    conn: Connection, *, delivered_before: float,
+    discard_pending_before: float | None = None, limit: int = 256,
+) -> dict[str, int]:
+    """Remove a bounded batch while exclusively owning event delivery.
+
+    Pending events survive normal cleanup. A trusted operator can explicitly
+    expire notifications while consumers recover current state through the API.
+    The publisher's session lock prevents deleting a notification in flight.
+    """
+    if not math.isfinite(delivered_before) or delivered_before < 0:
+        raise ValueError("Delivered-event cutoff must be finite and nonnegative")
+    if discard_pending_before is not None and (
+        not math.isfinite(discard_pending_before) or discard_pending_before < 0
+    ):
+        raise ValueError("Pending-event cutoff must be finite and nonnegative")
+    if type(limit) is not int or not 1 <= limit <= 10000:
+        raise ValueError("Event cleanup batch size must be between 1 and 10000")
+    if not owns_session_lock(conn, "events"):
+        raise RuntimeError("Event cleanup requires exclusive event publisher ownership")
+    removed = list(conn.execute(
+        """DELETE FROM event_outbox WHERE id IN (
+             SELECT id FROM event_outbox
+              WHERE delivered_at IS NOT NULL AND delivered_at < %s
+              ORDER BY delivered_at,id LIMIT %s FOR UPDATE SKIP LOCKED)
+             RETURNING id""", (delivered_before, limit),
+    ))
+    pending = []
+    if discard_pending_before is not None:
+        pending = list(conn.execute(
+            """DELETE FROM event_outbox WHERE id IN (
+                 SELECT id FROM event_outbox
+                  WHERE delivered_at IS NULL AND occurred_at < %s
+                  ORDER BY occurred_at,id LIMIT %s FOR UPDATE SKIP LOCKED)
+                 RETURNING id""", (discard_pending_before, limit-len(removed)),
+        ))
+    return {"delivered_deleted": len(removed), "pending_discarded": len(pending)}

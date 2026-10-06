@@ -161,14 +161,34 @@ def test_migration_accounts_for_existing_results_without_discarding_them(uniniti
         with monkeypatch.context() as legacy:
             legacy.setattr(migrations, "migration_resources", lambda: tuple(m for m in all_migrations if m[0] < 16))
             migrations.initialize(conn)
-        set_id = selection(conn)
-        conn.execute("""INSERT INTO analysis_results(workspace_id,input_signature,implementation,implementation_version,
-                     settings,result_signature,output,created_at)
-                     VALUES('alpha','inputs','fixture','old','{}','legacy','{"kept":true}',1)""")
-        migrations.initialize(conn)
+        assert migrations.current_version(conn) == 15
+        # Seed authentic pre-quota rows: today's submission helper requires the
+        # namespace column that migration 0020 adds to this historical schema.
+        request = {"name": "one", "filters": {}, "settings": {"key": "one"}}
+        with transaction(conn):
+            conn.execute("INSERT INTO workspaces(id,created_at) VALUES('alpha',1)")
+            set_id = int(require_row(conn.execute(
+                """INSERT INTO working_sets(workspace_id,name,filters,settings,input_signature,member_count,created_at)
+                   VALUES('alpha','one','{}','{"key":"one"}',%s,0,1) RETURNING id""",
+                (working_sets.digest({"schema": 1, "filters": {}}),),
+            ))[0])
+            conn.execute(
+                """INSERT INTO working_set_submissions(workspace_id,idempotency_key,request_json,working_set_id)
+                   VALUES('alpha','one',%s,%s)""",
+                (working_sets.canonical(request), set_id),
+            )
+            conn.execute("""INSERT INTO analysis_results(workspace_id,input_signature,implementation,implementation_version,
+                         settings,result_signature,output,created_at)
+                         VALUES('alpha','inputs','fixture','old','{}','legacy','{"kept":true}',1)""")
+        assert migrations.initialize(conn).applied == tuple(m[1] for m in all_migrations if m[0] >= 16)
         assert migrations.initialize(conn).applied == ()
         row = require_row(conn.execute("SELECT output,stored_bytes FROM analysis_results"))
         assert row["output"] == {"kept": True} and row["stored_bytes"] > 0
+        submission = require_row(conn.execute("SELECT submission_namespace,working_set_id FROM working_set_submissions"))
+        assert submission["submission_namespace"] == "api" and submission["working_set_id"] == set_id
+        replayed = working_sets.create_working_set(conn, workspace_id="alpha", idempotency_key="one", **request)
+        assert replayed["replayed"] is True and replayed["id"] == set_id
+        assert require_row(conn.execute("SELECT COUNT(*) FROM working_set_submissions"))[0] == 1
         with pytest.raises(QuotaExceeded):
             save(conn, set_id, limits=Limits(max_analysis_results=1))
 

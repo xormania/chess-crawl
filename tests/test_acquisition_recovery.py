@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from email.utils import format_datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -218,6 +219,7 @@ def test_session_closes_all_clients_even_if_one_close_fails(monkeypatch) -> None
     class Client:
         def __init__(self, provider):
             self.provider = provider
+            self.http = SimpleNamespace(policy=registry.get_provider_info(provider).policy)
 
         def close(self):
             closed.append(self.provider)

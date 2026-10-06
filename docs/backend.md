@@ -3,6 +3,9 @@
 [README](../README.md) · [Operations guide](cli.md) ·
 [Contributing](../CONTRIBUTING.md)
 
+See [hosted-service boundaries](saas-integration.md) for public local components,
+private SaaS responsibilities, and independently scaled service roles.
+
 `chess-crawl` supplies an authenticated JSON API, concurrent durable workers,
 and a durable Mercure event publisher. Its Docker Compose deployment owns these
 services and its archive. A future Symfony application using Symfony Docker
@@ -147,6 +150,65 @@ topic-prefix settings before running bootstrap and Compose; JWT topic scopes
 must match the publisher's prefix. No Symfony configuration is required.
 
 
+### Independently scaled roles
+
+The default stack keeps one combined worker for a small local installation.
+Use Compose 2.24.4+ with `compose.scalable.yaml` to run separate acquisition and
+processing services and publish one HAProxy port for API replicas:
+
+```bash
+docker compose -f compose.yaml -f compose.scalable.yaml up --build -d --wait \
+  --scale api=2 --scale acquisition=2 --scale processing=4
+```
+
+The overlay activates the staged services already defined from shared worker
+configuration and excludes the combined worker. The proxy resolves Docker DNS
+changes every five seconds and supports up to 32 API replicas without assigning
+per-container host ports. Authentication remains in each API instance. Private
+scratch and export caps remain per API process, so budget their aggregate memory.
+All stages share PostgreSQL ownership, quotas, and fair scheduling. Local workers
+poll PostgreSQL and require no queue service. More acquisition replicas preserve
+global provider pacing; processing can run concurrently with provider cooldowns.
+Acquisition writes the shared archive volume; processing and API mount it read-only.
+
+For an external database apply the overlays in this order:
+
+```bash
+docker compose -f compose.yaml -f compose.external.yaml -f compose.scalable.yaml \
+  up --build -d --wait --scale api=2 --scale processing=4
+```
+
+Use exactly the same file list for subsequent operational commands. The external
+overlay applies verified TLS and CA secrets to both staged workers as well as
+other database clients. Source storage settings are independent of database
+transport: Compose forwards `CHESS_CRAWL_ARCHIVE_BACKEND` (default `local`) and
+`CHESS_CRAWL_ARCHIVE_S3_BUCKET`. Containers still mount the local archive for
+historical references. Multi-host deployments require shared durable archives,
+such as S3, rather than independent host volumes. See [AWS deployment](aws-deployment.md)
+for credentials and verified source transfer.
+
+For database-managed workspace authentication append
+`-f compose.managed-auth.yaml`. After migrations, provision an active readiness
+workspace credential with the trusted workspace administration commands and
+replace the `api_token` secret's contents with that credential before starting
+API services. This overlay clears the static token file setting and mounts the same
+secret only for the authenticated health probe. Customer credentials are issued
+separately. Bootstrap alone creates static local credentials and does not provision
+a database workspace credential. See [workspace operations](cli.md).
+
+For polling-only operation append `-f compose.polling.yaml`. This omits the hub
+and publisher and sets `CHESS_CRAWL_EVENTS_ENABLED=false` on API/workers, preventing
+new event outbox rows while preserving durable job status. Existing pending events
+remain until an explicit operator cleanup. Streaming remains enabled by default.
+
+Worker poll, heartbeat, and durable-retry settings now use their documented
+`CHESS_CRAWL_*` environment names across source-run and containers; explicit CLI
+flags can override them. Provider settings include `CHESS_CRAWL_USER_AGENT`,
+`CHESS_CRAWL_CHESSCOM_DELAY_S`, `CHESS_CRAWL_LICHESS_DELAY_S`, and
+`CHESS_CRAWL_PROVIDER_MAX_RETRIES`. Shared budget settings remain identical on
+API and both worker stages. Change policies consistently before increasing counts.
+
+
 ### External PostgreSQL
 
 Use Compose 2.24.4 or newer and the external overlay when the database is
@@ -168,7 +230,8 @@ preserves an existing valid password file; it does not configure the external
 server's role. Obtain the CA PEM from that server's operator, place it at the
 configured host path, and make the file readable by container UID `10001`
 (for example, mode `0444` inside the protected secrets directory). The overlay
-mounts it read-only at `/run/secrets/postgres_ca` in all four Python services.
+mounts it read-only at `/run/secrets/postgres_ca` in all active database clients,
+including both staged workers.
 A missing or unreadable certificate blocks connection instead of disabling TLS.
 
 Keep using both Compose files for subsequent `up`, `stop`, `start`, `logs` and

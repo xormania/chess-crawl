@@ -16,13 +16,19 @@ x-python: &python
     - no-new-privileges:true
 
 x-database-env: &database-env
+  CHESS_CRAWL_DATABASE_MAX_CONNECTIONS: ${CHESS_CRAWL_DATABASE_MAX_CONNECTIONS:-32}
+  CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S: ${CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S:-5.0}
   CHESS_CRAWL_DATABASE_URL: ${CHESS_CRAWL_DATABASE_URL:-postgresql://chess_crawl@postgres:5432/chess_crawl}
   CHESS_CRAWL_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
   # This explicit policy trusts only the bundled Compose service hostname.
   CHESS_CRAWL_DATABASE_TRANSPORT: local
   CHESS_CRAWL_DATABASE_TRUSTED_HOST: postgres
-  CHESS_CRAWL_ARCHIVE_BACKEND: local
+  CHESS_CRAWL_ARCHIVE_BACKEND: ${CHESS_CRAWL_ARCHIVE_BACKEND:-local}
   CHESS_CRAWL_ARCHIVE_DIRECTORY: /var/lib/chess-crawl/archive
+  CHESS_CRAWL_ARCHIVE_S3_BUCKET: ${CHESS_CRAWL_ARCHIVE_S3_BUCKET:-}
+  AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+  CHESS_CRAWL_USAGE_LOG: ${CHESS_CRAWL_USAGE_LOG:-false}
+  CHESS_CRAWL_EVENTS_ENABLED: ${CHESS_CRAWL_EVENTS_ENABLED:-true}
 
 x-budget-env: &budget-env
   CHESS_CRAWL_JOB_MAX_GAMES: ${CHESS_CRAWL_JOB_MAX_GAMES:-100000}
@@ -37,6 +43,52 @@ x-budget-env: &budget-env
   CHESS_CRAWL_WORKSPACE_MAX_ACTIVE_JOBS: ${CHESS_CRAWL_WORKSPACE_MAX_ACTIVE_JOBS:-2}
   CHESS_CRAWL_WORKSPACE_MAX_QUEUED_JOBS: ${CHESS_CRAWL_WORKSPACE_MAX_QUEUED_JOBS:-32}
 
+x-worker-env: &worker-env
+  <<: [*database-env, *budget-env]
+  CHESS_CRAWL_CONTACT: ${CHESS_CRAWL_CONTACT:-set-me@example.invalid}
+  CHESS_CRAWL_USER_AGENT: ${CHESS_CRAWL_USER_AGENT:-}
+  CHESS_CRAWL_CHESSCOM_DELAY_S: ${CHESS_CRAWL_CHESSCOM_DELAY_S:-1}
+  CHESS_CRAWL_LICHESS_DELAY_S: ${CHESS_CRAWL_LICHESS_DELAY_S:-1.5}
+  CHESS_CRAWL_PROVIDER_MAX_RETRIES: ${CHESS_CRAWL_PROVIDER_MAX_RETRIES:-3}
+  CHESS_CRAWL_POLL_INTERVAL: ${CHESS_CRAWL_POLL_INTERVAL:-1}
+  CHESS_CRAWL_HEARTBEAT_INTERVAL: ${CHESS_CRAWL_HEARTBEAT_INTERVAL:-5}
+  CHESS_CRAWL_HEARTBEAT_MAX_AGE: ${CHESS_CRAWL_HEARTBEAT_MAX_AGE:-20}
+  CHESS_CRAWL_JOB_MAX_RETRIES: ${CHESS_CRAWL_JOB_MAX_RETRIES:-3}
+  CHESS_CRAWL_RETRY_BASE: ${CHESS_CRAWL_RETRY_BASE:-30}
+  CHESS_CRAWL_RETRY_MAX: ${CHESS_CRAWL_RETRY_MAX:-3600}
+  CHESS_CRAWL_LICHESS_TOKEN: ${CHESS_CRAWL_LICHESS_TOKEN:-}
+  CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE: ${CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE:-local}
+  CHESS_CRAWL_LICHESS_CLOCKS: ${CHESS_CRAWL_LICHESS_CLOCKS:-true}
+  CHESS_CRAWL_LICHESS_EVALS: ${CHESS_CRAWL_LICHESS_EVALS:-true}
+  CHESS_CRAWL_LICHESS_ACCURACY: ${CHESS_CRAWL_LICHESS_ACCURACY:-true}
+  CHESS_CRAWL_DISPATCH_RETENTION_SECONDS: ${CHESS_CRAWL_DISPATCH_RETENTION_SECONDS:-86400}
+  CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS: ${CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS:-60}
+  CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE: ${CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE:-256}
+
+x-archive-jobs-env: &archive-jobs-env
+  CHESS_CRAWL_ARCHIVE_JOBS_ENABLED: ${CHESS_CRAWL_ARCHIVE_JOBS_ENABLED:-false}
+  CHESS_CRAWL_ARTIFACT_BACKEND: ${CHESS_CRAWL_ARTIFACT_BACKEND:-local}
+  CHESS_CRAWL_ARTIFACT_DIRECTORY: ${CHESS_CRAWL_ARTIFACT_DIRECTORY:-/var/lib/chess-crawl/artifacts}
+  CHESS_CRAWL_ARTIFACT_S3_BUCKET: ${CHESS_CRAWL_ARTIFACT_S3_BUCKET:-}
+  CHESS_CRAWL_ASYNC_MAX_WORKING_SET_MEMBERS: ${CHESS_CRAWL_ASYNC_MAX_WORKING_SET_MEMBERS:-1000000}
+  CHESS_CRAWL_ASYNC_EXPORT_MAX_ROWS: ${CHESS_CRAWL_ASYNC_EXPORT_MAX_ROWS:-1000000}
+  CHESS_CRAWL_ASYNC_EXPORT_MAX_BYTES: ${CHESS_CRAWL_ASYNC_EXPORT_MAX_BYTES:-268435456}
+  CHESS_CRAWL_ASYNC_EXPORT_PREPARE_SECONDS: ${CHESS_CRAWL_ASYNC_EXPORT_PREPARE_SECONDS:-600}
+  CHESS_CRAWL_ARTIFACT_MAX_COUNT: ${CHESS_CRAWL_ARTIFACT_MAX_COUNT:-32}
+  CHESS_CRAWL_ARTIFACT_MAX_BYTES: ${CHESS_CRAWL_ARTIFACT_MAX_BYTES:-1073741824}
+  CHESS_CRAWL_ARTIFACT_TTL_SECONDS: ${CHESS_CRAWL_ARTIFACT_TTL_SECONDS:-86400}
+
+x-source-ready: &source-ready
+  init:
+    condition: service_completed_successfully
+  archive-init:
+    condition: service_completed_successfully
+
+x-artifacts-ready: &artifacts-ready
+  <<: *source-ready
+  artifacts-init:
+    condition: service_completed_successfully
+
 services:
   archive-init:
     <<: *python
@@ -45,6 +97,15 @@ services:
     command: ["python", "/app/docker/archive_init.py"]
     volumes:
       - archive_data:/var/lib/chess-crawl/archive
+    restart: "no"
+
+  artifacts-init:
+    <<: *python
+    user: "0:0"
+    cap_add: [CHOWN, FOWNER]
+    command: ["python", "/app/docker/archive_init.py", "${CHESS_CRAWL_ARTIFACT_DIRECTORY:-/var/lib/chess-crawl/artifacts}"]
+    volumes:
+      - artifacts_data:${CHESS_CRAWL_ARTIFACT_DIRECTORY:-/var/lib/chess-crawl/artifacts}
     restart: "no"
 
   postgres:
@@ -81,15 +142,12 @@ services:
   api:
     <<: *python
     restart: unless-stopped
-    depends_on:
-      init:
-        condition: service_completed_successfully
-      archive-init:
-        condition: service_completed_successfully
+    depends_on: *artifacts-ready
     volumes:
       - archive_data:/var/lib/chess-crawl/archive:ro
+      - artifacts_data:${CHESS_CRAWL_ARTIFACT_DIRECTORY:-/var/lib/chess-crawl/artifacts}:ro
     environment:
-      <<: [*database-env, *budget-env]
+      <<: [*database-env, *budget-env, *archive-jobs-env]
       CHESS_CRAWL_API_TOKEN_FILE: /run/secrets/api_token
       CHESS_CRAWL_MAX_GAMES: ${CHESS_CRAWL_MAX_GAMES:-1000}
       CHESS_CRAWL_MAX_DEPTH: ${CHESS_CRAWL_MAX_DEPTH:-2}
@@ -121,41 +179,16 @@ services:
       retries: 5
       start_period: 10s
 
-  worker:
+  worker: &worker
     <<: *python
     restart: unless-stopped
-    depends_on:
-      init:
-        condition: service_completed_successfully
-      archive-init:
-        condition: service_completed_successfully
+    depends_on: *artifacts-ready
     volumes:
       - archive_data:/var/lib/chess-crawl/archive
-    command:
-      - python
-      - -m
-      - chess_crawl.jobs.worker
-      - --poll-interval
-      - "${CHESS_CRAWL_POLL_INTERVAL:-1}"
-      - --heartbeat-interval
-      - "${CHESS_CRAWL_HEARTBEAT_INTERVAL:-5}"
-      - --max-retries
-      - "${CHESS_CRAWL_JOB_MAX_RETRIES:-3}"
-      - --retry-base
-      - "${CHESS_CRAWL_RETRY_BASE:-30}"
-      - --retry-max
-      - "${CHESS_CRAWL_RETRY_MAX:-3600}"
+      - artifacts_data:${CHESS_CRAWL_ARTIFACT_DIRECTORY:-/var/lib/chess-crawl/artifacts}
+    command: ["python", "-m", "chess_crawl.jobs.worker"]
     environment:
-      <<: [*database-env, *budget-env]
-      CHESS_CRAWL_CONTACT: ${CHESS_CRAWL_CONTACT:-set-me@example.invalid}
-      CHESS_CRAWL_LICHESS_TOKEN: ${CHESS_CRAWL_LICHESS_TOKEN:-}
-      CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE: ${CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE:-local}
-      CHESS_CRAWL_LICHESS_CLOCKS: ${CHESS_CRAWL_LICHESS_CLOCKS:-true}
-      CHESS_CRAWL_LICHESS_EVALS: ${CHESS_CRAWL_LICHESS_EVALS:-true}
-      CHESS_CRAWL_LICHESS_ACCURACY: ${CHESS_CRAWL_LICHESS_ACCURACY:-true}
-      CHESS_CRAWL_DISPATCH_RETENTION_SECONDS: ${CHESS_CRAWL_DISPATCH_RETENTION_SECONDS:-86400}
-      CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS: ${CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS:-60}
-      CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE: ${CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE:-256}
+      <<: [*worker-env, *archive-jobs-env]
     secrets:
       - postgres_password
     stop_grace_period: 90s
@@ -165,6 +198,26 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  acquisition:
+    <<: *worker
+    profiles: [scalable]
+    command: ["python", "-m", "chess_crawl.jobs.worker", "--stage", "acquisition"]
+    depends_on: *source-ready
+    volumes:
+      - archive_data:/var/lib/chess-crawl/archive
+    environment: *worker-env
+
+  processing:
+    <<: *worker
+    profiles: [scalable]
+    command: ["python", "-m", "chess_crawl.jobs.worker", "--stage", "processing"]
+    volumes:
+      - archive_data:/var/lib/chess-crawl/archive:ro
+      - artifacts_data:${CHESS_CRAWL_ARTIFACT_DIRECTORY:-/var/lib/chess-crawl/artifacts}
+    environment:
+      <<: [*worker-env, *archive-jobs-env]
+      CHESS_CRAWL_LICHESS_TOKEN: ""
 
   events:
     <<: *python
@@ -180,6 +233,8 @@ services:
       CHESS_CRAWL_MERCURE_URL: http://mercure/.well-known/mercure
       CHESS_CRAWL_MERCURE_PUBLISHER_JWT_FILE: /run/secrets/mercure_publisher_jwt
       CHESS_CRAWL_MERCURE_TOPIC_PREFIX: ${CHESS_CRAWL_MERCURE_TOPIC_PREFIX:-https://chess-crawl.local}
+      CHESS_CRAWL_EVENTS_RETENTION_SECONDS: ${CHESS_CRAWL_EVENTS_RETENTION_SECONDS:-86400}
+      CHESS_CRAWL_EVENTS_CLEANUP_BATCH_SIZE: ${CHESS_CRAWL_EVENTS_CLEANUP_BATCH_SIZE:-256}
     secrets:
       - postgres_password
       - mercure_publisher_jwt
@@ -215,6 +270,7 @@ services:
 
 volumes:
   archive_data:
+  artifacts_data:
   postgres_data:
   mercure_data:
   mercure_config:

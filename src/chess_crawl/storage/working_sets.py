@@ -25,16 +25,17 @@ def digest(value: Any) -> str:
 def create_working_set(
     conn: Connection, *, workspace_id: str, name: str, filters: dict[str, Any],
     settings: dict[str, Any], idempotency_key: str, max_members: int = 10000,
+    submission_namespace: str = "api",
 ) -> dict[str, Any]:
     if type(max_members) is not int or max_members < 1:
         raise ValidationError("Working-set member limit must be a positive integer",code="invalid_working_set_limit")
     submission_context(conn, workspace_id)
     request_json = canonical({"name": name, "filters": filters, "settings": settings})
     # Scope the lock to the durable submission identity. Lock release follows commit.
-    operation_lock(conn, "working-set", f"{workspace_id}:{idempotency_key}")
+    operation_lock(conn, "working-set", f"{workspace_id}:{submission_namespace}:{idempotency_key}")
     existing = conn.execute(
-        "SELECT * FROM working_set_submissions WHERE workspace_id = %s AND idempotency_key = %s",
-        (workspace_id, idempotency_key),
+        "SELECT * FROM working_set_submissions WHERE workspace_id = %s AND submission_namespace=%s AND idempotency_key = %s",
+        (workspace_id, submission_namespace, idempotency_key),
     ).fetchone()
     if existing:
         if existing["request_json"] != request_json:
@@ -90,7 +91,7 @@ def create_working_set(
     ))[0])
     if selected_count > max_members:
         raise ValidationError(
-            f"Selection exceeds the configured synchronous limit of {max_members} games; use a smaller selection or an operator-configured limit",
+            f"Selection exceeds the configured limit of {max_members} games; use a smaller selection or an operator-configured limit",
             code="working_set_too_large",
         )
     hash_state = hashlib.sha256(canonical({"schema": 1, "filters": filters}).encode())
@@ -111,8 +112,8 @@ def create_working_set(
         (hash_state.hexdigest(), count, working_set_id),
     )
     conn.execute(
-        "INSERT INTO working_set_submissions(workspace_id,idempotency_key,request_json,working_set_id) VALUES(%s,%s,%s,%s)",
-        (workspace_id, idempotency_key, request_json, working_set_id),
+        "INSERT INTO working_set_submissions(workspace_id,submission_namespace,idempotency_key,request_json,working_set_id) VALUES(%s,%s,%s,%s,%s)",
+        (workspace_id, submission_namespace, idempotency_key, request_json, working_set_id),
     )
     return {**get_working_set(conn, working_set_id, workspace_id), "replayed": False}
 

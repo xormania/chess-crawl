@@ -61,7 +61,7 @@ class LichessClient:
         return self.settings.user_agent
 
     def policy(self) -> FetchPolicy:
-        return self._policy
+        return self.http.policy
 
     def get_user_profile(self, username: str) -> RawRecord:
         normalized = _username(username)

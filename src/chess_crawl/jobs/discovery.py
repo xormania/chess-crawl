@@ -8,9 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from chess_crawl.jobs import state
-from chess_crawl.storage.db import Connection, atomic
-from chess_crawl.storage.discovery import OpponentEdge, game_count_for_run
+from chess_crawl.jobs.models import source_provider, DiscoveryJob
+from chess_crawl.storage.db import Connection, atomic, operation_lock, transaction
+from chess_crawl.storage.discovery import OpponentEdge, game_count_for_run, opponents_of_user, record_discovery_edges
 from chess_crawl.storage.repository import upsert_provider_user
+from chess_crawl.storage.acquisition import work_budget_game_count
 
 
 @dataclass(frozen=True)
@@ -81,7 +83,8 @@ def remaining_game_budget(
     if max_games is None:
         return None
     if crawl_run_id is None:
-        return max_games
+        acquired = work_budget_game_count(conn, conn._work_budget_id) if conn._work_budget_id is not None else 0
+        return max(0, max_games - acquired)
     current = game_count_for_run(
         conn,
         crawl_run_id=crawl_run_id,
@@ -103,6 +106,7 @@ def enqueue_opponent_children(
     next_depth: int,
     edges: list[OpponentEdge],
 ) -> int:
+    operation_lock(conn, "run-discovery-budget", crawl_run_id)
     max_depth = int(params["max_depth"])
     if next_depth > max_depth:
         return 0
@@ -117,10 +121,14 @@ def enqueue_opponent_children(
         )
         if known_depth is not None and known_depth <= next_depth:
             continue
+        if known_depth is not None:
+            state.promote_crawl_depth(conn, crawl_run_id=crawl_run_id, provider=provider,
+                                      username=edge.opponent_username, depth=next_depth)
+            continue
         if state.crawl_user_count(conn, crawl_run_id) >= int(params["max_users"]):
-            break
-        if state.total_jobs_for_run(conn, crawl_run_id) >= int(params["max_jobs"]):
-            break
+            continue
+        if state.acquisition_job_count(conn, crawl_run_id) >= int(params["max_jobs"]):
+            continue
         result = state.enqueue_job(
             conn,
             provider=provider,
@@ -137,6 +145,58 @@ def enqueue_opponent_children(
     return inserted
 
 
+
+def expand_opponent_frontier(conn: Connection, job: DiscoveryJob) -> str:
+    """Expand retained run evidence without holding a provider permit."""
+    if job.id is None or job.crawl_run_id is None:
+        raise ValueError("Opponent expansion requires a persisted crawl run")
+    params = state.load_params(job.params_json)
+    user_id = ensure_local_user(conn, provider=source_provider(job), username=job.target)
+    child_params = dict(params)
+    child_params.pop("cursor_index", None)
+    child_params.pop("bounded_capture_complete", None)
+
+    next_depth = job.depth + 1
+    max_depth = int(child_params["max_depth"])
+    if next_depth > max_depth:
+        return f"processed {job.target}; depth cap reached"
+
+    edges = opponents_of_user(
+        conn,
+        provider=source_provider(job),
+        user_id=user_id,
+        crawl_run_id=job.crawl_run_id,
+        since=_int_or_none(params.get("since")),
+        until=_int_or_none(params.get("until")),
+    )
+    with transaction(conn):
+        operation_lock(conn, "run-discovery-budget", job.crawl_run_id)
+        frontier_edges = [
+            edge for edge in edges
+            if not _known_at_or_before_current_depth(
+                conn, crawl_run_id=job.crawl_run_id, provider=source_provider(job),
+                username=edge.opponent_username, current_depth=job.depth,
+            )
+        ]
+        edge_count = record_discovery_edges(
+            conn,
+            crawl_run_id=job.crawl_run_id,
+            provider=source_provider(job),
+            from_user_id=user_id,
+            depth=next_depth,
+            edges=frontier_edges,
+        )
+        child_count = enqueue_opponent_children(
+            conn,
+            crawl_run_id=job.crawl_run_id,
+            parent_job_id=job.id,
+            provider=source_provider(job),
+            params=child_params,
+            next_depth=next_depth,
+            edges=frontier_edges,
+        )
+    return f"edges={edge_count}; child_jobs={child_count}"
+
 def _int_or_none(value: object) -> int | None:
     if value is None:
         return None
@@ -149,3 +209,19 @@ def _int_or_none(value: object) -> int | None:
     if not isinstance(value, str):
         return None
     return int(value)
+
+def _known_at_or_before_current_depth(
+    conn: Connection,
+    *,
+    crawl_run_id: int,
+    provider: str,
+    username: str,
+    current_depth: int,
+) -> bool:
+    known_depth = state.known_crawl_depth(
+        conn,
+        crawl_run_id=crawl_run_id,
+        provider=provider,
+        username=username,
+    )
+    return known_depth is not None and known_depth <= current_depth

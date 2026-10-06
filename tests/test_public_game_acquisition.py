@@ -90,6 +90,7 @@ def test_api_game_job_never_archives_account_private_response(database_url: str,
                 assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 0
             else:
                 assert result.done == 1
+                assert JobRunner(conn, stage="processing").run(max_jobs=1).done == 1
                 row = require_row(conn.execute("SELECT id,owner_scope FROM raw_payloads"))
                 assert row["owner_scope"] == "public"
                 assert json.loads(read_raw_payload(conn, row["id"]).body)["privateMarker"] is False

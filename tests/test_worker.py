@@ -19,6 +19,7 @@ from chess_crawl.config import Config
 from chess_crawl.ingest import IngestResult
 from chess_crawl.jobs import runner as runner_module, state, worker as worker_module
 from chess_crawl.jobs.locking import ExecutorBusy, archive_lock
+from chess_crawl.jobs import acquisition as acquisition_module
 from chess_crawl.jobs.runner import ExecutionOutcome, JobRunner
 from chess_crawl.jobs.settings import WorkerSettings
 from chess_crawl.jobs.worker import Worker
@@ -355,7 +356,7 @@ def test_stop_finishes_current_month_and_leaves_checkpoint_for_next_executor(
         stopping.set()
         return IngestResult("chess.com", "monthly_archive", 200, None, (), "stored")
 
-    monkeypatch.setattr(runner_module, "fetch_chesscom_month", fake_month)
+    monkeypatch.setattr(acquisition_module, "fetch_chesscom_month", fake_month)
     job_id = state.enqueue_job(
         initialized_conn, provider="chess.com", kind="fetch_user_games", target="test",
         params={"since": 1704067200, "until": 1709251200, "max_games": 100},
@@ -369,7 +370,11 @@ def test_stop_finishes_current_month_and_leaves_checkpoint_for_next_executor(
     JobRunner(initialized_conn, stop_requested=stopping.is_set).run()
     job = state.get_job(initialized_conn, job_id)
     assert months == [1, 2]
-    assert job is not None and job.state == "done"
+    assert job is not None and job.state == "pending"
+    stopping.clear()
+    assert JobRunner(initialized_conn, stop_requested=stopping.is_set).run().done == 1
+    completed = state.get_job(initialized_conn, job_id)
+    assert completed is not None and completed.state == "done"
 
 
 def test_heartbeat_continues_during_http_and_stop_claims_no_new_job(database_url: str) -> None:

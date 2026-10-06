@@ -23,6 +23,14 @@ services:
     environment: *external-database-env
     secrets:
       - postgres_ca
+  acquisition:
+    environment: *external-database-env
+    secrets:
+      - postgres_ca
+  processing:
+    environment: *external-database-env
+    secrets:
+      - postgres_ca
   events:
     environment: *external-database-env
     secrets:

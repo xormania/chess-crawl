@@ -39,7 +39,7 @@
     "ApiTokenSecretArn": {
       "Type": "String",
       "AllowedPattern": "arn:[a-z-]+:secretsmanager:[a-z0-9-]+:\\d{12}:secret:.+",
-      "Description": "Existing plaintext API service-token secret ARN"
+      "Description": "Plaintext bearer credential: static API token in static mode, or provisioned workspace readiness credential in database mode"
     },
     "ApplicationSecretKmsKeyArn": {
       "Type": "String",
@@ -96,38 +96,12 @@
       "MinValue": 0,
       "MaxValue": 10
     },
-    "WorkerDesiredCount": {
-      "Type": "Number",
-      "Default": 0,
-      "MinValue": 0,
-      "MaxValue": 100
-    },
     "DispatcherDesiredCount": {
       "Type": "Number",
       "Default": 0,
       "AllowedValues": [
         0,
         1
-      ]
-    },
-    "TaskCpu": {
-      "Type": "String",
-      "Default": "512",
-      "AllowedValues": [
-        "512",
-        "1024",
-        "2048",
-        "4096"
-      ]
-    },
-    "TaskMemory": {
-      "Type": "String",
-      "Default": "1024",
-      "AllowedValues": [
-        "1024",
-        "2048",
-        "4096",
-        "8192"
       ]
     },
     "QueueVisibilitySeconds": {
@@ -160,19 +134,19 @@
     },
     "MaxGamesPerRequest": {
       "Type": "Number",
-      "Default": 100000,
+      "Default": 1000,
       "MinValue": 1,
       "MaxValue": 100000000
     },
     "MaxJobsPerRequest": {
       "Type": "Number",
-      "Default": 10000,
+      "Default": 200,
       "MinValue": 1,
       "MaxValue": 10000000
     },
     "MaxUsersPerRequest": {
       "Type": "Number",
-      "Default": 1000,
+      "Default": 100,
       "MinValue": 1,
       "MaxValue": 10000000
     },
@@ -187,6 +161,364 @@
         "true",
         "false"
       ]
+    },
+    "ApiCpu": {
+      "Type": "String",
+      "Default": "512",
+      "AllowedValues": [
+        "512",
+        "1024",
+        "2048",
+        "4096"
+      ],
+      "Description": "Api Fargate task cpu"
+    },
+    "ApiMemory": {
+      "Type": "String",
+      "Default": "1024",
+      "AllowedValues": [
+        "1024",
+        "2048",
+        "4096",
+        "8192"
+      ],
+      "Description": "Api Fargate task memory"
+    },
+    "AcquisitionCpu": {
+      "Type": "String",
+      "Default": "512",
+      "AllowedValues": [
+        "512",
+        "1024",
+        "2048",
+        "4096"
+      ],
+      "Description": "Acquisition Fargate task cpu"
+    },
+    "AcquisitionMemory": {
+      "Type": "String",
+      "Default": "1024",
+      "AllowedValues": [
+        "1024",
+        "2048",
+        "4096",
+        "8192"
+      ],
+      "Description": "Acquisition Fargate task memory"
+    },
+    "ProcessingCpu": {
+      "Type": "String",
+      "Default": "512",
+      "AllowedValues": [
+        "512",
+        "1024",
+        "2048",
+        "4096"
+      ],
+      "Description": "Processing Fargate task cpu"
+    },
+    "ProcessingMemory": {
+      "Type": "String",
+      "Default": "1024",
+      "AllowedValues": [
+        "1024",
+        "2048",
+        "4096",
+        "8192"
+      ],
+      "Description": "Processing Fargate task memory"
+    },
+    "DispatcherCpu": {
+      "Type": "String",
+      "Default": "512",
+      "AllowedValues": [
+        "512",
+        "1024",
+        "2048",
+        "4096"
+      ],
+      "Description": "Dispatcher Fargate task cpu"
+    },
+    "DispatcherMemory": {
+      "Type": "String",
+      "Default": "1024",
+      "AllowedValues": [
+        "1024",
+        "2048",
+        "4096",
+        "8192"
+      ],
+      "Description": "Dispatcher Fargate task memory"
+    },
+    "MigrationCpu": {
+      "Type": "String",
+      "Default": "512",
+      "AllowedValues": [
+        "512",
+        "1024",
+        "2048",
+        "4096"
+      ],
+      "Description": "Migration Fargate task cpu"
+    },
+    "MigrationMemory": {
+      "Type": "String",
+      "Default": "1024",
+      "AllowedValues": [
+        "1024",
+        "2048",
+        "4096",
+        "8192"
+      ],
+      "Description": "Migration Fargate task memory"
+    },
+    "AcquisitionDesiredCount": {
+      "Type": "Number",
+      "Default": 0,
+      "MinValue": 0,
+      "MaxValue": 100
+    },
+    "ProcessingDesiredCount": {
+      "Type": "Number",
+      "Default": 0,
+      "MinValue": 0,
+      "MaxValue": 100
+    },
+    "JobMaxGames": {
+      "Type": "Number",
+      "Default": 100000,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_JOB_MAX_GAMES"
+    },
+    "JobMaxNormalizationUnits": {
+      "Type": "Number",
+      "Default": 100000,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_JOB_MAX_NORMALIZATION_UNITS"
+    },
+    "JobMaxRemoteBytes": {
+      "Type": "Number",
+      "Default": 268435456,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_JOB_MAX_REMOTE_BYTES"
+    },
+    "JobMaxRemoteRequests": {
+      "Type": "Number",
+      "Default": 2000,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_JOB_MAX_REMOTE_REQUESTS"
+    },
+    "MaxResponseBytes": {
+      "Type": "Number",
+      "Default": 16777216,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_MAX_RESPONSE_BYTES"
+    },
+    "WorkspaceMaxGames": {
+      "Type": "Number",
+      "Default": 1000000,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_WORKSPACE_MAX_GAMES"
+    },
+    "WorkspaceMaxNormalizationUnits": {
+      "Type": "Number",
+      "Default": 1000000,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_WORKSPACE_MAX_NORMALIZATION_UNITS"
+    },
+    "WorkspaceMaxRemoteBytes": {
+      "Type": "Number",
+      "Default": 2147483648,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_WORKSPACE_MAX_REMOTE_BYTES"
+    },
+    "WorkspaceMaxRemoteRequests": {
+      "Type": "Number",
+      "Default": 10000,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_WORKSPACE_MAX_REMOTE_REQUESTS"
+    },
+    "WorkspaceMaxActiveJobs": {
+      "Type": "Number",
+      "Default": 2,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_WORKSPACE_MAX_ACTIVE_JOBS"
+    },
+    "WorkspaceMaxQueuedJobs": {
+      "Type": "Number",
+      "Default": 32,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_WORKSPACE_MAX_QUEUED_JOBS"
+    },
+    "WorkerPollInterval": {
+      "Type": "Number",
+      "Default": 1,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_POLL_INTERVAL"
+    },
+    "WorkerHeartbeatInterval": {
+      "Type": "Number",
+      "Default": 5,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_HEARTBEAT_INTERVAL"
+    },
+    "WorkerHeartbeatMaxAge": {
+      "Type": "Number",
+      "Default": 20,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_HEARTBEAT_MAX_AGE"
+    },
+    "JobMaxRetries": {
+      "Type": "Number",
+      "Default": 3,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_JOB_MAX_RETRIES"
+    },
+    "JobRetryBase": {
+      "Type": "Number",
+      "Default": 30,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_RETRY_BASE"
+    },
+    "JobRetryMax": {
+      "Type": "Number",
+      "Default": 3600,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_RETRY_MAX"
+    },
+    "DispatchRetentionSeconds": {
+      "Type": "Number",
+      "Default": 86400,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_DISPATCH_RETENTION_SECONDS"
+    },
+    "DispatchCleanupIntervalSeconds": {
+      "Type": "Number",
+      "Default": 60,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS"
+    },
+    "DispatchCleanupBatchSize": {
+      "Type": "Number",
+      "Default": 256,
+      "MinValue": 1,
+      "Description": "CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE"
+    },
+    "ChesscomDelaySeconds": {
+      "Type": "Number",
+      "Default": 1,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_CHESSCOM_DELAY_S"
+    },
+    "LichessDelaySeconds": {
+      "Type": "Number",
+      "Default": 1.5,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_LICHESS_DELAY_S"
+    },
+    "ProviderMaxRetries": {
+      "Type": "Number",
+      "Default": 3,
+      "MinValue": 0,
+      "Description": "CHESS_CRAWL_PROVIDER_MAX_RETRIES"
+    },
+    "UsageLog": {
+      "Type": "String",
+      "Default": "true",
+      "AllowedValues": [
+        "true",
+        "false"
+      ],
+      "Description": "Enable anonymous workload records for all runtime roles"
+    },
+    "EventsEnabled": {
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": [
+        "true",
+        "false"
+      ],
+      "Description": "Generate Mercure outbox events only when an independently deployed publisher/hub is available"
+    },
+    "ApiAuthMode": {
+      "Type": "String",
+      "Default": "static",
+      "AllowedValues": [
+        "static",
+        "database"
+      ],
+      "Description": "Static local/bootstrap auth or provisioned and revocable PostgreSQL workspace credentials"
+    },
+    "ArchiveJobsEnabled": {
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": [
+        "true",
+        "false"
+      ],
+      "Description": "CHESS_CRAWL_ARCHIVE_JOBS_ENABLED"
+    },
+    "AsyncMaxWorkingSetMembers": {
+      "Type": "Number",
+      "Default": 1000000,
+      "MinValue": 1,
+      "MaxValue": 10000000,
+      "Description": "CHESS_CRAWL_ASYNC_MAX_WORKING_SET_MEMBERS"
+    },
+    "AsyncExportMaxRows": {
+      "Type": "Number",
+      "Default": 1000000,
+      "MinValue": 1,
+      "MaxValue": 10000000,
+      "Description": "CHESS_CRAWL_ASYNC_EXPORT_MAX_ROWS"
+    },
+    "AsyncExportMaxBytes": {
+      "Type": "Number",
+      "Default": 268435456,
+      "MinValue": 1,
+      "MaxValue": 4294967296,
+      "Description": "CHESS_CRAWL_ASYNC_EXPORT_MAX_BYTES"
+    },
+    "AsyncExportPrepareSeconds": {
+      "Type": "Number",
+      "Default": 600,
+      "MinValue": 1,
+      "MaxValue": 3600,
+      "Description": "CHESS_CRAWL_ASYNC_EXPORT_PREPARE_SECONDS"
+    },
+    "ArtifactMaxCount": {
+      "Type": "Number",
+      "Default": 32,
+      "MinValue": 1,
+      "MaxValue": 10000,
+      "Description": "CHESS_CRAWL_ARTIFACT_MAX_COUNT"
+    },
+    "ArtifactMaxBytes": {
+      "Type": "Number",
+      "Default": 1073741824,
+      "MinValue": 1,
+      "MaxValue": 1125899906842624,
+      "Description": "CHESS_CRAWL_ARTIFACT_MAX_BYTES"
+    },
+    "ArtifactTtlSeconds": {
+      "Type": "Number",
+      "Default": 86400,
+      "MinValue": 1,
+      "MaxValue": 31536000,
+      "Description": "CHESS_CRAWL_ARTIFACT_TTL_SECONDS"
+    },
+    "DatabaseMaxConnections": {
+      "Type": "String",
+      "Default": "32",
+      "AllowedPattern": "(?:[2-9]|[1-9][0-9]+)",
+      "Description": "Maximum admitted PostgreSQL sessions per process, at least 2. Budget the sum across all runtime replicas."
+    },
+    "DatabaseAdmissionTimeoutSeconds": {
+      "Type": "Number",
+      "Default": 5.0,
+      "MinValue": 5e-324,
+      "MaxValue": 9223372036.0,
+      "Description": "Finite positive session admission wait seconds, within the Linux threading timer range. Restart processes to change their admission settings."
     }
   },
   "Conditions": {
@@ -224,6 +556,14 @@
           "Ref": "LoadBalancerDeletionProtection"
         },
         "true"
+      ]
+    },
+    "DatabaseApiAuth": {
+      "Fn::Equals": [
+        {
+          "Ref": "ApiAuthMode"
+        },
+        "database"
       ]
     }
   },
@@ -294,48 +634,21 @@
         }
       }
     },
-    "DeadLetterQueue": {
-      "Type": "AWS::SQS::Queue",
-      "Properties": {
-        "SqsManagedSseEnabled": true,
-        "MessageRetentionPeriod": 1209600
-      },
-      "DeletionPolicy": "Retain",
-      "UpdateReplacePolicy": "Retain"
-    },
-    "WorkQueue": {
-      "Type": "AWS::SQS::Queue",
-      "Properties": {
-        "SqsManagedSseEnabled": true,
-        "MessageRetentionPeriod": 345600,
-        "ReceiveMessageWaitTimeSeconds": 20,
-        "VisibilityTimeout": {
-          "Ref": "QueueVisibilitySeconds"
-        },
-        "RedrivePolicy": {
-          "deadLetterTargetArn": {
-            "Fn::GetAtt": [
-              "DeadLetterQueue",
-              "Arn"
-            ]
-          },
-          "maxReceiveCount": {
-            "Ref": "QueueMaxReceives"
-          }
-        }
-      },
-      "DeletionPolicy": "Retain",
-      "UpdateReplacePolicy": "Retain"
-    },
     "QueuePolicy": {
       "Type": "AWS::SQS::QueuePolicy",
       "Properties": {
         "Queues": [
           {
-            "Ref": "WorkQueue"
+            "Ref": "AcquisitionQueue"
           },
           {
-            "Ref": "DeadLetterQueue"
+            "Ref": "AcquisitionDeadLetterQueue"
+          },
+          {
+            "Ref": "ProcessingQueue"
+          },
+          {
+            "Ref": "ProcessingDeadLetterQueue"
           }
         ],
         "PolicyDocument": {
@@ -348,13 +661,25 @@
               "Resource": [
                 {
                   "Fn::GetAtt": [
-                    "WorkQueue",
+                    "AcquisitionQueue",
                     "Arn"
                   ]
                 },
                 {
                   "Fn::GetAtt": [
-                    "DeadLetterQueue",
+                    "AcquisitionDeadLetterQueue",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::GetAtt": [
+                    "ProcessingQueue",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::GetAtt": [
+                    "ProcessingDeadLetterQueue",
                     "Arn"
                   ]
                 }
@@ -868,69 +1193,14 @@
                   "Resource": {
                     "Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"
                   }
-                }
-              ]
-            }
-          }
-        ]
-      }
-    },
-    "WorkerRole": {
-      "Type": "AWS::IAM::Role",
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Principal": {
-                "Service": "ecs-tasks.amazonaws.com"
-              },
-              "Action": "sts:AssumeRole",
-              "Condition": {
-                "StringEquals": {
-                  "aws:SourceAccount": {
-                    "Ref": "AWS::AccountId"
-                  }
-                },
-                "ArnLike": {
-                  "aws:SourceArn": {
-                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
-                  }
-                }
-              }
-            }
-          ]
-        },
-        "Policies": [
-          {
-            "PolicyName": "archive-scoped",
-            "PolicyDocument": {
-              "Version": "2012-10-17",
-              "Statement": [
-                {
-                  "Effect": "Allow",
-                  "Action": [
-                    "s3:GetObject",
-                    "s3:PutObject"
-                  ],
-                  "Resource": {
-                    "Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"
-                  }
                 },
                 {
                   "Effect": "Allow",
                   "Action": [
-                    "sqs:ReceiveMessage",
-                    "sqs:DeleteMessage",
-                    "sqs:ChangeMessageVisibility",
-                    "sqs:GetQueueAttributes"
+                    "s3:GetObject"
                   ],
                   "Resource": {
-                    "Fn::GetAtt": [
-                      "WorkQueue",
-                      "Arn"
-                    ]
+                    "Fn::Sub": "${ArchiveBucket.Arn}/artifacts/*"
                   }
                 }
               ]
@@ -977,12 +1247,20 @@
                   "Action": [
                     "sqs:SendMessage"
                   ],
-                  "Resource": {
-                    "Fn::GetAtt": [
-                      "WorkQueue",
-                      "Arn"
-                    ]
-                  }
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "AcquisitionQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "ProcessingQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
                 }
               ]
             }
@@ -1046,10 +1324,10 @@
         ],
         "NetworkMode": "awsvpc",
         "Cpu": {
-          "Ref": "TaskCpu"
+          "Ref": "ApiCpu"
         },
         "Memory": {
-          "Ref": "TaskMemory"
+          "Ref": "ApiMemory"
         },
         "RuntimePlatform": {
           "CpuArchitecture": "X86_64",
@@ -1111,12 +1389,6 @@
                 }
               },
               {
-                "Name": "CHESS_CRAWL_SQS_QUEUE_URL",
-                "Value": {
-                  "Ref": "WorkQueue"
-                }
-              },
-              {
                 "Name": "CHESS_CRAWL_CONTACT",
                 "Value": {
                   "Ref": "Contact"
@@ -1124,7 +1396,9 @@
               },
               {
                 "Name": "CHESS_CRAWL_USAGE_LOG",
-                "Value": "true"
+                "Value": {
+                  "Ref": "UsageLog"
+                }
               },
               {
                 "Name": "CHESS_CRAWL_MAX_GAMES",
@@ -1149,6 +1423,154 @@
                 "Value": {
                   "Ref": "AWS::Region"
                 }
+              },
+              {
+                "Name": "CHESS_CRAWL_EVENTS_ENABLED",
+                "Value": {
+                  "Ref": "EventsEnabled"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_GAMES",
+                "Value": {
+                  "Ref": "JobMaxGames"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_NORMALIZATION_UNITS",
+                "Value": {
+                  "Ref": "JobMaxNormalizationUnits"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_REMOTE_BYTES",
+                "Value": {
+                  "Ref": "JobMaxRemoteBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_REMOTE_REQUESTS",
+                "Value": {
+                  "Ref": "JobMaxRemoteRequests"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_MAX_RESPONSE_BYTES",
+                "Value": {
+                  "Ref": "MaxResponseBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_GAMES",
+                "Value": {
+                  "Ref": "WorkspaceMaxGames"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_NORMALIZATION_UNITS",
+                "Value": {
+                  "Ref": "WorkspaceMaxNormalizationUnits"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_REMOTE_BYTES",
+                "Value": {
+                  "Ref": "WorkspaceMaxRemoteBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_REMOTE_REQUESTS",
+                "Value": {
+                  "Ref": "WorkspaceMaxRemoteRequests"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_ACTIVE_JOBS",
+                "Value": {
+                  "Ref": "WorkspaceMaxActiveJobs"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_QUEUED_JOBS",
+                "Value": {
+                  "Ref": "WorkspaceMaxQueuedJobs"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_API_AUTH_MODE",
+                "Value": {
+                  "Ref": "ApiAuthMode"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_JOBS_ENABLED",
+                "Value": {
+                  "Ref": "ArchiveJobsEnabled"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_MAX_WORKING_SET_MEMBERS",
+                "Value": {
+                  "Ref": "AsyncMaxWorkingSetMembers"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_MAX_ROWS",
+                "Value": {
+                  "Ref": "AsyncExportMaxRows"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_MAX_BYTES",
+                "Value": {
+                  "Ref": "AsyncExportMaxBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_PREPARE_SECONDS",
+                "Value": {
+                  "Ref": "AsyncExportPrepareSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_MAX_COUNT",
+                "Value": {
+                  "Ref": "ArtifactMaxCount"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_MAX_BYTES",
+                "Value": {
+                  "Ref": "ArtifactMaxBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_TTL_SECONDS",
+                "Value": {
+                  "Ref": "ArtifactTtlSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_BACKEND",
+                "Value": "s3"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_S3_BUCKET",
+                "Value": {
+                  "Ref": "ArchiveBucket"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_MAX_CONNECTIONS",
+                "Value": {
+                  "Ref": "DatabaseMaxConnections"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S",
+                "Value": {
+                  "Ref": "DatabaseAdmissionTimeoutSeconds"
+                }
               }
             ],
             "Secrets": [
@@ -1159,7 +1581,13 @@
                 }
               },
               {
-                "Name": "CHESS_CRAWL_API_TOKEN",
+                "Name": {
+                  "Fn::If": [
+                    "DatabaseApiAuth",
+                    "CHESS_CRAWL_HEALTHCHECK_TOKEN",
+                    "CHESS_CRAWL_API_TOKEN"
+                  ]
+                },
                 "ValueFrom": {
                   "Ref": "ApiTokenSecretArn"
                 }
@@ -1221,161 +1649,6 @@
         ]
       }
     },
-    "WorkerTask": {
-      "Type": "AWS::ECS::TaskDefinition",
-      "Properties": {
-        "RequiresCompatibilities": [
-          "FARGATE"
-        ],
-        "NetworkMode": "awsvpc",
-        "Cpu": {
-          "Ref": "TaskCpu"
-        },
-        "Memory": {
-          "Ref": "TaskMemory"
-        },
-        "RuntimePlatform": {
-          "CpuArchitecture": "X86_64",
-          "OperatingSystemFamily": "LINUX"
-        },
-        "ExecutionRoleArn": {
-          "Fn::GetAtt": [
-            "ExecutionRole",
-            "Arn"
-          ]
-        },
-        "TaskRoleArn": {
-          "Fn::GetAtt": [
-            "WorkerRole",
-            "Arn"
-          ]
-        },
-        "ContainerDefinitions": [
-          {
-            "Name": "archive",
-            "Image": {
-              "Ref": "ContainerImage"
-            },
-            "Essential": true,
-            "User": "10001:10001",
-            "ReadonlyRootFilesystem": true,
-            "Command": [
-              "python",
-              "-m",
-              "chess_crawl.jobs.worker",
-              "--stage",
-              "all",
-              "--queue-url",
-              {
-                "Ref": "WorkQueue"
-              }
-            ],
-            "Environment": [
-              {
-                "Name": "CHESS_CRAWL_DATABASE_URL",
-                "Value": {
-                  "Fn::Sub": "postgresql://${ApplicationDatabaseUser}@${Database.Endpoint.Address}:${Database.Endpoint.Port}/chess_crawl"
-                }
-              },
-              {
-                "Name": "CHESS_CRAWL_DATABASE_TRANSPORT",
-                "Value": "verified"
-              },
-              {
-                "Name": "CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE",
-                "Value": "/app/docker/rds-ca-bundle.pem"
-              },
-              {
-                "Name": "CHESS_CRAWL_ARCHIVE_BACKEND",
-                "Value": "s3"
-              },
-              {
-                "Name": "CHESS_CRAWL_ARCHIVE_S3_BUCKET",
-                "Value": {
-                  "Ref": "ArchiveBucket"
-                }
-              },
-              {
-                "Name": "CHESS_CRAWL_SQS_QUEUE_URL",
-                "Value": {
-                  "Ref": "WorkQueue"
-                }
-              },
-              {
-                "Name": "CHESS_CRAWL_CONTACT",
-                "Value": {
-                  "Ref": "Contact"
-                }
-              },
-              {
-                "Name": "CHESS_CRAWL_USAGE_LOG",
-                "Value": "true"
-              },
-              {
-                "Name": "AWS_DEFAULT_REGION",
-                "Value": {
-                  "Ref": "AWS::Region"
-                }
-              }
-            ],
-            "Secrets": [
-              {
-                "Name": "CHESS_CRAWL_DATABASE_PASSWORD",
-                "ValueFrom": {
-                  "Fn::Sub": "${ApplicationDatabaseSecretArn}:password::"
-                }
-              }
-            ],
-            "LinuxParameters": {
-              "InitProcessEnabled": true,
-              "Capabilities": {
-                "Drop": [
-                  "ALL"
-                ]
-              }
-            },
-            "LogConfiguration": {
-              "LogDriver": "awslogs",
-              "Options": {
-                "awslogs-group": {
-                  "Ref": "Logs"
-                },
-                "awslogs-region": {
-                  "Ref": "AWS::Region"
-                },
-                "awslogs-stream-prefix": "WorkerTask",
-                "mode": "non-blocking",
-                "max-buffer-size": "4m"
-              }
-            },
-            "MountPoints": [
-              {
-                "SourceVolume": "runtime-tmp",
-                "ContainerPath": "/tmp",
-                "ReadOnly": false
-              }
-            ],
-            "HealthCheck": {
-              "Command": [
-                "CMD",
-                "python",
-                "/app/docker/healthcheck.py",
-                "worker"
-              ],
-              "Interval": 30,
-              "Timeout": 5,
-              "Retries": 3,
-              "StartPeriod": 30
-            }
-          }
-        ],
-        "Volumes": [
-          {
-            "Name": "runtime-tmp"
-          }
-        ]
-      }
-    },
     "DispatcherTask": {
       "Type": "AWS::ECS::TaskDefinition",
       "Properties": {
@@ -1384,10 +1657,10 @@
         ],
         "NetworkMode": "awsvpc",
         "Cpu": {
-          "Ref": "TaskCpu"
+          "Ref": "DispatcherCpu"
         },
         "Memory": {
-          "Ref": "TaskMemory"
+          "Ref": "DispatcherMemory"
         },
         "RuntimePlatform": {
           "CpuArchitecture": "X86_64",
@@ -1435,22 +1708,6 @@
                 "Value": "/app/docker/rds-ca-bundle.pem"
               },
               {
-                "Name": "CHESS_CRAWL_ARCHIVE_BACKEND",
-                "Value": "s3"
-              },
-              {
-                "Name": "CHESS_CRAWL_ARCHIVE_S3_BUCKET",
-                "Value": {
-                  "Ref": "ArchiveBucket"
-                }
-              },
-              {
-                "Name": "CHESS_CRAWL_SQS_QUEUE_URL",
-                "Value": {
-                  "Ref": "WorkQueue"
-                }
-              },
-              {
                 "Name": "CHESS_CRAWL_CONTACT",
                 "Value": {
                   "Ref": "Contact"
@@ -1458,12 +1715,68 @@
               },
               {
                 "Name": "CHESS_CRAWL_USAGE_LOG",
-                "Value": "true"
+                "Value": {
+                  "Ref": "UsageLog"
+                }
               },
               {
                 "Name": "AWS_DEFAULT_REGION",
                 "Value": {
                   "Ref": "AWS::Region"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_EVENTS_ENABLED",
+                "Value": {
+                  "Ref": "EventsEnabled"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DISPATCH_RETENTION_SECONDS",
+                "Value": {
+                  "Ref": "DispatchRetentionSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS",
+                "Value": {
+                  "Ref": "DispatchCleanupIntervalSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE",
+                "Value": {
+                  "Ref": "DispatchCleanupBatchSize"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_SQS_QUEUE_URL",
+                "Value": {
+                  "Ref": "AcquisitionQueue"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_SQS_ACQUISITION_QUEUE_URL",
+                "Value": {
+                  "Ref": "AcquisitionQueue"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_SQS_PROCESSING_QUEUE_URL",
+                "Value": {
+                  "Ref": "ProcessingQueue"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_MAX_CONNECTIONS",
+                "Value": {
+                  "Ref": "DatabaseMaxConnections"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S",
+                "Value": {
+                  "Ref": "DatabaseAdmissionTimeoutSeconds"
                 }
               }
             ],
@@ -1521,10 +1834,10 @@
         ],
         "NetworkMode": "awsvpc",
         "Cpu": {
-          "Ref": "TaskCpu"
+          "Ref": "MigrationCpu"
         },
         "Memory": {
-          "Ref": "TaskMemory"
+          "Ref": "MigrationMemory"
         },
         "RuntimePlatform": {
           "CpuArchitecture": "X86_64",
@@ -1583,7 +1896,9 @@
               },
               {
                 "Name": "CHESS_CRAWL_USAGE_LOG",
-                "Value": "true"
+                "Value": {
+                  "Ref": "UsageLog"
+                }
               },
               {
                 "Name": "CHESS_CRAWL_DATABASE_URL",
@@ -1601,6 +1916,18 @@
                 "Name": "AWS_DEFAULT_REGION",
                 "Value": {
                   "Ref": "AWS::Region"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_MAX_CONNECTIONS",
+                "Value": {
+                  "Ref": "DatabaseMaxConnections"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S",
+                "Value": {
+                  "Ref": "DatabaseAdmissionTimeoutSeconds"
                 }
               }
             ],
@@ -1717,17 +2044,17 @@
         "ApiListener"
       ]
     },
-    "WorkerService": {
+    "DispatcherService": {
       "Type": "AWS::ECS::Service",
       "Properties": {
         "Cluster": {
           "Ref": "Cluster"
         },
         "TaskDefinition": {
-          "Ref": "WorkerTask"
+          "Ref": "DispatcherTask"
         },
         "DesiredCount": {
-          "Ref": "WorkerDesiredCount"
+          "Ref": "DispatcherDesiredCount"
         },
         "LaunchType": "FARGATE",
         "PlatformVersion": "LATEST",
@@ -1754,17 +2081,918 @@
         }
       }
     },
-    "DispatcherService": {
+    "AcquisitionDeadLetterQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "SqsManagedSseEnabled": true,
+        "MessageRetentionPeriod": 1209600
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "AcquisitionQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "SqsManagedSseEnabled": true,
+        "MessageRetentionPeriod": 345600,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "VisibilityTimeout": {
+          "Ref": "QueueVisibilitySeconds"
+        },
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "AcquisitionDeadLetterQueue",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": {
+            "Ref": "QueueMaxReceives"
+          }
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "AcquisitionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "archive-scoped",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "AcquisitionQueue",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ProcessingDeadLetterQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "SqsManagedSseEnabled": true,
+        "MessageRetentionPeriod": 1209600
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "ProcessingQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "SqsManagedSseEnabled": true,
+        "MessageRetentionPeriod": 345600,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "VisibilityTimeout": {
+          "Ref": "QueueVisibilitySeconds"
+        },
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "ProcessingDeadLetterQueue",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": {
+            "Ref": "QueueMaxReceives"
+          }
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "ProcessingRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "archive-scoped",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${ArchiveBucket.Arn}/sha256/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ProcessingQueue",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${ArchiveBucket.Arn}/artifacts/*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "AcquisitionTask": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "NetworkMode": "awsvpc",
+        "Cpu": {
+          "Ref": "AcquisitionCpu"
+        },
+        "Memory": {
+          "Ref": "AcquisitionMemory"
+        },
+        "RuntimePlatform": {
+          "CpuArchitecture": "X86_64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "ExecutionRole",
+            "Arn"
+          ]
+        },
+        "TaskRoleArn": {
+          "Fn::GetAtt": [
+            "AcquisitionRole",
+            "Arn"
+          ]
+        },
+        "ContainerDefinitions": [
+          {
+            "Name": "archive",
+            "Image": {
+              "Ref": "ContainerImage"
+            },
+            "Essential": true,
+            "User": "10001:10001",
+            "ReadonlyRootFilesystem": true,
+            "Command": [
+              "python",
+              "-m",
+              "chess_crawl.jobs.worker",
+              "--stage",
+              "acquisition"
+            ],
+            "Environment": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_URL",
+                "Value": {
+                  "Fn::Sub": "postgresql://${ApplicationDatabaseUser}@${Database.Endpoint.Address}:${Database.Endpoint.Port}/chess_crawl"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_TRANSPORT",
+                "Value": "verified"
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE",
+                "Value": "/app/docker/rds-ca-bundle.pem"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_BACKEND",
+                "Value": "s3"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_S3_BUCKET",
+                "Value": {
+                  "Ref": "ArchiveBucket"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_CONTACT",
+                "Value": {
+                  "Ref": "Contact"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_USAGE_LOG",
+                "Value": {
+                  "Ref": "UsageLog"
+                }
+              },
+              {
+                "Name": "AWS_DEFAULT_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_EVENTS_ENABLED",
+                "Value": {
+                  "Ref": "EventsEnabled"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_GAMES",
+                "Value": {
+                  "Ref": "JobMaxGames"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_NORMALIZATION_UNITS",
+                "Value": {
+                  "Ref": "JobMaxNormalizationUnits"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_REMOTE_BYTES",
+                "Value": {
+                  "Ref": "JobMaxRemoteBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_REMOTE_REQUESTS",
+                "Value": {
+                  "Ref": "JobMaxRemoteRequests"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_MAX_RESPONSE_BYTES",
+                "Value": {
+                  "Ref": "MaxResponseBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_GAMES",
+                "Value": {
+                  "Ref": "WorkspaceMaxGames"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_NORMALIZATION_UNITS",
+                "Value": {
+                  "Ref": "WorkspaceMaxNormalizationUnits"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_REMOTE_BYTES",
+                "Value": {
+                  "Ref": "WorkspaceMaxRemoteBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_REMOTE_REQUESTS",
+                "Value": {
+                  "Ref": "WorkspaceMaxRemoteRequests"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_ACTIVE_JOBS",
+                "Value": {
+                  "Ref": "WorkspaceMaxActiveJobs"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_QUEUED_JOBS",
+                "Value": {
+                  "Ref": "WorkspaceMaxQueuedJobs"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_POLL_INTERVAL",
+                "Value": {
+                  "Ref": "WorkerPollInterval"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_HEARTBEAT_INTERVAL",
+                "Value": {
+                  "Ref": "WorkerHeartbeatInterval"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_HEARTBEAT_MAX_AGE",
+                "Value": {
+                  "Ref": "WorkerHeartbeatMaxAge"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_RETRIES",
+                "Value": {
+                  "Ref": "JobMaxRetries"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_RETRY_BASE",
+                "Value": {
+                  "Ref": "JobRetryBase"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_RETRY_MAX",
+                "Value": {
+                  "Ref": "JobRetryMax"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DISPATCH_RETENTION_SECONDS",
+                "Value": {
+                  "Ref": "DispatchRetentionSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS",
+                "Value": {
+                  "Ref": "DispatchCleanupIntervalSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE",
+                "Value": {
+                  "Ref": "DispatchCleanupBatchSize"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_SQS_ACQUISITION_QUEUE_URL",
+                "Value": {
+                  "Ref": "AcquisitionQueue"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_CHESSCOM_DELAY_S",
+                "Value": {
+                  "Ref": "ChesscomDelaySeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_LICHESS_DELAY_S",
+                "Value": {
+                  "Ref": "LichessDelaySeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_PROVIDER_MAX_RETRIES",
+                "Value": {
+                  "Ref": "ProviderMaxRetries"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_MAX_CONNECTIONS",
+                "Value": {
+                  "Ref": "DatabaseMaxConnections"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S",
+                "Value": {
+                  "Ref": "DatabaseAdmissionTimeoutSeconds"
+                }
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "${ApplicationDatabaseSecretArn}:password::"
+                }
+              }
+            ],
+            "LinuxParameters": {
+              "InitProcessEnabled": true,
+              "Capabilities": {
+                "Drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "Logs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "AcquisitionTask",
+                "mode": "non-blocking",
+                "max-buffer-size": "4m"
+              }
+            },
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime-tmp",
+                "ContainerPath": "/tmp",
+                "ReadOnly": false
+              }
+            ],
+            "HealthCheck": {
+              "Command": [
+                "CMD",
+                "python",
+                "/app/docker/healthcheck.py",
+                "worker"
+              ],
+              "Interval": 30,
+              "Timeout": 5,
+              "Retries": 3,
+              "StartPeriod": 30
+            },
+            "StopTimeout": 90
+          }
+        ],
+        "Volumes": [
+          {
+            "Name": "runtime-tmp"
+          }
+        ]
+      }
+    },
+    "AcquisitionService": {
       "Type": "AWS::ECS::Service",
       "Properties": {
         "Cluster": {
           "Ref": "Cluster"
         },
         "TaskDefinition": {
-          "Ref": "DispatcherTask"
+          "Ref": "AcquisitionTask"
         },
         "DesiredCount": {
-          "Ref": "DispatcherDesiredCount"
+          "Ref": "AcquisitionDesiredCount"
+        },
+        "LaunchType": "FARGATE",
+        "PlatformVersion": "LATEST",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "Subnets": {
+              "Ref": "PrivateSubnets"
+            },
+            "SecurityGroups": [
+              {
+                "Ref": "TaskSecurityGroup"
+              }
+            ]
+          }
+        },
+        "DeploymentConfiguration": {
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true
+          },
+          "MinimumHealthyPercent": 100,
+          "MaximumPercent": 200
+        }
+      }
+    },
+    "ProcessingTask": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "NetworkMode": "awsvpc",
+        "Cpu": {
+          "Ref": "ProcessingCpu"
+        },
+        "Memory": {
+          "Ref": "ProcessingMemory"
+        },
+        "RuntimePlatform": {
+          "CpuArchitecture": "X86_64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "ExecutionRole",
+            "Arn"
+          ]
+        },
+        "TaskRoleArn": {
+          "Fn::GetAtt": [
+            "ProcessingRole",
+            "Arn"
+          ]
+        },
+        "ContainerDefinitions": [
+          {
+            "Name": "archive",
+            "Image": {
+              "Ref": "ContainerImage"
+            },
+            "Essential": true,
+            "User": "10001:10001",
+            "ReadonlyRootFilesystem": true,
+            "Command": [
+              "python",
+              "-m",
+              "chess_crawl.jobs.worker",
+              "--stage",
+              "processing"
+            ],
+            "Environment": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_URL",
+                "Value": {
+                  "Fn::Sub": "postgresql://${ApplicationDatabaseUser}@${Database.Endpoint.Address}:${Database.Endpoint.Port}/chess_crawl"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_TRANSPORT",
+                "Value": "verified"
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_SSL_ROOT_CERT_FILE",
+                "Value": "/app/docker/rds-ca-bundle.pem"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_BACKEND",
+                "Value": "s3"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_S3_BUCKET",
+                "Value": {
+                  "Ref": "ArchiveBucket"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_CONTACT",
+                "Value": {
+                  "Ref": "Contact"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_USAGE_LOG",
+                "Value": {
+                  "Ref": "UsageLog"
+                }
+              },
+              {
+                "Name": "AWS_DEFAULT_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_EVENTS_ENABLED",
+                "Value": {
+                  "Ref": "EventsEnabled"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_GAMES",
+                "Value": {
+                  "Ref": "JobMaxGames"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_NORMALIZATION_UNITS",
+                "Value": {
+                  "Ref": "JobMaxNormalizationUnits"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_REMOTE_BYTES",
+                "Value": {
+                  "Ref": "JobMaxRemoteBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_REMOTE_REQUESTS",
+                "Value": {
+                  "Ref": "JobMaxRemoteRequests"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_MAX_RESPONSE_BYTES",
+                "Value": {
+                  "Ref": "MaxResponseBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_GAMES",
+                "Value": {
+                  "Ref": "WorkspaceMaxGames"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_NORMALIZATION_UNITS",
+                "Value": {
+                  "Ref": "WorkspaceMaxNormalizationUnits"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_REMOTE_BYTES",
+                "Value": {
+                  "Ref": "WorkspaceMaxRemoteBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_REMOTE_REQUESTS",
+                "Value": {
+                  "Ref": "WorkspaceMaxRemoteRequests"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_ACTIVE_JOBS",
+                "Value": {
+                  "Ref": "WorkspaceMaxActiveJobs"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_WORKSPACE_MAX_QUEUED_JOBS",
+                "Value": {
+                  "Ref": "WorkspaceMaxQueuedJobs"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_POLL_INTERVAL",
+                "Value": {
+                  "Ref": "WorkerPollInterval"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_HEARTBEAT_INTERVAL",
+                "Value": {
+                  "Ref": "WorkerHeartbeatInterval"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_HEARTBEAT_MAX_AGE",
+                "Value": {
+                  "Ref": "WorkerHeartbeatMaxAge"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_JOB_MAX_RETRIES",
+                "Value": {
+                  "Ref": "JobMaxRetries"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_RETRY_BASE",
+                "Value": {
+                  "Ref": "JobRetryBase"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_RETRY_MAX",
+                "Value": {
+                  "Ref": "JobRetryMax"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DISPATCH_RETENTION_SECONDS",
+                "Value": {
+                  "Ref": "DispatchRetentionSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DISPATCH_CLEANUP_INTERVAL_SECONDS",
+                "Value": {
+                  "Ref": "DispatchCleanupIntervalSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DISPATCH_CLEANUP_BATCH_SIZE",
+                "Value": {
+                  "Ref": "DispatchCleanupBatchSize"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_SQS_PROCESSING_QUEUE_URL",
+                "Value": {
+                  "Ref": "ProcessingQueue"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARCHIVE_JOBS_ENABLED",
+                "Value": {
+                  "Ref": "ArchiveJobsEnabled"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_MAX_WORKING_SET_MEMBERS",
+                "Value": {
+                  "Ref": "AsyncMaxWorkingSetMembers"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_MAX_ROWS",
+                "Value": {
+                  "Ref": "AsyncExportMaxRows"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_MAX_BYTES",
+                "Value": {
+                  "Ref": "AsyncExportMaxBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ASYNC_EXPORT_PREPARE_SECONDS",
+                "Value": {
+                  "Ref": "AsyncExportPrepareSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_MAX_COUNT",
+                "Value": {
+                  "Ref": "ArtifactMaxCount"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_MAX_BYTES",
+                "Value": {
+                  "Ref": "ArtifactMaxBytes"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_TTL_SECONDS",
+                "Value": {
+                  "Ref": "ArtifactTtlSeconds"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_BACKEND",
+                "Value": "s3"
+              },
+              {
+                "Name": "CHESS_CRAWL_ARTIFACT_S3_BUCKET",
+                "Value": {
+                  "Ref": "ArchiveBucket"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_MAX_CONNECTIONS",
+                "Value": {
+                  "Ref": "DatabaseMaxConnections"
+                }
+              },
+              {
+                "Name": "CHESS_CRAWL_DATABASE_ADMISSION_TIMEOUT_S",
+                "Value": {
+                  "Ref": "DatabaseAdmissionTimeoutSeconds"
+                }
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "CHESS_CRAWL_DATABASE_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "${ApplicationDatabaseSecretArn}:password::"
+                }
+              }
+            ],
+            "LinuxParameters": {
+              "InitProcessEnabled": true,
+              "Capabilities": {
+                "Drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "Logs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "ProcessingTask",
+                "mode": "non-blocking",
+                "max-buffer-size": "4m"
+              }
+            },
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime-tmp",
+                "ContainerPath": "/tmp",
+                "ReadOnly": false
+              }
+            ],
+            "HealthCheck": {
+              "Command": [
+                "CMD",
+                "python",
+                "/app/docker/healthcheck.py",
+                "worker"
+              ],
+              "Interval": 30,
+              "Timeout": 5,
+              "Retries": 3,
+              "StartPeriod": 30
+            },
+            "StopTimeout": 90
+          }
+        ],
+        "Volumes": [
+          {
+            "Name": "runtime-tmp"
+          }
+        ]
+      }
+    },
+    "ProcessingService": {
+      "Type": "AWS::ECS::Service",
+      "Properties": {
+        "Cluster": {
+          "Ref": "Cluster"
+        },
+        "TaskDefinition": {
+          "Ref": "ProcessingTask"
+        },
+        "DesiredCount": {
+          "Ref": "ProcessingDesiredCount"
         },
         "LaunchType": "FARGATE",
         "PlatformVersion": "LATEST",
@@ -1819,14 +3047,6 @@
         ]
       }
     },
-    "WorkerServiceName": {
-      "Value": {
-        "Fn::GetAtt": [
-          "WorkerService",
-          "Name"
-        ]
-      }
-    },
     "DispatcherServiceName": {
       "Value": {
         "Fn::GetAtt": [
@@ -1877,19 +3097,45 @@
         "Ref": "ArchiveBucket"
       }
     },
-    "WorkQueueUrl": {
+    "AcquisitionServiceName": {
       "Value": {
-        "Ref": "WorkQueue"
+        "Fn::GetAtt": [
+          "AcquisitionService",
+          "Name"
+        ]
       }
     },
-    "DeadLetterQueueUrl": {
+    "AcquisitionQueueUrl": {
       "Value": {
-        "Ref": "DeadLetterQueue"
+        "Ref": "AcquisitionQueue"
+      }
+    },
+    "AcquisitionDeadLetterQueueUrl": {
+      "Value": {
+        "Ref": "AcquisitionDeadLetterQueue"
+      }
+    },
+    "ProcessingServiceName": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ProcessingService",
+          "Name"
+        ]
+      }
+    },
+    "ProcessingQueueUrl": {
+      "Value": {
+        "Ref": "ProcessingQueue"
+      }
+    },
+    "ProcessingDeadLetterQueueUrl": {
+      "Value": {
+        "Ref": "ProcessingDeadLetterQueue"
       }
     }
   },
   "Rules": {
-    "ValidTaskSize": {
+    "ValidApiTaskSize": {
       "Assertions": [
         {
           "Assert": {
@@ -1899,7 +3145,7 @@
                   {
                     "Fn::Equals": [
                       {
-                        "Ref": "TaskCpu"
+                        "Ref": "ApiCpu"
                       },
                       "512"
                     ]
@@ -1912,7 +3158,7 @@
                         "4096"
                       ],
                       {
-                        "Ref": "TaskMemory"
+                        "Ref": "ApiMemory"
                       }
                     ]
                   }
@@ -1923,7 +3169,7 @@
                   {
                     "Fn::Equals": [
                       {
-                        "Ref": "TaskCpu"
+                        "Ref": "ApiCpu"
                       },
                       "1024"
                     ]
@@ -1936,7 +3182,7 @@
                         "8192"
                       ],
                       {
-                        "Ref": "TaskMemory"
+                        "Ref": "ApiMemory"
                       }
                     ]
                   }
@@ -1947,7 +3193,7 @@
                   {
                     "Fn::Equals": [
                       {
-                        "Ref": "TaskCpu"
+                        "Ref": "ApiCpu"
                       },
                       "2048"
                     ]
@@ -1959,7 +3205,7 @@
                         "8192"
                       ],
                       {
-                        "Ref": "TaskMemory"
+                        "Ref": "ApiMemory"
                       }
                     ]
                   }
@@ -1970,7 +3216,7 @@
                   {
                     "Fn::Equals": [
                       {
-                        "Ref": "TaskCpu"
+                        "Ref": "ApiCpu"
                       },
                       "4096"
                     ]
@@ -1978,7 +3224,415 @@
                   {
                     "Fn::Equals": [
                       {
-                        "Ref": "TaskMemory"
+                        "Ref": "ApiMemory"
+                      },
+                      "8192"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Fargate CPU/memory combination must be valid"
+        }
+      ]
+    },
+    "ValidAcquisitionTaskSize": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Or": [
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "AcquisitionCpu"
+                      },
+                      "512"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "1024",
+                        "2048",
+                        "4096"
+                      ],
+                      {
+                        "Ref": "AcquisitionMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "AcquisitionCpu"
+                      },
+                      "1024"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "2048",
+                        "4096",
+                        "8192"
+                      ],
+                      {
+                        "Ref": "AcquisitionMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "AcquisitionCpu"
+                      },
+                      "2048"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "4096",
+                        "8192"
+                      ],
+                      {
+                        "Ref": "AcquisitionMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "AcquisitionCpu"
+                      },
+                      "4096"
+                    ]
+                  },
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "AcquisitionMemory"
+                      },
+                      "8192"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Fargate CPU/memory combination must be valid"
+        }
+      ]
+    },
+    "ValidProcessingTaskSize": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Or": [
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "ProcessingCpu"
+                      },
+                      "512"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "1024",
+                        "2048",
+                        "4096"
+                      ],
+                      {
+                        "Ref": "ProcessingMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "ProcessingCpu"
+                      },
+                      "1024"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "2048",
+                        "4096",
+                        "8192"
+                      ],
+                      {
+                        "Ref": "ProcessingMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "ProcessingCpu"
+                      },
+                      "2048"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "4096",
+                        "8192"
+                      ],
+                      {
+                        "Ref": "ProcessingMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "ProcessingCpu"
+                      },
+                      "4096"
+                    ]
+                  },
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "ProcessingMemory"
+                      },
+                      "8192"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Fargate CPU/memory combination must be valid"
+        }
+      ]
+    },
+    "ValidDispatcherTaskSize": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Or": [
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "DispatcherCpu"
+                      },
+                      "512"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "1024",
+                        "2048",
+                        "4096"
+                      ],
+                      {
+                        "Ref": "DispatcherMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "DispatcherCpu"
+                      },
+                      "1024"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "2048",
+                        "4096",
+                        "8192"
+                      ],
+                      {
+                        "Ref": "DispatcherMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "DispatcherCpu"
+                      },
+                      "2048"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "4096",
+                        "8192"
+                      ],
+                      {
+                        "Ref": "DispatcherMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "DispatcherCpu"
+                      },
+                      "4096"
+                    ]
+                  },
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "DispatcherMemory"
+                      },
+                      "8192"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Fargate CPU/memory combination must be valid"
+        }
+      ]
+    },
+    "ValidMigrationTaskSize": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Or": [
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "MigrationCpu"
+                      },
+                      "512"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "1024",
+                        "2048",
+                        "4096"
+                      ],
+                      {
+                        "Ref": "MigrationMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "MigrationCpu"
+                      },
+                      "1024"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "2048",
+                        "4096",
+                        "8192"
+                      ],
+                      {
+                        "Ref": "MigrationMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "MigrationCpu"
+                      },
+                      "2048"
+                    ]
+                  },
+                  {
+                    "Fn::Contains": [
+                      [
+                        "4096",
+                        "8192"
+                      ],
+                      {
+                        "Ref": "MigrationMemory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::And": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "MigrationCpu"
+                      },
+                      "4096"
+                    ]
+                  },
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "MigrationMemory"
                       },
                       "8192"
                     ]

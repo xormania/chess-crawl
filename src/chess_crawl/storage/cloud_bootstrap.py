@@ -1,7 +1,8 @@
 """One-shot schema migration and restricted cloud runtime-role bootstrap."""
 from __future__ import annotations
 
-import os
+from chess_crawl.settings import setting
+
 import re
 import sys
 
@@ -71,12 +72,23 @@ def bootstrap_runtime_role(conn: Connection, *, username: str, password: str) ->
         conn.execute(sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}").format(role))
         conn.execute(sql.SQL("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}").format(role))
         conn.execute(sql.SQL("REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM {}").format(role))
+        # Service replicas can read credentials and shared operating policy;
+        # operators own their mutation. The guards also support older schemas.
+        for table in ("workspace_credentials", "provider_operating_policies", "provider_operating_policy_history"):
+            if require_row(conn.execute("SELECT to_regclass(%s) IS NOT NULL", ("public." + table,)))[0]:
+                conn.execute(sql.SQL("REVOKE INSERT, UPDATE, DELETE ON {} FROM {}").format(sql.Identifier(table), role))
+        # Admission may append quota revisions, but existing audit records are
+        # immutable to replicas even though current policy/accounting stays writable.
+        if require_row(conn.execute("SELECT to_regclass('public.workspace_policy_history') IS NOT NULL"))[0]:
+            conn.execute(sql.SQL("REVOKE UPDATE, DELETE ON workspace_policy_history FROM {}").format(role))
 
 
 def main() -> int:
     try:
-        username = os.environ["CHESS_CRAWL_APPLICATION_DATABASE_USER"]
-        password = os.environ["CHESS_CRAWL_APPLICATION_DATABASE_PASSWORD"]
+        username = setting("CHESS_CRAWL_APPLICATION_DATABASE_USER")
+        password = setting("CHESS_CRAWL_APPLICATION_DATABASE_PASSWORD")
+        if not username or not password:
+            raise ValueError("Set application database username and password before bootstrap")
         with connection(database_url(), mode="rw") as conn:
             # Reuse the atomic schema+role boundary rather than initializing on
             # connection entry. External connections default to verified TLS.

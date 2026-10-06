@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import gzip
 import io
+import re
 import time
 from dataclasses import dataclass
+from collections.abc import Mapping
+from typing import Any
 from chess_crawl.costs import UsageCounters, measure_workload
 
-from chess_crawl.storage.db import Connection, Row, atomic, require_row
+from chess_crawl.storage.db import Connection, atomic, require_row
 from chess_crawl.storage.object_store import ObjectStore, digest, object_key, store_for_reference
 
 
@@ -23,19 +26,21 @@ class PreparedArchiveObject:
     stored_bytes: int
 
 
-def prepare_archive_object(body: bytes, *, store: ObjectStore) -> PreparedArchiveObject:
+def prepare_archive_object(body: bytes, *, store: ObjectStore, key_prefix: str = "") -> PreparedArchiveObject:
     with measure_workload("archive_write") as usage:
-        prepared = _prepare_archive_object(body, store=store, usage=usage)
+        prepared = _prepare_archive_object(body, store=store, usage=usage, key_prefix=key_prefix)
     return prepared
 
 
-def _prepare_archive_object(body: bytes, *, store: ObjectStore, usage: UsageCounters) -> PreparedArchiveObject:
+def _prepare_archive_object(body: bytes, *, store: ObjectStore, usage: UsageCounters, key_prefix: str = "") -> PreparedArchiveObject:
     body_hash = digest(body)
     encoded = gzip.compress(body, mtime=0)
     stored_hash = digest(encoded)
     # Address encoded bytes, so a future compressor upgrade can coexist without
     # replacing the earlier representation of identical original source bytes.
-    key = object_key(stored_hash)
+    if key_prefix and re.fullmatch(r"(?:[A-Za-z0-9_-]+/)+", key_prefix) is None:
+        raise ValueError("Invalid archive object namespace")
+    key = key_prefix + object_key(stored_hash)
     usage.add(source_bytes=len(body), stored_bytes=len(encoded))
     # Object writes cannot participate in PostgreSQL transactions. Publish and
     # verify first; rollback may leave a reusable orphan, never a dangling FK.
@@ -103,6 +108,11 @@ def read_archive_object(conn: Connection, archive_object_id: int, *, store: Obje
     row = conn.execute("SELECT * FROM archive_objects WHERE id=%s", (archive_object_id,)).fetchone()
     if row is None:
         raise KeyError(f"Archive object not found: {archive_object_id}")
+    return read_archive_reference(row, store=store)
+
+
+def read_archive_reference(row: Mapping[str, Any], *, store: ObjectStore | None = None) -> bytes:
+    """Verify a previously authorized reference without retaining a DB session."""
     selected = store or store_for_reference(row["backend"], row["location"])
     if selected.backend != row["backend"] or selected.location != row["location"]:
         raise ValueError("Archive adapter does not match the stored reference")
@@ -111,7 +121,7 @@ def read_archive_object(conn: Connection, archive_object_id: int, *, store: Obje
     return body
 
 
-def _read_archive_body(row: Row, selected: ObjectStore, usage: UsageCounters) -> bytes:
+def _read_archive_body(row: Mapping[str, Any], selected: ObjectStore, usage: UsageCounters) -> bytes:
     encoded = selected.read(row["object_key"], expected_size=int(row["stored_bytes"]))
     usage.add(objects_read=1, stored_bytes=len(encoded))
     if digest(encoded) != row["stored_hash"]:

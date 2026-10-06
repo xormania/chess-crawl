@@ -1,6 +1,8 @@
 """Immutable compressed object adapters; no database or credentials in references."""
 from __future__ import annotations
 
+from chess_crawl.settings import dataclass_settings
+
 import base64
 import hashlib
 import importlib
@@ -97,6 +99,12 @@ class LocalObjectStore:
             raise ValueError("Archive object size mismatch")
         return body
 
+    def delete(self, key: str) -> None:
+        path = self._path(key)
+        if path.is_symlink():
+            raise ValueError("Archive objects must not be symbolic links")
+        path.unlink(missing_ok=True)
+
 
 class S3ObjectStore:
     backend = "s3"
@@ -144,26 +152,43 @@ class S3ObjectStore:
             raise ValueError("Archive object size mismatch")
         return bytes(body)
 
+    def delete(self, key: str) -> None:
+        _validate_key(key)
+        self.client.delete_object(Bucket=self.location, Key=key)
+
+
+@dataclass(frozen=True)
+class ArchiveSettings:
+    backend: str = "database"
+    directory: str = ""
+    s3_bucket: str = ""
+
+    def __post_init__(self) -> None:
+        if self.backend not in {"database", "local", "s3"}:
+            raise ValueError("CHESS_CRAWL_ARCHIVE_BACKEND must be database, local, or s3")
+        if self.backend == "local":
+            if not self.directory.strip():
+                raise ValueError("Local archival requires an explicit CHESS_CRAWL_ARCHIVE_DIRECTORY")
+            if not Path(self.directory).expanduser().is_absolute():
+                raise ValueError("CHESS_CRAWL_ARCHIVE_DIRECTORY must be an absolute path")
+        if self.backend == "s3" and not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", self.s3_bucket):
+            raise ValueError("Archive S3 location must be a bucket name")
+
+    @classmethod
+    def from_env(cls) -> ArchiveSettings:
+        return dataclass_settings(cls, prefix="CHESS_CRAWL_ARCHIVE_")
+
 
 def configured_store() -> ObjectStore | None:
-    backend = os.getenv("CHESS_CRAWL_ARCHIVE_BACKEND", "database")
-    if backend == "database":
+    settings = ArchiveSettings.from_env()
+    if settings.backend == "database":
         return None
-    if backend == "local":
-        directory = os.getenv("CHESS_CRAWL_ARCHIVE_DIRECTORY")
-        if directory is None or not directory.strip():
-            raise ValueError("Local archival requires an explicit CHESS_CRAWL_ARCHIVE_DIRECTORY")
-        path = Path(directory).expanduser()
-        if not path.is_absolute():
-            raise ValueError("CHESS_CRAWL_ARCHIVE_DIRECTORY must be an absolute path")
-        return store_for_reference("local", str(path.resolve()))
-    if backend == "s3":
-        return store_for_reference("s3", os.getenv("CHESS_CRAWL_ARCHIVE_S3_BUCKET", ""))
-    raise ValueError("CHESS_CRAWL_ARCHIVE_BACKEND must be database, local, or s3")
+    location = str(Path(settings.directory).expanduser().resolve()) if settings.backend == "local" else settings.s3_bucket
+    return store_for_reference(settings.backend, location)
 
 
 @lru_cache(maxsize=16)
-def store_for_reference(backend: str, location: str) -> ObjectStore:
+def store_for_reference(backend: str, location: str) -> LocalObjectStore | S3ObjectStore:
     if backend == "local":
         return LocalObjectStore(location)
     if backend == "s3":

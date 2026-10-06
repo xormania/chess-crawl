@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import json
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
@@ -9,7 +10,9 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from chess_crawl.jobs.budget import BudgetExceeded, BudgetPolicy, QuotaExceeded
+from chess_crawl.jobs.models import ARCHIVE_JOB_KINDS
 from chess_crawl.storage.db import Connection, atomic, operation_lock, require_row
+from chess_crawl.storage.workspaces import validate_workspace
 
 
 def monthly_period(now: int) -> tuple[int, int]:
@@ -31,30 +34,80 @@ def _period(conn: Connection, workspace_id: str, now: int):
     ))
 
 
-def _workspace_policy(conn: Connection, workspace_id: str, policy: BudgetPolicy, now: int, *, tighten: bool = False) -> BudgetPolicy:
+def _workspace_policy(
+    conn: Connection, workspace_id: str, policy: BudgetPolicy, now: int, *,
+    tighten: bool = False, managed: bool = False,
+) -> BudgetPolicy:
     conn.execute(
-        """INSERT INTO workspace_budget_policies(workspace_id,policy,updated_at)
-             VALUES(%s,%s,%s) ON CONFLICT DO NOTHING""", (workspace_id, Jsonb(asdict(policy)), now),
+        """INSERT INTO workspace_budget_policies(workspace_id,policy,updated_at,managed)
+             VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING""", (workspace_id, Jsonb(asdict(policy)), now, managed),
     )
-    row = require_row(conn.execute("SELECT policy FROM workspace_budget_policies WHERE workspace_id=%s FOR UPDATE", (workspace_id,)))
-    stored = BudgetPolicy(**dict(row[0]))
-    if tighten:
+    row = require_row(conn.execute("SELECT * FROM workspace_budget_policies WHERE workspace_id=%s FOR UPDATE", (workspace_id,)))
+    conn.execute(
+        """INSERT INTO workspace_policy_history(workspace_id,version,policy,managed,changed_at)
+             VALUES(%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+        (workspace_id, row["version"], Jsonb(dict(row["policy"])), row["managed"], row["updated_at"]),
+    )
+    stored = BudgetPolicy(**dict(row["policy"]))
+    if tighten and not row["managed"]:
         effective = {name: min(value, getattr(policy, name)) if name.startswith("workspace_") else value
                      for name, value in asdict(stored).items()}
-        conn.execute("UPDATE workspace_budget_policies SET policy=%s,updated_at=%s WHERE workspace_id=%s",
-                     (Jsonb(effective), now, workspace_id))
+        if effective != asdict(stored):
+            _replace_workspace_policy(conn, workspace_id, BudgetPolicy(**effective), now, managed=False)
         return BudgetPolicy(**effective)
     return stored
+
+
+def _replace_workspace_policy(
+    conn: Connection, workspace_id: str, policy: BudgetPolicy, now: int, *, managed: bool,
+) -> int:
+    """Caller holds the workspace budget lock; revisions never reset usage."""
+    version = int(require_row(conn.execute(
+        """UPDATE workspace_budget_policies SET policy=%s,updated_at=%s,managed=%s,version=version+1
+             WHERE workspace_id=%s RETURNING version""", (Jsonb(asdict(policy)), now, managed, workspace_id),
+    ))[0])
+    conn.execute(
+        """INSERT INTO workspace_policy_history(workspace_id,version,policy,managed,changed_at)
+             VALUES(%s,%s,%s,%s,%s)""", (workspace_id, version, Jsonb(asdict(policy)), managed, now),
+    )
+    return version
+
+
+@atomic
+def set_workspace_policy(
+    conn: Connection, workspace_id: str, policy: BudgetPolicy, *, expected_version: int,
+    now: int | None = None,
+) -> int:
+    """Trusted administration: replace future admission/shared ceilings atomically."""
+    validate_workspace(workspace_id)
+    if type(expected_version) is not int or not 0 <= expected_version < 2**63:
+        raise ValueError("Expected policy version must be a nonnegative PostgreSQL bigint")
+    operation_lock(conn, "workspace-budget", workspace_id)
+    row = conn.execute("SELECT version FROM workspace_budget_policies WHERE workspace_id=%s FOR UPDATE", (workspace_id,)).fetchone()
+    if row is None and expected_version == 0:
+        if conn.execute("SELECT 1 FROM workspaces WHERE id=%s", (workspace_id,)).fetchone() is None:
+            raise ValueError("Workspace not found")
+        _workspace_policy(conn, workspace_id, policy, int(time.time()) if now is None else now, managed=True)
+        return 1
+    if row is None or row[0] != expected_version:
+        raise ValueError("Workspace policy version changed; inspect it before updating")
+    return _replace_workspace_policy(conn, workspace_id, policy, int(time.time()) if now is None else now, managed=True)
+
+
+def _admission_policy(conn: Connection, workspace_id: str, submitted: BudgetPolicy) -> tuple[BudgetPolicy, int]:
+    row = require_row(conn.execute("SELECT policy,managed,version FROM workspace_budget_policies WHERE workspace_id=%s", (workspace_id,)))
+    return (BudgetPolicy(**dict(row["policy"])) if row["managed"] else submitted), int(row["version"])
 
 
 @atomic
 def install_workspace_policy(
     conn: Connection, workspace_id: str, policy: BudgetPolicy, *, now: int | None = None,
+    managed: bool = False,
 ) -> dict[str, Any]:
     """Persist trusted tightening separately from admission, without resetting usage."""
     timestamp = int(time.time()) if now is None else now
     operation_lock(conn, "workspace-budget", workspace_id)
-    return asdict(_workspace_policy(conn, workspace_id, policy, timestamp, tighten=True))
+    return asdict(_workspace_policy(conn, workspace_id, policy, timestamp, tighten=True, managed=managed))
 
 
 @atomic
@@ -63,14 +116,17 @@ def admit_run_budget(
 ) -> dict[str, Any]:
     timestamp = int(time.time()) if now is None else now
     operation_lock(conn, "workspace-budget", workspace_id)
-    run = require_row(conn.execute("SELECT workspace_id,work_budget_id FROM crawl_runs WHERE id=%s FOR UPDATE", (run_id,)))
+    run = require_row(conn.execute("SELECT workspace_id,work_budget_id,provider,params_json FROM crawl_runs WHERE id=%s FOR UPDATE", (run_id,)))
     if run["workspace_id"] != workspace_id:
         raise ValueError("Work budget owner does not match the run")
     if run["work_budget_id"] is not None:
         return get_run_budget(conn, run_id, workspace_id) or {}
     workspace_policy = _workspace_policy(conn, workspace_id, policy, timestamp, tighten=True)
+    policy, policy_version = _admission_policy(conn, workspace_id, policy)
     usage = _period(conn, workspace_id, timestamp)
-    for dimension in ("games", "normalization_units", "remote_bytes", "remote_requests"):
+    archive_only = run["provider"] is None and json.loads(run["params_json"]).get("strategy") in ARCHIVE_JOB_KINDS
+    dimensions = ("normalization_units",) if archive_only else ("games", "normalization_units", "remote_bytes", "remote_requests")
+    for dimension in dimensions:
         remaining = getattr(workspace_policy, "workspace_max_" + dimension) - int(usage[dimension])
         if remaining <= 0:
             raise QuotaExceeded(dimension, remaining=0, reset_at=int(usage["period_end"]))
@@ -81,9 +137,9 @@ def admit_run_budget(
     if queued > workspace_policy.workspace_max_queued_jobs + workspace_policy.workspace_max_active_jobs:
         raise QuotaExceeded("queued_jobs", remaining=0, reset_at=int(usage["period_end"]))
     budget_id = int(require_row(conn.execute(
-        """INSERT INTO work_budgets(workspace_id,crawl_run_id,policy,created_at,updated_at)
-             VALUES(%s,%s,%s,%s,%s) RETURNING id""",
-        (workspace_id, run_id, Jsonb(asdict(policy)), timestamp, timestamp),
+        """INSERT INTO work_budgets(workspace_id,crawl_run_id,policy,created_at,updated_at,workspace_policy_version)
+             VALUES(%s,%s,%s,%s,%s,%s) RETURNING id""",
+        (workspace_id, run_id, Jsonb(asdict(policy)), timestamp, timestamp, policy_version),
     ))[0])
     conn.execute("UPDATE crawl_runs SET work_budget_id=%s WHERE id=%s", (budget_id, run_id))
     conn.execute("UPDATE discovery_jobs SET work_budget_id=%s WHERE crawl_run_id=%s", (budget_id, run_id))
@@ -94,7 +150,7 @@ def _budget_snapshot(conn: Connection, row, *, now: int | None = None) -> dict[s
     timestamp = int(time.time()) if now is None else now
     start, end = monthly_period(timestamp)
     snapshot = dict(row)
-    authority = conn.execute("SELECT policy FROM workspace_budget_policies WHERE workspace_id=%s",
+    authority = conn.execute("SELECT policy,version FROM workspace_budget_policies WHERE workspace_id=%s",
                              (row["workspace_id"],)).fetchone()
     workspace_policy = dict(authority[0]) if authority is not None else dict(row["policy"])
     period = conn.execute("SELECT * FROM workspace_budget_periods WHERE workspace_id=%s AND period_start=%s",
@@ -102,6 +158,7 @@ def _budget_snapshot(conn: Connection, row, *, now: int | None = None) -> dict[s
     dimensions = ("games", "normalization_units", "remote_bytes", "remote_requests")
     usage = {dimension: int(period[dimension]) if period is not None else 0 for dimension in dimensions}
     snapshot["workspace_policy"] = workspace_policy
+    snapshot["current_workspace_policy_version"] = int(authority["version"]) if authority is not None else None
     snapshot["workspace_period"] = {"period_start": start, "reset_at": end, "usage": usage,
         "remaining": {dimension: max(0, int(workspace_policy["workspace_max_"+dimension])-usage[dimension])
                       for dimension in dimensions}}
@@ -158,11 +215,13 @@ def ensure_job_budget(conn: Connection, job_id: int, policy: BudgetPolicy, *, no
     if job["crawl_run_id"] is not None:
         return int(admit_run_budget(conn, int(job["crawl_run_id"]), job["workspace_id"], policy, now=timestamp)["id"])
     operation_lock(conn, "workspace-budget", job["workspace_id"])
+    _workspace_policy(conn, job["workspace_id"], policy, timestamp, tighten=True)
+    policy, policy_version = _admission_policy(conn, job["workspace_id"], policy)
     budget_id = int(require_row(conn.execute(
-        """INSERT INTO work_budgets(workspace_id,standalone_job_id,policy,created_at,updated_at)
-             VALUES(%s,%s,%s,%s,%s) ON CONFLICT(standalone_job_id) DO UPDATE SET
+        """INSERT INTO work_budgets(workspace_id,standalone_job_id,policy,created_at,updated_at,workspace_policy_version)
+             VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(standalone_job_id) DO UPDATE SET
              standalone_job_id=EXCLUDED.standalone_job_id RETURNING id""",
-        (job["workspace_id"], job_id, Jsonb(asdict(policy)), timestamp, timestamp),
+        (job["workspace_id"], job_id, Jsonb(asdict(policy)), timestamp, timestamp, policy_version),
     ))[0])
     conn.execute("UPDATE discovery_jobs SET work_budget_id=%s WHERE id=%s", (budget_id, job_id))
     return budget_id
@@ -177,13 +236,13 @@ def _locked_budget(conn: Connection, budget_id: int, now: int):
     return budget, policy, _period(conn, workspace_id, now), workspace_policy
 
 
-def _remaining(budget, policy: BudgetPolicy, usage, workspace_policy: BudgetPolicy, dimension: str) -> int:
+def _remaining(budget, policy: BudgetPolicy, usage, workspace_policy: BudgetPolicy, dimension: str, *, requested: int = 1) -> int:
     job_remaining = getattr(policy, "job_max_" + dimension) - int(budget[dimension])
-    if job_remaining <= 0:
-        raise BudgetExceeded(dimension, budget_id=int(budget["id"]))
+    if job_remaining < requested:
+        raise BudgetExceeded(dimension, remaining=max(0,job_remaining), budget_id=int(budget["id"]))
     workspace_remaining = getattr(workspace_policy, "workspace_max_" + dimension) - int(usage[dimension])
-    if workspace_remaining <= 0:
-        raise QuotaExceeded(dimension, reset_at=int(usage["period_end"]), budget_id=int(budget["id"]))
+    if workspace_remaining < requested:
+        raise QuotaExceeded(dimension, remaining=max(0,workspace_remaining), reset_at=int(usage["period_end"]), budget_id=int(budget["id"]))
     return min(job_remaining, workspace_remaining)
 
 
@@ -246,12 +305,40 @@ def settle_request(conn: Connection, reservation_id: int, consumed_bytes: int) -
 
 
 @atomic
+def normalization_allowance(conn: Connection, budget_id: int) -> int:
+    """Bound a read-only processing snapshot before reserving its completed work."""
+    budget, policy, usage, workspace_policy = _locked_budget(conn, budget_id, int(time.time()))
+    return max(0, min(policy.job_max_normalization_units - int(budget["normalization_units"]),
+                      workspace_policy.workspace_max_normalization_units - int(usage["normalization_units"])))
+
+
+@atomic
 def reserve_normalization(
-    conn: Connection, budget_id: int, *, game_key: str | None = None, now: int | None = None,
-) -> None:
+    conn: Connection, budget_id: int, *, game_key: str | None = None, now: int | None = None, units: int = 1,
+) -> bool:
+    """Bill interpretation and return whether this budget acquired a new game."""
+    if type(units) is not int or units < 1:
+        raise ValueError("Normalization reservation must contain positive integer units")
+    return _reserve_processing_work(conn, budget_id, game_key=game_key, interpretation_units=units, now=now)
+
+
+@atomic
+def reserve_game(conn: Connection, budget_id: int, *, game_key: str, now: int | None = None) -> bool:
+    """Reserve a unique admitted game alongside its transactional write.
+
+    Interpretation has already been prepaid outside the game/run write locks.
+    Existing budget members remain usable when the game ceiling is exhausted.
+    """
+    return _reserve_processing_work(conn, budget_id, game_key=game_key, interpretation_units=0, now=now)
+
+
+def _reserve_processing_work(
+    conn: Connection, budget_id: int, *, game_key: str | None, interpretation_units: int, now: int | None,
+) -> bool:
     timestamp = int(time.time()) if now is None else now
     budget, policy, usage, workspace_policy = _locked_budget(conn, budget_id, timestamp)
-    _remaining(budget, policy, usage, workspace_policy, "normalization_units")
+    if interpretation_units:
+        _remaining(budget, policy, usage, workspace_policy, "normalization_units", requested=interpretation_units)
     game_units = 0
     if game_key is not None and conn.execute(
         "SELECT 1 FROM budget_game_items WHERE budget_id=%s AND game_key=%s", (budget_id, game_key),
@@ -259,14 +346,18 @@ def reserve_normalization(
         _remaining(budget, policy, usage, workspace_policy, "games")
         conn.execute("INSERT INTO budget_game_items(budget_id,game_key) VALUES(%s,%s)", (budget_id, game_key))
         game_units = 1
+    if not interpretation_units and not game_units:
+        return False
     conn.execute(
-        "UPDATE work_budgets SET normalization_units=normalization_units+1,games=games+%s,updated_at=%s WHERE id=%s",
-        (game_units, timestamp, budget_id),
+        "UPDATE work_budgets SET normalization_units=normalization_units+%s,games=games+%s,updated_at=%s WHERE id=%s",
+        (interpretation_units, game_units, timestamp, budget_id),
     )
     conn.execute(
-        """UPDATE workspace_budget_periods SET normalization_units=normalization_units+1,games=games+%s
-             WHERE workspace_id=%s AND period_start=%s""", (game_units, budget["workspace_id"], usage["period_start"]),
+        """UPDATE workspace_budget_periods SET normalization_units=normalization_units+%s,games=games+%s
+             WHERE workspace_id=%s AND period_start=%s""",
+        (interpretation_units, game_units, budget["workspace_id"], usage["period_start"]),
     )
+    return game_units == 1
 
 
 @atomic
@@ -304,8 +395,9 @@ def resume_run_budget(conn: Connection, run_id: int, workspace_id: str, policy: 
     workspace_policy = _workspace_policy(conn, workspace_id, previous, int(time.time()))
     extended_workspace = {name: max(value, getattr(policy, name)) if name.startswith("workspace_") else value
                           for name, value in asdict(workspace_policy).items()}
-    conn.execute("UPDATE workspace_budget_policies SET policy=%s,updated_at=%s WHERE workspace_id=%s",
-                 (Jsonb(extended_workspace), int(time.time()), workspace_id))
+    if extended_workspace != asdict(workspace_policy):
+        managed = bool(require_row(conn.execute("SELECT managed FROM workspace_budget_policies WHERE workspace_id=%s", (workspace_id,)))[0])
+        _replace_workspace_policy(conn, workspace_id, BudgetPolicy(**extended_workspace), int(time.time()), managed=managed)
     conn.execute(
         """UPDATE discovery_jobs SET state='pending',reason=NULL,next_attempt_at=NULL
              WHERE work_budget_id=%s AND state='blocked' AND reason LIKE 'budget_exhausted:%%'""", (row["id"],),

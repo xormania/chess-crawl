@@ -10,7 +10,7 @@ import pytest
 
 from support import seed_game
 from chess_crawl.ingest import IngestResult
-from chess_crawl.jobs import runner as runner_module, state
+from chess_crawl.jobs import discovery as discovery_module, state
 from chess_crawl.jobs.discovery import CrawlBounds, create_opponent_crawl
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.storage import migrations
@@ -61,7 +61,7 @@ def test_resume_discovers_retained_games_after_crash_fills_budget(initialized_co
 
     with monkeypatch.context() as interruption:
         if crash_point == "before_frontier":
-            interruption.setattr(runner_module, "record_discovery_edges", crash)
+            interruption.setattr(discovery_module, "record_discovery_edges", crash)
         else:
             interruption.setattr(state, "finish_attempt", crash)
         with pytest.raises(SystemExit, match="crash after acquisition"):

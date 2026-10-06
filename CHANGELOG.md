@@ -5,8 +5,33 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
 
 ## Unreleased
 
+### Fixed
+
+- Offline configuration validation checks the S3 dependency when private
+  artifacts use S3 independently of the source archive backend.
+
+- Recheck provider pacing and shutdown after shared request-budget reservation,
+  so a policy update or stop received while waiting for admission cannot permit
+  an early HTTP request. Interrupted attempts return unused reserved bytes.
+
+- Preserve shallower opponent rediscovery across pending, active, and completed
+  acquisitions without refetching players or consuming another discovery slot.
+  Depth-specific local expansion reuses retained evidence after a deeper frontier
+  has completed, and active ownership remains intact. Standalone multi-month
+  collection counts unique budget games instead of duplicate encounters, while
+  still refreshing captured duplicate evidence. Queued normalization rejects an
+  unavailable endpoint parser pin before charging processing work.
+  Concurrent interpretation charges unique-game quota only after locked run
+  admission, so losing the last selection slot does not block completed imports.
+
 ### Security
 
+- Runtime database roles can append workspace policy history but cannot rewrite
+  or delete existing quota revisions. Rerun cloud role bootstrap after upgrading.
+
+- Managed-auth Compose deployments explicitly clear the static token file after
+  external database and polling environment merges. The mounted readiness secret
+  stays separate from workspace authentication in every overlay combination.
 - Bound cumulative stored analysis results by workspace count and logical payload
   bytes, with atomic admission across working sets and API replicas. Exact-result
   replay remains available at capacity; new excess results return 429. Migration
@@ -16,6 +41,78 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   and [retention](docs/cli.md#retain-analysis-results).
 
 ### Added
+
+- Trusted workspace provisioning, credential issue/rotation/revocation, and
+  versioned managed workspace policy through `chess-crawl-admin workspaces`.
+  Optional database authentication uses hashed opaque credentials and observes
+  revocation across API replicas without restarting. Managed policy controls
+  admission independently of startup defaults while preserving run ceilings,
+  ownership, and consumed usage. AWS API tasks can select database authentication
+  with a separately provisioned readiness credential. See
+  [workspace administration](docs/workspace-administration.md).
+- Optional durable working-set construction and export preparation return small
+  202 responses and run only in processing workers. Migration `0020` adds explicit
+  providerless archive jobs and workspace-owned, immutable export manifests;
+  existing selection/serialization services serve immediate and queued requests.
+  Shared local/S3 artifacts support downloads from any API replica, with bounded
+  chunks, checksums, retention, artifact quotas and download leases. Trusted
+  `prune-artifacts` releases quota after resumable private-object deletion. Existing
+  work budgets, fair scheduling and idempotency remain authoritative; see
+  [queued archive operations](docs/archive-jobs.md).
+
+- Trusted versioned provider operating policies now propagate to running
+  acquisition replicas at HTTP request boundaries and preserve shared cooldown
+  floors. Migration `0021` retains append-only history; operator commands require
+  an observed policy version. Dedicated PostgreSQL sessions also have one
+  configurable per-process admission cap and bounded wait, with safe permit
+  recovery and the existing HTTP 503 response at capacity. See
+  [operating policy](docs/operating-policy.md).
+
+- One shared environment/TOML configuration source with typed domain validation,
+  explicit worker CLI precedence, provider pacing/retry settings, and consistent
+  worker environment defaults. `chess-crawl-admin config validate/show` checks
+  deployment roles offline and reports effective settings with credentials
+  redacted. Existing environment names and programmatic settings remain supported;
+  optional files use `CHESS_CRAWL_CONFIG_FILE`. See [configuration](docs/configuration.md).
+- Bounded imports, single-game collection, and opponent crawls now capture game
+  sources independently of interpretation. Monthly acquisition yields between
+  source units and waits for committed processing before extending its exact
+  game allowance. Processing-only opponent expansion preserves frontier limits
+  across replicas; captured-occurrence deduplication and per-game shutdown/cancel
+  checkpoints preserve recovery without duplicate normalization or refetches.
+  Apply migration `0018` after draining older workers; see
+  [execution](docs/execution.md#local-execution-and-stages).
+- Optional event delivery can suppress new notifications while preserving job/run
+  revisions and work dispatch. Migration `0019` adds the delivery guard and
+  retention indexes. The publisher prunes delivered history in bounded batches;
+  trusted `prune-events` explicitly expires old pending notifications when chosen.
+  Compose forwards delivery and retention settings; its polling overlay omits
+  the publisher and Mercure hub while preserving API and worker startup.
+  See [event delivery](docs/event-delivery.md) for replica settings and recovery.
+- Deployment wiring for optional durable archive jobs shares async and artifact
+  ceilings between API and processing. Compose isolates writable artifacts from
+  read-only source evidence; cloud processing can publish and clean up artifact
+  objects under a separate prefix, while API artifact access remains read-only.
+  Admission defaults off. See [deployment](docs/aws-deployment.md).
+- Opt-in Compose overlays separate acquisition and processing workers, route API
+  replicas through one DNS-aware proxy, and support polling-only or managed-workspace
+  authentication. Managed mode separates readiness credentials from static auth.
+  Shared worker configuration avoids divergent stage settings; external database
+  TLS and source-storage settings apply to every active role. Compose now forwards
+  archive backend, provider pacing/retries, worker settings, publisher retention,
+  and workload logging.
+- AWS acquisition and processing have separate queues, dead-letter queues, IAM
+  permissions, task sizes, and replica counts. Shared budget parameters apply to
+  admission and execution; optional event generation defaults off without a hub.
+  Replace legacy combined-worker and shared-size parameters when updating an
+  existing stack, and inventory retained old queues. Deployment and recovery
+  verification remain operator steps. The [hosted-service guide](docs/saas-integration.md)
+  documents public backend and private product boundaries.
+- Trusted anonymous operational JSON metrics report eligible acquisition and
+  processing backlog, oldest waiting age, durable active jobs, admission wait
+  reasons, and dispatch/event delivery health from one PostgreSQL snapshot.
+  Shared candidate admission expressions keep scheduling and measurement
+  consistent. See [operational measurements](docs/operations-metrics.md).
 
 - A bounded, cursor-based operational transfer for referenced local/S3 archive
   objects. It verifies and copies exact compressed evidence before atomically
