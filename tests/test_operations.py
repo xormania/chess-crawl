@@ -10,6 +10,19 @@ from chess_crawl.storage.db import connection, require_row
 from chess_crawl.storage.migrations import SCHEMA_VERSION, current_version
 
 
+def test_metrics_alias_forwards_arguments(monkeypatch) -> None:
+    from chess_crawl import metrics_admin
+    seen: list[str] = []
+
+    def metrics_main(arguments: list[str]) -> int:
+        seen.extend(arguments)
+        return 0
+
+    monkeypatch.setattr(metrics_admin, "main", metrics_main)
+    assert operations.main(["metrics", "--statement-timeout-ms", "20"]) == 0
+    assert seen == ["--statement-timeout-ms", "20"]
+
+
 def test_migrate_initializes_and_repeats_without_provider_calls(
     uninitialized_database_url: str, capsys: pytest.CaptureFixture[str],
 ) -> None:

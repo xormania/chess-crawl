@@ -39,6 +39,10 @@ docker compose exec api chess-crawl-admin info
 
 ## Inspect and resume work budgets
 
+Read anonymous scheduling, delivery and usage measurements with
+`chess-crawl-admin metrics`. It uses trusted PostgreSQL access and a bounded
+read-only snapshot; see [operations metrics](operations-metrics.md).
+
 Use trusted operator PostgreSQL access; HTTP bearer credentials cannot extend
 work ceilings. Inspect a run's stored usage and retained progress, then resume it
 with the same trusted ceiling configuration used by the API and workers:
