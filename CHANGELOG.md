@@ -14,6 +14,8 @@ assigned a release version. See [CONTRIBUTING.md](CONTRIBUTING.md#changelog-requ
   collection counts unique budget games instead of duplicate encounters, while
   still refreshing captured duplicate evidence. Queued normalization rejects an
   unavailable endpoint parser pin before charging processing work.
+  Concurrent interpretation charges unique-game quota only after locked run
+  admission, so losing the last selection slot does not block completed imports.
 
 ### Security
 

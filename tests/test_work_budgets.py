@@ -14,7 +14,7 @@ from chess_crawl.jobs.dispatch import SqsConsumer
 from chess_crawl.jobs.runner import JobRunner
 from chess_crawl.jobs.worker import Worker
 from chess_crawl.providers.base import RawRecord
-from chess_crawl.storage.db import connection, require_row, transaction
+from chess_crawl.storage.db import connection, operation_lock_held, require_row, transaction
 from chess_crawl.storage.raw import store_raw_payload
 from chess_crawl.storage.workspaces import submission_context
 from chess_crawl.storage.work_budgets import (
@@ -127,6 +127,32 @@ def test_game_budget_deduplicates_logical_games_but_bills_repeated_processing(in
     assert budget["games"] == 1 and budget["normalization_units"] == 2
 
 
+def test_admitted_game_quota_rolls_back_and_duplicates_work_at_exhausted_ceilings(initialized_conn) -> None:
+    from chess_crawl.storage.work_budgets import reserve_game
+
+    policy = BudgetPolicy(job_max_games=1, workspace_max_games=1, job_max_normalization_units=1)
+    run_id, _, budget_id = _run(initialized_conn, "alpha", policy)
+    reserve_normalization(initialized_conn, budget_id, now=NOW)
+    with pytest.raises(RuntimeError, match="selection write failed"):
+        with transaction(initialized_conn):
+            assert reserve_game(initialized_conn, budget_id, game_key="lichess/one", now=NOW)
+            raise RuntimeError("selection write failed")
+    assert (_budget(initialized_conn, run_id, "alpha")["games"],
+            _budget(initialized_conn, run_id, "alpha")["normalization_units"]) == (0, 1)
+    assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM budget_game_items"))[0] == 0
+    assert require_row(initialized_conn.execute("SELECT games FROM workspace_budget_periods"))[0] == 0
+    assert reserve_game(initialized_conn, budget_id, game_key="lichess/one", now=NOW)
+    assert not reserve_game(initialized_conn, budget_id, game_key="lichess/one", now=NOW)
+    with pytest.raises(BudgetExceeded) as exceeded:
+        reserve_game(initialized_conn, budget_id, game_key="lichess/two", now=NOW)
+    assert exceeded.value.dimension == "games"
+    assert (_budget(initialized_conn, run_id, "alpha")["games"],
+            _budget(initialized_conn, run_id, "alpha")["normalization_units"]) == (1, 1)
+    assert require_row(initialized_conn.execute("SELECT COUNT(*) FROM budget_game_items"))[0] == 1
+    usage = require_row(initialized_conn.execute("SELECT games,normalization_units FROM workspace_budget_periods"))
+    assert (usage["games"], usage["normalization_units"]) == (1, 1)
+
+
 def test_claim_rotation_and_active_caps_ignore_workspace_flood_priorities(database_url: str) -> None:
     policy = BudgetPolicy(workspace_max_active_jobs=1)
     with connection(database_url, mode="rw") as conn:
@@ -151,6 +177,96 @@ def _game(identity: str, created: int) -> dict:
             "players": {"white": {"user": {"id": "target", "name": "Target"}},
                         "black": {"user": {"id": "opponent", "name": "Opponent"}}},
             "winner": "white", "clock": {"initial": 300, "increment": 0}, "moves": "e4 e5"}
+
+
+@pytest.mark.parametrize("game_ceiling", [10, 1], ids=["sufficient-game-quota", "last-game-quota"])
+def test_competing_payloads_charge_only_the_game_admitted_by_run_cap(
+    database_url, monkeypatch, game_ceiling,
+) -> None:
+    from chess_crawl.normalize import games
+    from chess_crawl.storage import work_budgets
+
+    monkeypatch.setattr(work_budgets.time, "time", lambda: NOW)
+    policy = BudgetPolicy(job_max_games=game_ceiling, workspace_max_games=game_ceiling)
+    with connection(database_url, mode="rw") as setup:
+        run_id, parent, budget_id = _run(
+            setup, "alpha", policy, kind="fetch_user_games", target="target",
+            params={"since": NOW-60, "until": NOW+60, "max_games": 1, "limit": 1},
+        )
+        children = {}
+        raw_ids = {}
+        for role in ("winner", "loser"):
+            raw_ids[role] = store_raw_payload(setup, RawRecord(
+                provider="lichess", endpoint_type="user_games_stream",
+                request_url=f"https://lichess.org/api/games/user/{role}",
+                canonical_source_key=f"lichess/games/user/{role}", fetched_at=NOW,
+                body=json.dumps(_game(role, NOW*1000)).encode(), media_type="application/x-ndjson",
+            ))
+            children[role] = state.enqueue_payload_normalization(
+                setup, provider="lichess", raw_payload_id=raw_ids[role], fetch_log_id=None,
+                max_games=1, parent_job_id=parent, crawl_run_id=run_id, parser_version=games.PARSER_VERSION,
+            ).job_id
+
+    preflight = threading.Barrier(2)
+    winner_finished = threading.Event()
+    original_bounds = games.run_game_bounds
+    outcomes = {}
+    failures = []
+
+    def competing_bounds(conn, crawl_run_id, **kwargs):
+        bounds = original_bounds(conn, crawl_run_id, **kwargs)
+        if not operation_lock_held(conn, "run-game-budget", crawl_run_id, exclusive=True):
+            # Both workers observe the last slot before either writes. Keep the
+            # loser's stale read until the winner has committed its selection.
+            assert bounds.remaining == 1
+            preflight.wait(30)
+            if threading.current_thread().name == "loser":
+                assert winner_finished.wait(45)
+        return bounds
+
+    monkeypatch.setattr(games, "run_game_bounds", competing_bounds)
+
+    def process(role):
+        try:
+            with connection(database_url, mode="rw") as conn:
+                outcomes[role] = JobRunner(conn, stage="processing", budget_policy=policy, clock=lambda: NOW).run(
+                    crawl_run_id=run_id, job_id=children[role], max_jobs=1,
+                )
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            if role == "winner":
+                winner_finished.set()
+
+    workers = [threading.Thread(target=process, args=(role,), name=role) for role in children]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(60)
+    assert all(not worker.is_alive() for worker in workers)
+    assert failures == []
+    with connection(database_url, mode="rw") as conn:
+        assert outcomes.keys() == children.keys()
+        assert all(result.done == 1 and result.blocked == result.errors == 0 for result in outcomes.values()), {
+            role: (_job(conn, child).state, _job(conn, child).reason) for role, child in children.items()
+        }
+        assert require_row(conn.execute("SELECT COUNT(*) FROM run_games WHERE crawl_run_id=%s", (run_id,)))[0] == 1
+        assert require_row(conn.execute("SELECT provider_game_id FROM games"))[0] == "winner"
+        assert require_row(conn.execute("SELECT COUNT(*) FROM budget_game_items WHERE budget_id=%s", (budget_id,)))[0] == 1
+        assert _budget(conn, run_id, "alpha")["games"] == 1
+        assert _budget(conn, run_id, "alpha")["normalization_units"] == 4  # Two source reads and two interpretations.
+        usage = require_row(conn.execute("SELECT games,normalization_units FROM workspace_budget_periods WHERE workspace_id='alpha'"))
+        assert (usage["games"], usage["normalization_units"]) == (1, 4)
+        assert [_job(conn, child).state for child in children.values()] == ["done", "done"]
+        assert require_row(conn.execute("SELECT normalization_status FROM raw_payloads WHERE id=%s", (raw_ids["loser"],)))[0] == "pending"
+        no_http = httpx.MockTransport(lambda request: pytest.fail("Satisfied run cap must not fetch another source"))
+        completed = JobRunner(conn, stage="acquisition", transport=no_http, budget_policy=policy, clock=lambda: NOW).run(
+            crawl_run_id=run_id, job_id=parent, max_jobs=1,
+        )
+        assert completed.done == 1 and completed.blocked == completed.errors == 0
+        assert _job(conn, parent).state == "done"
+        run = state.get_run(conn, run_id)
+        assert run is not None and run["status"] == "done"
 
 
 def test_full_history_budget_pause_resume_reuses_proven_pages_without_false_completion(initialized_conn) -> None:

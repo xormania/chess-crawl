@@ -104,10 +104,11 @@ def normalize_games_payload(
         # can reuse immutable evidence while still refreshing mutable game facts.
         # Explicit standalone replay continues to perform those repair writes.
         reusable = pointer in checkpoints and (crawl_run_id is not None or conn._job_fence is not None)
-        new_budget_game = True
         if conn._work_budget_id is not None:
             from chess_crawl.storage.work_budgets import reserve_normalization
-            new_budget_game = reserve_normalization(conn, conn._work_budget_id, game_key=game_key)
+            # Interpretation is paid before parsing, even when a concurrent
+            # selection later consumes the remaining run allowance.
+            reserve_normalization(conn, conn._work_budget_id)
         evidence_exists = reusable or pointer in retained_evidence
         prepared = None if evidence_exists else parse_game_evidence(game)
         while True:
@@ -119,13 +120,21 @@ def normalize_games_payload(
                     existing_id = int(existing["id"]) if existing is not None else None
                     already_acquired = (
                         existing_id is not None and run_has_game(conn, crawl_run_id, existing_id)
-                        if crawl_run_id is not None else conn._work_budget_id is not None and not new_budget_game
+                        if crawl_run_id is not None else
+                        conn._work_budget_id is not None and work_budget_has_game(conn, conn._work_budget_id, game_key)
                     )
                     if bounds is not None and not bounds.includes(game.end_time, created_ms=game.source_data.get("createdAt")):
                         break
                     allowance = bounds.remaining if bounds is not None else remaining_request
                     if not already_acquired and allowance == 0:
                         break
+                    if conn._work_budget_id is not None:
+                        from chess_crawl.storage.work_budgets import reserve_game
+                        # Unique-game quota follows the locked admission check
+                        # and rolls back with this game's attribution and writes.
+                        new_budget_game = reserve_game(conn, conn._work_budget_id, game_key=game_key)
+                        if crawl_run_id is None:
+                            already_acquired = not new_budget_game
                     refresh_current = (reusable and existing_id is not None
                                        and game_source_needs_refresh(conn, existing_id, raw_payload_id))
                     if reusable and not refresh_current:
