@@ -21,8 +21,11 @@ x-database-env: &database-env
   # This explicit policy trusts only the bundled Compose service hostname.
   CHESS_CRAWL_DATABASE_TRANSPORT: local
   CHESS_CRAWL_DATABASE_TRUSTED_HOST: postgres
-  CHESS_CRAWL_ARCHIVE_BACKEND: local
+  CHESS_CRAWL_ARCHIVE_BACKEND: ${CHESS_CRAWL_ARCHIVE_BACKEND:-local}
   CHESS_CRAWL_ARCHIVE_DIRECTORY: /var/lib/chess-crawl/archive
+  CHESS_CRAWL_ARCHIVE_S3_BUCKET: ${CHESS_CRAWL_ARCHIVE_S3_BUCKET:-}
+  AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+  CHESS_CRAWL_USAGE_LOG: ${CHESS_CRAWL_USAGE_LOG:-false}
   CHESS_CRAWL_EVENTS_ENABLED: ${CHESS_CRAWL_EVENTS_ENABLED:-true}
 
 x-budget-env: &budget-env
@@ -122,7 +125,7 @@ services:
       retries: 5
       start_period: 10s
 
-  worker:
+  worker: &worker
     <<: *python
     restart: unless-stopped
     depends_on:
@@ -132,23 +135,20 @@ services:
         condition: service_completed_successfully
     volumes:
       - archive_data:/var/lib/chess-crawl/archive
-    command:
-      - python
-      - -m
-      - chess_crawl.jobs.worker
-      - --poll-interval
-      - "${CHESS_CRAWL_POLL_INTERVAL:-1}"
-      - --heartbeat-interval
-      - "${CHESS_CRAWL_HEARTBEAT_INTERVAL:-5}"
-      - --max-retries
-      - "${CHESS_CRAWL_JOB_MAX_RETRIES:-3}"
-      - --retry-base
-      - "${CHESS_CRAWL_RETRY_BASE:-30}"
-      - --retry-max
-      - "${CHESS_CRAWL_RETRY_MAX:-3600}"
-    environment:
+    command: ["python", "-m", "chess_crawl.jobs.worker"]
+    environment: &worker-env
       <<: [*database-env, *budget-env]
       CHESS_CRAWL_CONTACT: ${CHESS_CRAWL_CONTACT:-set-me@example.invalid}
+      CHESS_CRAWL_USER_AGENT: ${CHESS_CRAWL_USER_AGENT:-}
+      CHESS_CRAWL_CHESSCOM_DELAY_S: ${CHESS_CRAWL_CHESSCOM_DELAY_S:-1}
+      CHESS_CRAWL_LICHESS_DELAY_S: ${CHESS_CRAWL_LICHESS_DELAY_S:-1.5}
+      CHESS_CRAWL_PROVIDER_MAX_RETRIES: ${CHESS_CRAWL_PROVIDER_MAX_RETRIES:-3}
+      CHESS_CRAWL_POLL_INTERVAL: ${CHESS_CRAWL_POLL_INTERVAL:-1}
+      CHESS_CRAWL_HEARTBEAT_INTERVAL: ${CHESS_CRAWL_HEARTBEAT_INTERVAL:-5}
+      CHESS_CRAWL_HEARTBEAT_MAX_AGE: ${CHESS_CRAWL_HEARTBEAT_MAX_AGE:-20}
+      CHESS_CRAWL_JOB_MAX_RETRIES: ${CHESS_CRAWL_JOB_MAX_RETRIES:-3}
+      CHESS_CRAWL_RETRY_BASE: ${CHESS_CRAWL_RETRY_BASE:-30}
+      CHESS_CRAWL_RETRY_MAX: ${CHESS_CRAWL_RETRY_MAX:-3600}
       CHESS_CRAWL_LICHESS_TOKEN: ${CHESS_CRAWL_LICHESS_TOKEN:-}
       CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE: ${CHESS_CRAWL_LICHESS_TOKEN_OWNER_SCOPE:-local}
       CHESS_CRAWL_LICHESS_CLOCKS: ${CHESS_CRAWL_LICHESS_CLOCKS:-true}
@@ -166,6 +166,21 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  acquisition:
+    <<: *worker
+    profiles: [scalable]
+    command: ["python", "-m", "chess_crawl.jobs.worker", "--stage", "acquisition"]
+
+  processing:
+    <<: *worker
+    profiles: [scalable]
+    command: ["python", "-m", "chess_crawl.jobs.worker", "--stage", "processing"]
+    volumes:
+      - archive_data:/var/lib/chess-crawl/archive:ro
+    environment:
+      <<: *worker-env
+      CHESS_CRAWL_LICHESS_TOKEN: ""
 
   events:
     <<: *python
