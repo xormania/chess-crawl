@@ -13,6 +13,9 @@ workspace has monthly limits of 1,000,000 games, 1,000,000 interpretation units,
 and each selected game interpretation consume units, including repeated local
 replay. An HTTP attempt prepays one source interpretation unit; failed attempts
 retain that charge. Distinct games count once per run budget, even across pages.
+Per-game interpretation is prepaid before parsing. Unique-game quota is reserved
+after the locked selection check and commits with the accepted game; a competing
+worker that loses the last run slot pays interpretation units but no game quota.
 
 Operator configuration uses `CHESS_CRAWL_` followed by the uppercase `BudgetPolicy`
 field name, for example `CHESS_CRAWL_JOB_MAX_REMOTE_REQUESTS` and

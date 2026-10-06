@@ -7,9 +7,9 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -19,8 +19,8 @@ from chess_crawl.ingest import (
     IngestResult, fetch_chesscom_archives, fetch_chesscom_month, fetch_lichess_game,
     fetch_lichess_games_page, replay_raw_payload,
 )
-from chess_crawl.jobs.models import DiscoveryJob, JobKind
-from chess_crawl.jobs.state import enqueue_job
+from chess_crawl.jobs.models import CollectionResult, DiscoveryJob
+from chess_crawl.jobs.state import enqueue_payload_normalization
 from chess_crawl.normalize.games import PARSER_VERSION
 from chess_crawl.storage.normalization import observation_id
 from chess_crawl.providers.registry import ProviderSession
@@ -28,16 +28,6 @@ from chess_crawl.storage import collection as store
 from chess_crawl.storage.acquisition import payload_game_ids
 from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.raw import payload_observed_at, read_raw_payload, latest_job_payload
-
-
-@dataclass(frozen=True)
-class CollectionResult:
-    done: bool
-    processed_units: int
-    normalized_ids: tuple[int, ...]
-    message: str
-    status_code: int = 200
-    retry_after: float | None = None
 
 
 def execute_collection(
@@ -354,12 +344,10 @@ def _use_local_payload(conn, job, raw_id, options) -> tuple[int, ...]:
     if getattr(conn, "_defer_normalization", False) and (needs_parser or job.crawl_run_id is not None):
         captured = latest_job_payload(conn, job.id, endpoint_type=raw.endpoint_type,
                                       source_key=raw.canonical_source_key)
-        enqueue_job(
-            conn, provider=job.provider, kind=cast(JobKind, "normalize_payload"), target=str(raw.id),
-            params={"raw_payload_id": raw.id, "max_games": None,
-                    "fetch_log_id": captured[1] if captured is not None else observation_id(conn, raw.id)},
-            crawl_run_id=job.crawl_run_id,
-            parent_job_id=job.id, priority=20,
+        enqueue_payload_normalization(
+            conn, provider=job.provider, raw_payload_id=raw.id, max_games=None,
+            fetch_log_id=captured[1] if captured is not None else observation_id(conn, raw.id),
+            crawl_run_id=job.crawl_run_id, parent_job_id=job.id, parser_version=PARSER_VERSION,
         )
         return ()
     if needs_parser or job.crawl_run_id is not None:

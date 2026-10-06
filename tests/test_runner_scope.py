@@ -56,7 +56,15 @@ def test_runner_reuses_provider_pacing_across_jobs_and_months(initialized_conn, 
         transport=Transport(handler), sleeper=clock.sleep, clock=clock,
     ).run()
 
-    assert result.done == 3
+    # The three acquisition jobs also create two local normalization jobs;
+    # those processing completions must not add provider requests.
+    jobs = conn.execute("SELECT kind,state,parent_job_id FROM discovery_jobs").fetchall()
+    acquisition = [job for job in jobs if job["kind"] != "normalize_payload"]
+    processing = [job for job in jobs if job["kind"] == "normalize_payload"]
+    assert len(acquisition) == 3 and all(job["state"] == "done" for job in acquisition)
+    assert len(processing) == 2 and all(job["state"] == "done" for job in processing)
+    assert all(job["parent_job_id"] is not None for job in processing)
+    assert result.done == 5
     assert result.errors == 0
     expected = (
         ["/pub/player/samename", "/pub/player/samename/stats", "/pub/player/samename/games/2024/01", "/pub/player/samename/games/2024/02"]
@@ -64,7 +72,11 @@ def test_runner_reuses_provider_pacing_across_jobs_and_months(initialized_conn, 
         ["/api/user/samename", "/api/games/user/samename", "/game/export/lichgame1"]
     )
     assert calls == [(path, 100 + index * 3) for index, path in enumerate(expected)]
-    assert clock.sleeps == [3] * (len(expected) - 1)
+    # The last Chess.com month leaves its parent pending until normalization
+    # finishes. Its final local completion still observes acquisition admission's
+    # persisted provider cooldown, without issuing another HTTP request.
+    cooldown_waits = len(expected) - 1 + (provider == "chess.com")
+    assert clock.sleeps == [3] * cooldown_waits
     assert closed == [True]
 
 

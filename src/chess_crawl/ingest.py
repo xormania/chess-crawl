@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -260,10 +261,12 @@ def _reuse_game_acquisition(
         return None
     raw_id, fetch_id = stored
     if conn._defer_normalization:
-        from chess_crawl.jobs.state import enqueue_job
-        enqueue_job(conn, provider=provider, kind="normalize_payload", target=str(raw_id),
-                    params={"raw_payload_id": raw_id, "max_games": max_games, "fetch_log_id": fetch_id},
-                    crawl_run_id=crawl_run_id, parent_job_id=job_id, priority=20)
+        from chess_crawl.jobs.state import enqueue_payload_normalization
+        enqueue_payload_normalization(
+            conn, provider=provider, raw_payload_id=raw_id, fetch_log_id=fetch_id,
+            max_games=max_games, crawl_run_id=crawl_run_id, parent_job_id=job_id,
+            parser_version=GAMES_PARSER_VERSION,
+        )
         ids: tuple[int, ...] = ()
     else:
         ids = tuple(normalize_games_payload(conn, raw_id, crawl_run_id=crawl_run_id, max_games=max_games))
@@ -283,17 +286,21 @@ def replay_raw_payload(
     conn: Connection, raw_payload_id: int, *,
     crawl_run_id: int | None = None, max_games: int | None = None,
     fetch_log_id: int | None = None,
+    parser_version: str | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> IngestResult:
     """Normalize a durable raw payload without making or fabricating a fetch.
 
     This is safe after a parser failure or interruption: normalization and
     provenance are transactional and existing normalized entities are upserted.
     """
+    raw = raw_payload_metadata(conn, raw_payload_id)
+    if parser_version is not None and parser_version != _parser_version(raw["endpoint_type"]):
+        raise ValueError("Requested parser target is unavailable for this source payload")
     if conn._work_budget_id is not None:
         from chess_crawl.storage.work_budgets import reserve_normalization
         reserve_normalization(conn, conn._work_budget_id)
         conn._work_payload_read_credits += 1
-    raw = raw_payload_metadata(conn, raw_payload_id)
     normalized: list[int] | int | None
     if raw["endpoint_type"] in {"user_profile", "user_stats"}:
         normalized = normalize_user_payload(conn, raw_payload_id, fetch_log_id=fetch_log_id)
@@ -302,6 +309,7 @@ def replay_raw_payload(
     elif raw["endpoint_type"] in {"monthly_archive", "user_games_stream", "game"}:
         normalized = normalize_games_payload(
             conn, raw_payload_id, crawl_run_id=crawl_run_id, max_games=max_games,
+            stop_requested=stop_requested,
         )
     elif raw["endpoint_type"] == "archives_index":
         _mark_archives_skipped(conn, raw_payload_id)
@@ -325,17 +333,20 @@ def installed_parser_target(requested: str = "current") -> str:
     return manifest
 
 
+def _parser_version(endpoint_type: str) -> str:
+    if endpoint_type in {"user_profile", "user_stats"}:
+        return USERS_PARSER_VERSION
+    if endpoint_type == "user_resource":
+        return RESOURCES_PARSER_VERSION
+    if endpoint_type == "archives_index":
+        return "chesscom-archives-index-v1"
+    return GAMES_PARSER_VERSION
+
+
 def _requires_normalization(conn: Connection, raw_payload_id: int) -> bool:
     raw = raw_payload_metadata(conn, raw_payload_id)
-    if raw["endpoint_type"] in {"user_profile", "user_stats"}:
-        version = USERS_PARSER_VERSION
-    elif raw["endpoint_type"] == "user_resource":
-        version = RESOURCES_PARSER_VERSION
-    elif raw["endpoint_type"] == "archives_index":
-        version = "chesscom-archives-index-v1"
-    else:
-        version = GAMES_PARSER_VERSION
-    return raw["normalization_status"] not in {"parsed", "skipped"} or raw["parser_version"] != version
+    return (raw["normalization_status"] not in {"parsed", "skipped"}
+            or raw["parser_version"] != _parser_version(raw["endpoint_type"]))
 
 
 def _normalized_ids(normalized) -> tuple[int, ...]:
@@ -359,11 +370,11 @@ def _store_and_normalize(
     # A new conditional observation can make this cached game source current
     # again even when its parser is unchanged and there is no crawl run.
     if conn._defer_normalization:
-        from chess_crawl.jobs.state import enqueue_job
-        enqueue_job(
-            conn, provider=record.provider, kind="normalize_payload", target=str(raw_payload_id),
-            params={"raw_payload_id": raw_payload_id, "max_games": max_games, "fetch_log_id": fetch_log_id},
-            crawl_run_id=crawl_run_id, parent_job_id=job_id, priority=20,
+        from chess_crawl.jobs.state import enqueue_payload_normalization
+        enqueue_payload_normalization(
+            conn, provider=record.provider, raw_payload_id=raw_payload_id, fetch_log_id=fetch_log_id,
+            max_games=max_games, crawl_run_id=crawl_run_id, parent_job_id=job_id,
+            parser_version=_parser_version(record.endpoint_type),
         )
         return IngestResult(record.provider, record.endpoint_type, record.http_status,
                             raw_payload_id, (), f"stored raw #{raw_payload_id}; normalization queued",

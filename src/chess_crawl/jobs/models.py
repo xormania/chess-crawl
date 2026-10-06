@@ -16,6 +16,7 @@ JobKind = Literal[
     "fetch_user_resource",
     "normalize_payload",
     "reprocess_archive",
+    "expand_opponents",
 ]
 
 JOB_STATES: tuple[str, ...] = ("pending", "in_progress", "done", "error", "skipped", "blocked")
@@ -28,9 +29,10 @@ JOB_KINDS: tuple[str, ...] = (
     "fetch_user_resource",
     "normalize_payload",
     "reprocess_archive",
+    "expand_opponents",
 )
 
-PROCESSING_JOB_KINDS: tuple[str, ...] = ("normalize_payload", "reprocess_archive")
+PROCESSING_JOB_KINDS: tuple[str, ...] = ("normalize_payload", "reprocess_archive", "expand_opponents")
 
 
 @dataclass(frozen=True)
@@ -63,3 +65,13 @@ class DiscoveryJob:
 class EnqueueResult:
     job_id: int
     inserted: bool
+
+
+@dataclass(frozen=True)
+class CollectionResult:
+    done: bool
+    processed_units: int
+    normalized_ids: tuple[int, ...]
+    message: str
+    status_code: int = 200
+    retry_after: float | None = None

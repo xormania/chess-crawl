@@ -19,6 +19,7 @@ from chess_crawl.providers.base import RawRecord
 from chess_crawl.storage.acquisition import associate_run_game, run_game_ids
 from chess_crawl.storage.discovery import game_count_for_run
 from chess_crawl.storage.raw import read_raw_payload, store_raw_payload
+from support import Clock
 
 
 def _archive_body(
@@ -182,17 +183,23 @@ def test_runner_enforces_one_budget_across_monthly_responses(
         params={"since": 1704067200, "until": 1709251200, "max_games": 3},
         root_kind="fetch_user_games", root_target="SameName",
     )
+    clock = Clock(100.0)
     result = JobRunner(
         conn, config=Config(chesscom_delay_s=0, max_retries=0), transport=httpx.MockTransport(handler),
+        clock=clock, sleeper=clock.sleep,
     ).run(crawl_run_id=run_id)
 
-    assert result.done == 1
+    # One acquisition parent and one normalization child per captured month.
+    assert result.done == 3 and result.errors == result.blocked == 0
+    assert len(conn.execute("SELECT id FROM discovery_jobs WHERE kind='normalize_payload' AND state='done'").fetchall()) == 2
     assert requests == ["01", "02"]
     assert _count(conn, run_id) == 3
     assert require_row(conn.execute("SELECT COUNT(*) FROM games"))[0] == 3
     assert [row[0] for row in conn.execute("SELECT normalization_status FROM raw_payloads ORDER BY id")] == [
         "parsed", "pending",
     ]
+    second_raw = require_row(conn.execute("SELECT id FROM raw_payloads ORDER BY id DESC LIMIT 1"))[0]
+    assert read_raw_payload(conn, second_raw).body == bodies["02"]
 
 
 def test_run_attribution_boundary_enforces_capacity_and_provider(
@@ -235,12 +242,15 @@ def test_monthly_import_applies_half_open_date_window_before_game_budget(
         params={"since": since, "until": until, "max_games": 1},
         root_kind="fetch_user_games", root_target="SameName",
     )
+    clock = Clock(100.0)
     result = JobRunner(
         conn, config=Config(chesscom_delay_s=0, max_retries=0),
         transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body)),
+        clock=clock, sleeper=clock.sleep,
     ).run(crawl_run_id=run_id)
 
-    assert result.done == 1
+    assert result.done == 2 and result.errors == result.blocked == 0
+    assert len(conn.execute("SELECT id FROM discovery_jobs WHERE kind='normalize_payload' AND state='done'").fetchall()) == 1
     selected = conn.execute(
         "SELECT provider_game_id FROM games JOIN run_games ON game_id = games.id WHERE crawl_run_id = %s",
         (run_id,),

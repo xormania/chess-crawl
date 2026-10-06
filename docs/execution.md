@@ -63,11 +63,35 @@ queries.
 ## Local execution and stages
 
 `python -m chess_crawl.jobs.worker --stage all` polls PostgreSQL. Multiple
-workers are supported. `--stage acquisition` selects provider/discovery jobs;
-`--stage processing` selects normalization and archive-reprocessing jobs.
-Full/incremental collection captures source batches, queues normalization jobs,
-and yields between checkpoints. The existing bounded import/crawl path retains
-synchronous normalization so its strict total game cap remains enforceable.
+workers are supported. `--stage acquisition` selects provider capture jobs;
+`--stage processing` selects normalization, opponent-frontier expansion, and
+archive-reprocessing jobs. Provider profiles/statistics/resources retain their
+small projections during acquisition; game interpretation always runs separately.
+
+Full/incremental collection captures source batches and yields between
+checkpoints. Bounded imports and crawls capture one Chess.com month or one Lichess
+stream per claim. The acquisition parent waits for its normalization children
+before another claim, so the next request uses the committed remaining game
+allowance. It completes on a later claim after its last captured source is
+processed. The scheduler excludes waiting bounded parents, allowing other provider work
+and processing to make progress without repeatedly claiming a pending parent.
+Per-game run attribution still checks the exact shared cap atomically.
+
+A crawl completes capture before queuing `expand_opponents`. That processing
+job reads retained run games, records graph evidence, and admits children under
+a run-scoped frontier lock. Discovery's `max_jobs` bounds acquisition jobs;
+internal normalization/expansion jobs appear in total-job counters and remain
+subject to workspace backlog and active-job limits. Expansion cannot run until
+its acquisition parent is done and does not wait on provider cooldowns.
+Transient processing retries delay their own job without imposing provider-wide
+HTTP cooldowns.
+
+Source processing failure prevents further acquisition by its parent. Budget
+pauses retain the captured response and selection checkpoint for explicit
+extension/resume. Shutdown and cancellation stop game processing between
+committed games. Captured-occurrence deduplication includes terminal processing
+jobs, so recovery after capture but before cursor advancement reuses the original
+response and completed interpretation without refetching or queuing it twice.
 
 ## SQS dispatch
 
@@ -160,3 +184,8 @@ Stop old serial workers before applying migration `0009_scalable_execution`.
 Run migrations once, then start the new workers and optional dispatcher. The
 old singleton heartbeat table is retained for schema compatibility but is no
 longer written. Back up PostgreSQL and external source objects together.
+
+Apply migration `0018_staged_acquisition` before starting workers that create
+`expand_opponents` jobs. Drain/stop older workers before this upgrade: their
+execution handlers do not recognize the new processing kind. Retained bounded
+cursors and original acquired responses remain resumable after the upgrade.

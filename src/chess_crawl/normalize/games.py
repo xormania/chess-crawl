@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import TypedDict
 
 from chess_crawl.normalize.codes import map_variant
@@ -10,7 +11,7 @@ from chess_crawl.normalize.game_evidence import EVIDENCE_VERSION, GameEvidence, 
 from chess_crawl.providers.base import NormalizedGame, NormalizedParticipant
 from chess_crawl.providers.chesscom import parser as chesscom_parser
 from chess_crawl.providers.lichess import parser as lichess_parser
-from chess_crawl.storage.acquisition import associate_run_game, run_game_bounds, run_has_game
+from chess_crawl.storage.acquisition import associate_run_game, run_game_bounds, run_has_game, work_budget_has_game
 from chess_crawl.storage.db import Connection, transaction
 from chess_crawl.storage.game_evidence import (
     EvidencePreparationRequired, game_source_needs_refresh, reusable_game_sources,
@@ -42,12 +43,17 @@ class TimeControlArgs(TypedDict):
     raw_label: str
 
 
+class NormalizationStopped(Exception):
+    """A processing checkpoint remains incomplete after shutdown or cancellation."""
+
+
 def normalize_games_payload(
     conn: Connection,
     raw_payload_id: int,
     *,
     crawl_run_id: int | None = None,
     max_games: int | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> list[int]:
     """Normalize a bounded selection, retaining the full raw payload for later work.
 
@@ -75,6 +81,8 @@ def normalize_games_payload(
                 for index in range(len(games))]
     retained_evidence = reusable_game_sources(conn, raw_payload_id, zip(pointers, games))
     for pointer, game in zip(pointers, games):
+        if stop_requested is not None and stop_requested():
+            raise NormalizationStopped("Processing stopped; game checkpoint retained")
         # A conservative read avoids interpreting games the persisted window
         # or exhausted selection cannot admit. The write rechecks these bounds.
         preflight = (run_game_bounds(conn, crawl_run_id, provider=raw.provider, requested=remaining_request)
@@ -82,10 +90,15 @@ def normalize_games_payload(
         if preflight is not None and not preflight.includes(game.end_time, created_ms=game.source_data.get("createdAt")):
             continue
         allowance = preflight.remaining if preflight is not None else remaining_request
+        game_key = game.provider + "/" + (game.provider_game_id or game.canonical_url or game.content_hash)
         if allowance == 0:
             existing = find_existing_game(conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash)
-            if (crawl_run_id is None or existing is None
-                    or not run_has_game(conn, crawl_run_id, int(existing["id"]))):
+            already_selected = (
+                existing is not None and run_has_game(conn, crawl_run_id, int(existing["id"]))
+                if crawl_run_id is not None else
+                conn._work_budget_id is not None and work_budget_has_game(conn, conn._work_budget_id, game_key)
+            )
+            if not already_selected:
                 continue
         # Checkpoints may skip completed writes. Independently, fresh observations
         # can reuse immutable evidence while still refreshing mutable game facts.
@@ -93,10 +106,9 @@ def normalize_games_payload(
         reusable = pointer in checkpoints and (crawl_run_id is not None or conn._job_fence is not None)
         if conn._work_budget_id is not None:
             from chess_crawl.storage.work_budgets import reserve_normalization
-            reserve_normalization(
-                conn, conn._work_budget_id,
-                game_key=game.provider + "/" + (game.provider_game_id or game.canonical_url or game.content_hash),
-            )
+            # Interpretation is paid before parsing, even when a concurrent
+            # selection later consumes the remaining run allowance.
+            reserve_normalization(conn, conn._work_budget_id)
         evidence_exists = reusable or pointer in retained_evidence
         prepared = None if evidence_exists else parse_game_evidence(game)
         while True:
@@ -106,13 +118,23 @@ def normalize_games_payload(
                               if crawl_run_id is not None else None)
                     existing = find_existing_game(conn, game.provider, game.provider_game_id, game.canonical_url, game.content_hash)
                     existing_id = int(existing["id"]) if existing is not None else None
-                    already_acquired = (crawl_run_id is not None and existing_id is not None
-                                        and run_has_game(conn, crawl_run_id, existing_id))
+                    already_acquired = (
+                        existing_id is not None and run_has_game(conn, crawl_run_id, existing_id)
+                        if crawl_run_id is not None else
+                        conn._work_budget_id is not None and work_budget_has_game(conn, conn._work_budget_id, game_key)
+                    )
                     if bounds is not None and not bounds.includes(game.end_time, created_ms=game.source_data.get("createdAt")):
                         break
                     allowance = bounds.remaining if bounds is not None else remaining_request
                     if not already_acquired and allowance == 0:
                         break
+                    if conn._work_budget_id is not None:
+                        from chess_crawl.storage.work_budgets import reserve_game
+                        # Unique-game quota follows the locked admission check
+                        # and rolls back with this game's attribution and writes.
+                        new_budget_game = reserve_game(conn, conn._work_budget_id, game_key=game_key)
+                        if crawl_run_id is None:
+                            already_acquired = not new_budget_game
                     refresh_current = (reusable and existing_id is not None
                                        and game_source_needs_refresh(conn, existing_id, raw_payload_id))
                     if reusable and not refresh_current:

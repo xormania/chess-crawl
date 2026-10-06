@@ -303,10 +303,28 @@ def settle_request(conn: Connection, reservation_id: int, consumed_bytes: int) -
 @atomic
 def reserve_normalization(
     conn: Connection, budget_id: int, *, game_key: str | None = None, now: int | None = None,
-) -> None:
+) -> bool:
+    """Bill interpretation and return whether this budget acquired a new game."""
+    return _reserve_processing_work(conn, budget_id, game_key=game_key, interpretation_units=1, now=now)
+
+
+@atomic
+def reserve_game(conn: Connection, budget_id: int, *, game_key: str, now: int | None = None) -> bool:
+    """Reserve a unique admitted game alongside its transactional write.
+
+    Interpretation has already been prepaid outside the game/run write locks.
+    Existing budget members remain usable when the game ceiling is exhausted.
+    """
+    return _reserve_processing_work(conn, budget_id, game_key=game_key, interpretation_units=0, now=now)
+
+
+def _reserve_processing_work(
+    conn: Connection, budget_id: int, *, game_key: str | None, interpretation_units: int, now: int | None,
+) -> bool:
     timestamp = int(time.time()) if now is None else now
     budget, policy, usage, workspace_policy = _locked_budget(conn, budget_id, timestamp)
-    _remaining(budget, policy, usage, workspace_policy, "normalization_units")
+    if interpretation_units:
+        _remaining(budget, policy, usage, workspace_policy, "normalization_units")
     game_units = 0
     if game_key is not None and conn.execute(
         "SELECT 1 FROM budget_game_items WHERE budget_id=%s AND game_key=%s", (budget_id, game_key),
@@ -314,14 +332,18 @@ def reserve_normalization(
         _remaining(budget, policy, usage, workspace_policy, "games")
         conn.execute("INSERT INTO budget_game_items(budget_id,game_key) VALUES(%s,%s)", (budget_id, game_key))
         game_units = 1
+    if not interpretation_units and not game_units:
+        return False
     conn.execute(
-        "UPDATE work_budgets SET normalization_units=normalization_units+1,games=games+%s,updated_at=%s WHERE id=%s",
-        (game_units, timestamp, budget_id),
+        "UPDATE work_budgets SET normalization_units=normalization_units+%s,games=games+%s,updated_at=%s WHERE id=%s",
+        (interpretation_units, game_units, timestamp, budget_id),
     )
     conn.execute(
-        """UPDATE workspace_budget_periods SET normalization_units=normalization_units+1,games=games+%s
-             WHERE workspace_id=%s AND period_start=%s""", (game_units, budget["workspace_id"], usage["period_start"]),
+        """UPDATE workspace_budget_periods SET normalization_units=normalization_units+%s,games=games+%s
+             WHERE workspace_id=%s AND period_start=%s""",
+        (interpretation_units, game_units, budget["workspace_id"], usage["period_start"]),
     )
+    return game_units == 1
 
 
 @atomic
