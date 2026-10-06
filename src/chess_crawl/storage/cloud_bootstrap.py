@@ -1,7 +1,8 @@
 """One-shot schema migration and restricted cloud runtime-role bootstrap."""
 from __future__ import annotations
 
-import os
+from chess_crawl.settings import setting
+
 import re
 import sys
 
@@ -75,8 +76,10 @@ def bootstrap_runtime_role(conn: Connection, *, username: str, password: str) ->
 
 def main() -> int:
     try:
-        username = os.environ["CHESS_CRAWL_APPLICATION_DATABASE_USER"]
-        password = os.environ["CHESS_CRAWL_APPLICATION_DATABASE_PASSWORD"]
+        username = setting("CHESS_CRAWL_APPLICATION_DATABASE_USER")
+        password = setting("CHESS_CRAWL_APPLICATION_DATABASE_PASSWORD")
+        if not username or not password:
+            raise ValueError("Set application database username and password before bootstrap")
         with connection(database_url(), mode="rw") as conn:
             # Reuse the atomic schema+role boundary rather than initializing on
             # connection entry. External connections default to verified TLS.

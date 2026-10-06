@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import json
-import os
 import secrets
 from pathlib import Path
 from typing import Annotated, Any, Literal, Mapping
@@ -17,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from chess_crawl import __version__
+from chess_crawl.settings import setting
 from chess_crawl import application
 from chess_crawl.jobs import state
 from chess_crawl.jobs.budget import BudgetPolicy, QuotaExceeded
@@ -118,13 +118,13 @@ def create_app(
     never move across the request thread pool.
     """
     archive = resolve_database_url(database_url)
-    token = api_token if api_token is not None else os.getenv("CHESS_CRAWL_API_TOKEN", "")
-    token_file = os.getenv("CHESS_CRAWL_API_TOKEN_FILE")
+    token = api_token if api_token is not None else setting("CHESS_CRAWL_API_TOKEN", "")
+    token_file = setting("CHESS_CRAWL_API_TOKEN_FILE")
     if token and token_file:
         raise ValueError("Set either CHESS_CRAWL_API_TOKEN or CHESS_CRAWL_API_TOKEN_FILE, not both")
     if token_file:
         token = Path(token_file).read_text(encoding="utf-8").strip()
-    workspace_file = os.getenv("CHESS_CRAWL_API_WORKSPACE_TOKENS_FILE")
+    workspace_file = setting("CHESS_CRAWL_API_WORKSPACE_TOKENS_FILE")
     if workspace_tokens is not None and workspace_file:
         raise ValueError("Set workspace_tokens or CHESS_CRAWL_API_WORKSPACE_TOKENS_FILE, not both")
     if workspace_file:

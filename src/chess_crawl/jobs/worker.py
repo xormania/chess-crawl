@@ -8,13 +8,13 @@ import sys
 import threading
 import time
 import uuid
-import os
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import httpx
 
 from chess_crawl.config import Config
+from chess_crawl.settings import setting
 from chess_crawl.jobs import state
 from chess_crawl.jobs.dispatch import DispatchMaintenance
 from chess_crawl.jobs.locking import ExecutorBusy, parallel_executor_lock
@@ -45,7 +45,7 @@ class Worker:
         identity_path: str | Path | None = None,
     ) -> None:
         self.db_path = database_url(db_path)
-        self.settings = settings or WorkerSettings()
+        self.settings = settings or WorkerSettings.from_env()
         self.config = config or Config.from_env()
         self.transport = transport
         self.clock = clock
@@ -183,26 +183,26 @@ def _is_database_contention(exc: DatabaseError) -> bool:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a concurrent durable chess archive worker")
     parser.add_argument("--database-url", help="PostgreSQL URL; defaults to CHESS_CRAWL_DATABASE_URL")
-    parser.add_argument("--poll-interval", type=float, default=1.0)
-    parser.add_argument("--heartbeat-interval", type=float, default=5.0)
-    parser.add_argument("--max-retries", type=int, default=3, help="Durable retries after provider-level retries are exhausted")
-    parser.add_argument("--retry-base", type=float, default=30.0, help="Initial durable retry delay in seconds")
-    parser.add_argument("--retry-max", type=float, default=3600.0, help="Maximum exponential delay; provider delays remain floors")
+    parser.add_argument("--poll-interval", type=float, default=None)
+    parser.add_argument("--heartbeat-interval", type=float, default=None)
+    parser.add_argument("--max-retries", type=int, default=None, help="Durable retries after provider-level retries are exhausted")
+    parser.add_argument("--retry-base", type=float, default=None, help="Initial durable retry delay in seconds")
+    parser.add_argument("--retry-max", type=float, default=None, help="Maximum exponential delay; provider delays remain floors")
     parser.add_argument("--stage", choices=("all", "acquisition", "processing"), default="all")
-    parser.add_argument("--queue-url", default=os.getenv("CHESS_CRAWL_SQS_QUEUE_URL"),
+    parser.add_argument("--queue-url", default=setting("CHESS_CRAWL_SQS_QUEUE_URL"),
                         help="SQS queue URL; requires the s3 dependency extra")
     parser.add_argument("--once", action="store_true", help="Recover orphaned work, execute at most one due job, then exit")
     args = parser.parse_args(argv)
     try:
-        settings = WorkerSettings(
-            poll_interval=args.poll_interval, heartbeat_interval=args.heartbeat_interval,
-            heartbeat_max_age=max(20.0, 4 * args.heartbeat_interval), job_max_retries=args.max_retries,
-            job_retry_base_s=args.retry_base, job_retry_max_s=args.retry_max,
-        )
+        overrides = {name: value for name, value in {
+            "poll_interval": args.poll_interval, "heartbeat_interval": args.heartbeat_interval,
+            "job_max_retries": args.max_retries, "job_retry_base_s": args.retry_base, "job_retry_max_s": args.retry_max,
+        }.items() if value is not None}
+        settings = WorkerSettings.from_env(overrides=overrides)
         consumer = None
         selected_queue = args.queue_url
         if args.stage != "all":
-            stage_queue = os.getenv(f"CHESS_CRAWL_SQS_{args.stage.upper()}_QUEUE_URL")
+            stage_queue = setting(f"CHESS_CRAWL_SQS_{args.stage.upper()}_QUEUE_URL")
             if args.queue_url and not stage_queue:
                 raise ValueError("Stage-specific SQS workers require the corresponding stage queue URL")
             selected_queue = stage_queue or selected_queue
@@ -210,7 +210,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             from chess_crawl.jobs.dispatch import SqsConsumer, aws_sqs_client
             consumer = SqsConsumer(aws_sqs_client(), selected_queue)
         worker = Worker(database_url(args.database_url), settings=settings, stage=args.stage, queue_consumer=consumer,
-                        identity_path=os.getenv("CHESS_CRAWL_WORKER_IDENTITY_FILE"))
+                        identity_path=setting("CHESS_CRAWL_WORKER_IDENTITY_FILE"))
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
         for sig in previous:
             signal.signal(sig, lambda signum, frame: worker.request_stop())

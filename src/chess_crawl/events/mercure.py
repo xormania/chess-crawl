@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from chess_crawl.settings import setting, number
+
 import json
 import math
-import os
 from dataclasses import dataclass, field
 from datetime import timezone
 from email.utils import parsedate_to_datetime
@@ -46,8 +47,8 @@ class MercureSettings:
 
     @classmethod
     def from_env(cls) -> MercureSettings:
-        token = os.getenv("CHESS_CRAWL_MERCURE_PUBLISHER_JWT", "")
-        token_file = os.getenv("CHESS_CRAWL_MERCURE_PUBLISHER_JWT_FILE", "")
+        token = setting("CHESS_CRAWL_MERCURE_PUBLISHER_JWT", "")
+        token_file = setting("CHESS_CRAWL_MERCURE_PUBLISHER_JWT_FILE", "")
         if token and token_file:
             raise ValueError("Configure only one Mercure publisher JWT source")
         if token_file:
@@ -56,9 +57,12 @@ class MercureSettings:
             except (OSError, UnicodeError):
                 raise ValueError("Could not read the configured Mercure publisher JWT file") from None
         return cls(
-            hub_url=os.getenv("CHESS_CRAWL_MERCURE_URL", ""),
+            hub_url=setting("CHESS_CRAWL_MERCURE_URL", ""),
             publisher_jwt=token,
-            topic_prefix=os.getenv("CHESS_CRAWL_MERCURE_TOPIC_PREFIX", "https://chess-crawl.local").rstrip("/"),
+            topic_prefix=setting("CHESS_CRAWL_MERCURE_TOPIC_PREFIX", "https://chess-crawl.local").rstrip("/"),
+            timeout_s=number(setting("CHESS_CRAWL_MERCURE_TIMEOUT_S", "15"), "CHESS_CRAWL_MERCURE_TIMEOUT_S"),
+            retry_base_s=number(setting("CHESS_CRAWL_MERCURE_RETRY_BASE_S", "1"), "CHESS_CRAWL_MERCURE_RETRY_BASE_S"),
+            retry_max_s=number(setting("CHESS_CRAWL_MERCURE_RETRY_MAX_S", "300"), "CHESS_CRAWL_MERCURE_RETRY_MAX_S"),
         )
 
 

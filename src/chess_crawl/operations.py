@@ -19,6 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Maintain a Chess-Crawl archive. Product features are available through the authenticated API.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    configuration = commands.add_parser("config", help="Validate or inspect effective settings without service access")
+    configuration.add_argument("arguments", nargs=argparse.REMAINDER)
     migrate = commands.add_parser("migrate", help="Apply packaged database migrations without provider requests")
     info = commands.add_parser("info", help="Inspect schema readiness without changing the archive")
     relocate = commands.add_parser("relocate", help="Move one resumable batch of inline backup bodies to configured storage")
@@ -37,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
+    if values and values[0] == "config":
+        from chess_crawl.configuration import main as configuration_main
+        return configuration_main(values[1:])
     if values and values[0] == "budgets":
         from chess_crawl.jobs.budget import main as budget_main
         return budget_main(values[1:])
