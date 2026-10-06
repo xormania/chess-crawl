@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -197,6 +199,65 @@ def test_api_file_credentials_are_validated_without_connecting(tmp_path, monkeyp
     monkeypatch.setenv("CHESS_CRAWL_API_TOKEN_FILE", str(tmp_path / "absent"))
     assert operations.main(["config", "validate", "--role", "api"]) == 2
     assert "private-secret" not in capsys.readouterr().err
+
+
+def test_database_api_configuration_is_validated_without_app_or_database_access(tmp_path, monkeypatch, capsys) -> None:
+    from chess_crawl.api import app
+    from chess_crawl.storage.db import Connection
+    configure_file(tmp_path, monkeypatch, '''
+database_url = "postgresql://postgres@external.example/chess_crawl"
+api_auth_mode = "database"
+healthcheck_token = "private-health-secret"
+''')
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Configuration validation must not construct an app or connect to PostgreSQL")
+
+    monkeypatch.setattr(app, "create_app", forbidden)
+    monkeypatch.setattr(Connection, "connect", forbidden)
+    assert operations.main(["config", "show", "--role", "api"]) == 0
+    captured = capsys.readouterr()
+    assert "private-health-secret" not in captured.out + captured.err
+    output = json.loads(captured.out)
+    assert output["settings"]["api_auth_mode"] == "database"
+    assert output["settings"]["healthcheck_token"] == "<redacted>"
+    assert output["sources"]["api_auth_mode"] == "file"
+
+
+@pytest.mark.parametrize("static_setting", ["API_TOKEN", "API_TOKEN_FILE", "API_WORKSPACE_TOKENS_FILE"])
+def test_database_api_validation_rejects_static_credentials(static_setting, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("CHESS_CRAWL_DATABASE_URL", "postgresql://postgres@localhost/chess_crawl")
+    monkeypatch.setenv("CHESS_CRAWL_API_AUTH_MODE", "database")
+    monkeypatch.setenv("CHESS_CRAWL_" + static_setting, "private-secret")
+    assert operations.main(["config", "validate", "--role", "api"]) == 2
+    captured = capsys.readouterr()
+    assert "static API credentials" in captured.err
+    assert "private-secret" not in captured.out + captured.err
+
+
+def test_api_validation_reports_missing_optional_framework(monkeypatch, capsys) -> None:
+    from chess_crawl import configuration
+    monkeypatch.setenv("CHESS_CRAWL_DATABASE_URL", "postgresql://postgres@localhost/chess_crawl")
+    monkeypatch.setenv("CHESS_CRAWL_API_AUTH_MODE", "database")
+    monkeypatch.setattr(configuration.importlib.util, "find_spec", lambda name: None)
+    assert operations.main(["config", "validate", "--role", "api"]) == 2
+    assert "chess-crawl[api] extra" in capsys.readouterr().err
+
+
+def test_authentication_adapter_import_does_not_load_optional_http_framework() -> None:
+    project = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", '''
+import sys
+from chess_crawl.api.auth import configured_authenticator
+auth = configured_authenticator("postgresql://postgres@localhost/chess_crawl", None, None, "database")
+assert auth.credentials is None
+assert not any(name.split(".")[0] in {"fastapi", "starlette", "uvicorn"} for name in sys.modules)
+'''],
+        cwd=project, env={**os.environ, "PYTHONPATH": str(project / "src")},
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_configuration_snapshot_mappings_cannot_be_mutated() -> None:

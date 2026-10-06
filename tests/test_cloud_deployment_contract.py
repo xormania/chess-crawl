@@ -20,6 +20,30 @@ def template():
     return json.loads((ROOT / "deploy/aws/template.json").read_text())
 
 
+@pytest.mark.parametrize("mode", ["static", "database"])
+def test_cloud_auth_mode_injects_the_correct_service_credential(mode, monkeypatch) -> None:
+    from chess_crawl.api.auth import configured_authenticator
+    value = template()
+    parameter = value["Parameters"]["ApiAuthMode"]
+    assert parameter["Default"] == "static" and mode in parameter["AllowedValues"]
+    equals = value["Conditions"]["DatabaseApiAuth"]["Fn::Equals"]
+    parameters = {"ApiAuthMode": mode}
+    database_mode = parameters[equals[0]["Ref"]] == equals[1]
+    api = value["Resources"]["ApiTask"]["Properties"]["ContainerDefinitions"][0]
+    environment = {item["Name"]: item["Value"] for item in api["Environment"]}
+    assert parameters[environment["CHESS_CRAWL_API_AUTH_MODE"]["Ref"]] == mode
+    assert not any(name.startswith("CHESS_CRAWL_API_TOKEN") for name in environment)
+    secret = next(item for item in api["Secrets"] if item["ValueFrom"] == {"Ref": "ApiTokenSecretArn"})
+    condition, enabled_name, disabled_name = secret["Name"]["Fn::If"]
+    assert condition == "DatabaseApiAuth"
+    supplied_name = enabled_name if database_mode else disabled_name
+    assert supplied_name == ("CHESS_CRAWL_HEALTHCHECK_TOKEN" if mode == "database" else "CHESS_CRAWL_API_TOKEN")
+    monkeypatch.setenv("CHESS_CRAWL_API_AUTH_MODE", mode)
+    monkeypatch.setenv(supplied_name, "ccw_" + "a" * 43)
+    auth = configured_authenticator("postgresql://postgres@localhost/chess_crawl", None, None, None)
+    assert auth.credentials == (None if mode == "database" else {"local": "ccw_" + "a" * 43})
+
+
 def test_task_size_rule_rejects_unsupported_fargate_pairs() -> None:
     value = template()
     assertions = value["Rules"]["ValidTaskSize"]["Assertions"]

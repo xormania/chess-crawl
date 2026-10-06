@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import logging
-import json
-import secrets
-from pathlib import Path
 from typing import Annotated, Any, Literal, Mapping
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
@@ -16,8 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from chess_crawl import __version__
-from chess_crawl.settings import setting
 from chess_crawl import application
+from chess_crawl.api.auth import configured_authenticator
 from chess_crawl.jobs import state
 from chess_crawl.jobs.budget import BudgetPolicy, QuotaExceeded
 from chess_crawl.storage import workspaces
@@ -110,6 +107,7 @@ def create_app(
     limits: application.Limits | None = None,
     workspace_tokens: Mapping[str, str] | None = None,
     budget_policy: BudgetPolicy | None = None,
+    auth_mode: str | None = None,
 ) -> FastAPI:
     """Build an API without opening or migrating an archive at startup.
 
@@ -118,35 +116,7 @@ def create_app(
     never move across the request thread pool.
     """
     archive = resolve_database_url(database_url)
-    token = api_token if api_token is not None else setting("CHESS_CRAWL_API_TOKEN", "")
-    token_file = setting("CHESS_CRAWL_API_TOKEN_FILE")
-    if token and token_file:
-        raise ValueError("Set either CHESS_CRAWL_API_TOKEN or CHESS_CRAWL_API_TOKEN_FILE, not both")
-    if token_file:
-        token = Path(token_file).read_text(encoding="utf-8").strip()
-    workspace_file = setting("CHESS_CRAWL_API_WORKSPACE_TOKENS_FILE")
-    if workspace_tokens is not None and workspace_file:
-        raise ValueError("Set workspace_tokens or CHESS_CRAWL_API_WORKSPACE_TOKENS_FILE, not both")
-    if workspace_file:
-        loaded = json.loads(Path(workspace_file).read_text(encoding="utf-8"))
-        if not isinstance(loaded, dict):
-            raise ValueError("Workspace credentials must be a JSON object")
-        workspace_tokens = loaded
-    if workspace_tokens is not None and (token or token_file):
-        raise ValueError("Set a single API token or workspace tokens, not both")
-    if workspace_tokens is None and (not token or not token.strip()):
-        raise ValueError("CHESS_CRAWL_API_TOKEN must be set before starting the HTTP API")
-    if any(character.isspace() for character in token):
-        raise ValueError("The HTTP API bearer token must not contain whitespace")
-    credentials_by_workspace = dict(workspace_tokens) if workspace_tokens is not None else {"local": token}
-    if not credentials_by_workspace:
-        raise ValueError("At least one API workspace credential is required")
-    for workspace_id, credential in credentials_by_workspace.items():
-        workspaces.validate_workspace(workspace_id)
-        if not isinstance(credential, str) or not credential or any(char.isspace() for char in credential):
-            raise ValueError("Workspace bearer tokens must be nonempty strings without whitespace")
-    if len(set(credentials_by_workspace.values())) != len(credentials_by_workspace):
-        raise ValueError("Workspace bearer tokens must be unique")
+    authenticator = configured_authenticator(archive, api_token, workspace_tokens, auth_mode)
     request_limits = limits or application.Limits.from_env()
     work_policy = budget_policy if budget_policy is not None else BudgetPolicy.from_env()
     app = FastAPI(
@@ -160,10 +130,7 @@ def create_app(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
     ) -> None:
         supplied = "" if credentials is None else credentials.credentials
-        workspace_id = None
-        for candidate, credential in credentials_by_workspace.items():
-            if secrets.compare_digest(supplied.encode("utf-8"), credential.encode("utf-8")):
-                workspace_id = candidate
+        workspace_id = authenticator.resolve(supplied)
         if workspace_id is None:
             raise HTTPException(status_code=401, detail="A valid bearer token is required")
         # Ownership comes only from trusted server credential configuration.

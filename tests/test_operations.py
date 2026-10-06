@@ -98,3 +98,24 @@ def test_budget_alias_preserves_usage_and_exact_checkpoint(database_url, capsys,
         assert require_row(conn.execute("SELECT state FROM discovery_jobs WHERE id=%s", (done,)))[0] == "done"
         assert require_row(conn.execute("SELECT cursor FROM collection_checkpoints WHERE job_id=%s", (blocked,)))[0] == checkpoint
         assert require_row(conn.execute("SELECT COUNT(*) FROM fetch_logs"))[0] == 0
+
+
+def test_workspace_admin_alias_provisions_and_revokes_shared_access(database_url, tmp_path, capsys) -> None:
+    from chess_crawl.storage.workspace_access import authenticate_token
+    policy = tmp_path / "workspace-policy.json"
+    policy.write_text(json.dumps({"workspace_max_games": 10}), encoding="utf-8")
+    base = ["--workspace-id", "alpha", "--database-url", database_url]
+    assert operations.main(["workspaces", "provision", *base, "--policy-file", str(policy)]) == 0
+    issued = json.loads(capsys.readouterr().out)
+    token = issued["token"]
+    credential_id = issued["credential_id"]
+    with connection(database_url) as conn:
+        assert authenticate_token(conn, token) == "alpha"
+    assert operations.main(["workspaces", "show", *base]) == 0
+    shown = capsys.readouterr().out
+    assert token not in shown
+    assert json.loads(shown)["policy"]["policy"]["workspace_max_games"] == 10
+    assert operations.main(["workspaces", "revoke", *base, "--credential-id", credential_id]) == 0
+    assert token not in capsys.readouterr().out
+    with connection(database_url) as conn:
+        assert authenticate_token(conn, token) is None
